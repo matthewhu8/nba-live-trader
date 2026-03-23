@@ -1,0 +1,243 @@
+{
+  "precision_recall": {
+    "aucpr": 0.0848,
+    "baseline_aucpr": 0.0762,
+    "threshold_table": [
+      {
+        "threshold": 0.08,
+        "n_signals": 15733,
+        "precision": 0.0868,
+        "recall": 0.5735,
+        "lift": 1.14
+      },
+      {
+        "threshold": 0.1,
+        "n_signals": 6926,
+        "precision": 0.085,
+        "recall": 0.2475,
+        "lift": 1.12
+      },
+      {
+        "threshold": 0.12,
+        "n_signals": 2669,
+        "precision": 0.0877,
+        "recall": 0.0983,
+        "lift": 1.15
+      },
+      {
+        "threshold": 0.15,
+        "n_signals": 754,
+        "precision": 0.0902,
+        "recall": 0.0286,
+        "lift": 1.18
+      },
+      {
+        "threshold": 0.18,
+        "n_signals": 267,
+        "precision": 0.0861,
+        "recall": 0.0097,
+        "lift": 1.13
+      },
+      {
+        "threshold": 0.2,
+        "n_signals": 149,
+        "precision": 0.0738,
+        "recall": 0.0046,
+        "lift": 0.97
+      },
+      {
+        "threshold": 0.25,
+        "n_signals": 50,
+        "precision": 0.06,
+        "recall": 0.0013,
+        "lift": 0.79
+      },
+      {
+        "threshold": 0.3,
+        "n_signals": 11,
+        "precision": 0.0,
+        "recall": 0.0,
+        "lift": 0.0
+      }
+    ]
+  },
+  "calibration": {
+    "mace": 0.0151,
+    "bins": [
+      {
+        "predicted_prob": 0.0186,
+        "actual_freq": 0.0208,
+        "ratio": 1.12
+      },
+      {
+        "predicted_prob": 0.0511,
+        "actual_freq": 0.0734,
+        "ratio": 1.44
+      },
+      {
+        "predicted_prob": 0.0629,
+        "actual_freq": 0.0772,
+        "ratio": 1.23
+      },
+      {
+        "predicted_prob": 0.0708,
+        "actual_freq": 0.0737,
+        "ratio": 1.04
+      },
+      {
+        "predicted_prob": 0.0773,
+        "actual_freq": 0.082,
+        "ratio": 1.06
+      },
+      {
+        "predicted_prob": 0.0834,
+        "actual_freq": 0.0926,
+        "ratio": 1.11
+      },
+      {
+        "predicted_prob": 0.0897,
+        "actual_freq": 0.0849,
+        "ratio": 0.95
+      },
+      {
+        "predicted_prob": 0.0975,
+        "actual_freq": 0.0919,
+        "ratio": 0.94
+      },
+      {
+        "predicted_prob": 0.1086,
+        "actual_freq": 0.0833,
+        "ratio": 0.77
+      },
+      {
+        "predicted_prob": 0.142,
+        "actual_freq": 0.0826,
+        "ratio": 0.58
+      }
+    ]
+  },
+  "context_breakdown": {
+    "by_quarter": {
+      "Q1": {
+        "n_signals": 352,
+        "precision": 0.1023,
+        "lift": 1.35
+      },
+      "Q2": {
+        "n_signals": 183,
+        "precision": 0.0874,
+        "lift": 1.15
+      },
+      "Q3": {
+        "n_signals": 149,
+        "precision": 0.0671,
+        "lift": 0.88
+      },
+      "Q4": {
+        "n_signals": 70,
+        "precision": 0.0857,
+        "lift": 1.13
+      },
+      "Q5": {
+        "n_signals": 0,
+        "precision": null,
+        "lift": null
+      }
+    },
+    "by_score_diff": {
+      "close (\u00b15)": {
+        "n_signals": 248,
+        "precision": 0.1048,
+        "lift": 1.38
+      },
+      "medium (6-12)": {
+        "n_signals": 343,
+        "precision": 0.0875,
+        "lift": 1.15
+      },
+      "large (13-20)": {
+        "n_signals": 123,
+        "precision": 0.0813,
+        "lift": 1.07
+      },
+      "blowout (>20)": {
+        "n_signals": 40,
+        "precision": 0.05,
+        "lift": 0.66
+      }
+    },
+    "by_run_length": {
+      "short (1-3)": {
+        "n_signals": 712,
+        "precision": 0.0871,
+        "lift": 1.15
+      },
+      "medium (4-6)": {
+        "n_signals": 41,
+        "precision": 0.1463,
+        "lift": 1.93
+      },
+      "long (7+": {
+        "n_signals": 0,
+        "precision": null,
+        "lift": null
+      }
+    },
+    "by_sustainability": {
+      "home_sustainable": {
+        "n_signals": 658,
+        "precision": 0.0897,
+        "lift": 1.18
+      },
+      "home_unsustainable": {
+        "n_signals": 96,
+        "precision": 0.0938,
+        "lift": 1.23
+      }
+    },
+    "by_lineup_delta": {
+      "small (0-3)": {
+        "n_signals": 278,
+        "precision": 0.0504,
+        "lift": 0.66
+      },
+      "medium (3-7)": {
+        "n_signals": 166,
+        "precision": 0.1265,
+        "lift": 1.66
+      },
+      "large (7+": {
+        "n_signals": 0,
+        "precision": null,
+        "lift": null
+      }
+    },
+    "close_games_by_quarter": {
+      "Q1": {
+        "n_signals": 182,
+        "precision": 0.1044,
+        "lift": 1.37
+      },
+      "Q2": {
+        "n_signals": 31,
+        "precision": 0.129,
+        "lift": 1.7
+      },
+      "Q3": {
+        "n_signals": 22,
+        "precision": 0.0909,
+        "lift": 1.2
+      },
+      "Q4": {
+        "n_signals": 13,
+        "precision": 0.0769,
+        "lift": 1.01
+      },
+      "Q5": {
+        "n_signals": 0,
+        "precision": null,
+        "lift": null
+      }
+    }
+  }
+}

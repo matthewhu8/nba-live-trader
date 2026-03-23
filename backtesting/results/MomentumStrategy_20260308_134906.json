@@ -1,0 +1,160 @@
+{
+  "strategy_name": "MomentumStrategy",
+  "timestamp": "2026-03-08T13:49:06.535381",
+  "overall": {
+    "num_trades": 1110,
+    "gross_pnl": -3409.2,
+    "net_pnl": -3569.0975,
+    "total_fees": 159.8975,
+    "fee_drag_pct": -4.6901765810160745,
+    "win_rate": 0.04054054054054054,
+    "sharpe_ratio": -62.209717584961666,
+    "max_drawdown": 3565.1752499999884,
+    "avg_hold_possessions": 0.527027027027027
+  },
+  "by_quarter": [
+    {
+      "label": "Q1",
+      "num_trades": 156,
+      "win_rate": 0.07692307692307693,
+      "net_pnl": -374.64275,
+      "avg_hold": 0.5833333333333334
+    },
+    {
+      "label": "Q2",
+      "num_trades": 334,
+      "win_rate": 0.038922155688622756,
+      "net_pnl": -1022.7785,
+      "avg_hold": 0.5089820359281437
+    },
+    {
+      "label": "Q3",
+      "num_trades": 326,
+      "win_rate": 0.03680981595092025,
+      "net_pnl": -1167.7145,
+      "avg_hold": 0.5613496932515337
+    },
+    {
+      "label": "Q4",
+      "num_trades": 280,
+      "win_rate": 0.025,
+      "net_pnl": -954.7882500000001,
+      "avg_hold": 0.48214285714285715
+    }
+  ],
+  "by_score_diff": [
+    {
+      "label": "\u00b10-5",
+      "num_trades": 470,
+      "win_rate": 0.0574468085106383,
+      "net_pnl": -1168.563,
+      "avg_hold": 0.6404255319148936
+    },
+    {
+      "label": "\u00b16-12",
+      "num_trades": 428,
+      "win_rate": 0.028037383177570093,
+      "net_pnl": -1414.28,
+      "avg_hold": 0.5023364485981309
+    },
+    {
+      "label": "\u00b113-20",
+      "num_trades": 177,
+      "win_rate": 0.022598870056497175,
+      "net_pnl": -837.52425,
+      "avg_hold": 0.3728813559322034
+    },
+    {
+      "label": "blowout",
+      "num_trades": 35,
+      "win_rate": 0.05714285714285714,
+      "net_pnl": -148.73025,
+      "avg_hold": 0.08571428571428572
+    }
+  ],
+  "by_lineup_delta": [
+    {
+      "label": "delta_0-3",
+      "num_trades": 745,
+      "win_rate": 0.040268456375838924,
+      "net_pnl": -2424.061,
+      "avg_hold": 0.5140939597315436
+    },
+    {
+      "label": "delta_3-7",
+      "num_trades": 158,
+      "win_rate": 0.03164556962025317,
+      "net_pnl": -467.594,
+      "avg_hold": 0.6075949367088608
+    },
+    {
+      "label": "delta_7+",
+      "num_trades": 207,
+      "win_rate": 0.04830917874396135,
+      "net_pnl": -677.4425,
+      "avg_hold": 0.5120772946859904
+    }
+  ],
+  "by_run_length": [
+    {
+      "label": "run_1-3",
+      "num_trades": 730,
+      "win_rate": 0.03424657534246575,
+      "net_pnl": -2316.27875,
+      "avg_hold": 0.4232876712328767
+    },
+    {
+      "label": "run_4-6",
+      "num_trades": 220,
+      "win_rate": 0.05454545454545454,
+      "net_pnl": -704.10675,
+      "avg_hold": 0.9090909090909091
+    },
+    {
+      "label": "run_7+",
+      "num_trades": 160,
+      "win_rate": 0.05,
+      "net_pnl": -548.712,
+      "avg_hold": 0.475
+    }
+  ],
+  "by_sustainability": [
+    {
+      "label": "sustainable",
+      "num_trades": 1028,
+      "win_rate": 0.038910505836575876,
+      "net_pnl": -3326.561,
+      "avg_hold": 0.5330739299610895
+    },
+    {
+      "label": "unsustainable",
+      "num_trades": 82,
+      "win_rate": 0.06097560975609756,
+      "net_pnl": -242.5365,
+      "avg_hold": 0.45121951219512196
+    }
+  ],
+  "by_exit_reason": [
+    {
+      "label": "blowout_or_garbage",
+      "num_trades": 37,
+      "win_rate": 0.02702702702702703,
+      "net_pnl": -178.57475,
+      "avg_hold": 0.08108108108108109
+    },
+    {
+      "label": "game_end",
+      "num_trades": 2,
+      "win_rate": 0.0,
+      "net_pnl": -2.3080000000000003,
+      "avg_hold": 1.0
+    },
+    {
+      "label": "run_ended",
+      "num_trades": 1071,
+      "win_rate": 0.04108309990662932,
+      "net_pnl": -3388.21475,
+      "avg_hold": 0.5415499533146592
+    }
+  ]
+}
