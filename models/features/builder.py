@@ -136,6 +136,12 @@ FEATURE_SCHEMA = pa.schema([
     pa.field("home_full_timeouts_remaining",        pa.int32()),
     pa.field("away_full_timeouts_remaining",        pa.int32()),
 
+    # In-game star stats
+    pa.field("home_star_points_this_game", pa.int32()),
+    pa.field("away_star_points_this_game", pa.int32()),
+    pa.field("home_star_foul_count",       pa.int32()),
+    pa.field("away_star_foul_count",       pa.int32()),
+
     # Player APM features
     pa.field("home_best_player_apm",       pa.float32()),
     pa.field("away_best_player_apm",       pa.float32()),
@@ -182,13 +188,17 @@ def process_game(
     df = poss_df.sort_values("possession_id").reset_index(drop=True)
 
     # Lineup features (uses pre-computed ratings — no lookahead)
-    df = add_lineup_features(df, lineup_ratings, game_id, player_ratings=player_ratings)
+    df, lineup_player_map = add_lineup_features(df, lineup_ratings, game_id, player_ratings=player_ratings)
 
     # Momentum features (backward-looking rolling windows)
     df = add_momentum_features(df)
 
-    # Context features (score state, foul counts, flags, timeout features)
-    df = add_context_features(df, foul_events, games, game_id, timeout_events=timeout_events)
+    # Context features (score state, foul counts, flags, timeout features, in-game star stats)
+    df = add_context_features(
+        df, foul_events, games, game_id,
+        timeout_events=timeout_events,
+        lineup_player_map=lineup_player_map,
+    )
 
     # Target variables (forward-looking — for training only)
     df = add_targets(df)

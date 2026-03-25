@@ -35,7 +35,7 @@ def add_lineup_features(
     lineup_ratings: pd.DataFrame,
     game_id: str,
     player_ratings: pd.DataFrame | None = None,
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, dict[str, list[int]]]:
     """
     Join lineup net ratings onto possessions and compute derived features.
 
@@ -87,13 +87,19 @@ def add_lineup_features(
 
     # Restrict to lineups that actually appear in the game (avoids iterating 22K rows).
     active_lineup_ids = set(poss_df["home_lineup_id"].tolist() + poss_df["away_lineup_id"].tolist())
+    active_ratings = game_ratings[game_ratings["lineup_id"].isin(active_lineup_ids)]
+
+    # Build lineup_id → [player_ids] map — used by star features and APM features.
+    # Built whenever player_ids column is available, regardless of player_ratings.
+    lineup_players: dict[str, list[int]] = {}
     if "player_ids" in game_ratings.columns:
-        active_ratings = game_ratings[game_ratings["lineup_id"].isin(active_lineup_ids)]
-        star_map = _build_lineup_star_map(active_ratings)
+        for _, row in active_ratings.drop_duplicates("lineup_id").iterrows():
+            lineup_players[row["lineup_id"]] = _parse_player_ids(row["player_ids"])
+        star_map = {lid: any(pid in STAR_PLAYERS for pid in pids)
+                    for lid, pids in lineup_players.items()}
         poss_df["home_star_on_court"] = poss_df["home_lineup_id"].map(star_map).fillna(False)
         poss_df["away_star_on_court"] = poss_df["away_lineup_id"].map(star_map).fillna(False)
     else:
-        active_ratings = game_ratings[game_ratings["lineup_id"].isin(active_lineup_ids)]
         poss_df["home_star_on_court"] = False
         poss_df["away_star_on_court"] = False
 
@@ -111,11 +117,7 @@ def add_lineup_features(
             game_pr.set_index("player_id")["adjusted_plus_minus"].to_dict()
         )
 
-        # Build lineup_id → [player_ids] map for active lineups only (~20-50 per game)
-        lineup_players: dict[str, list[int]] = {}
-        for _, row in active_ratings.drop_duplicates("lineup_id").iterrows():
-            lineup_players[row["lineup_id"]] = _parse_player_ids(row["player_ids"])
-
+        # lineup_players already built above (in star_map block) — reuse it.
         # Collect all players who appeared in any lineup in this game (roster proxy)
         all_players_in_game: set[int] = set()
         for pids in lineup_players.values():
@@ -164,4 +166,4 @@ def add_lineup_features(
         ]:
             poss_df[col] = 0.0
 
-    return poss_df
+    return poss_df, lineup_players
