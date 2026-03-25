@@ -6,7 +6,7 @@ bonus state, score×time interactions, and timeout signals.
 import numpy as np
 import pandas as pd
 
-from models.features.star_players import STAR_PLAYERS
+from models.features.star_players import STAR_PLAYERS, TIER_1
 
 # NBA teams start each game with 4 full timeouts (6 total including 2 short/20-sec)
 _FULL_TIMEOUTS_PER_GAME = 4
@@ -56,12 +56,88 @@ def _compute_b2b_flags(games: pd.DataFrame) -> dict[str, tuple[bool, bool]]:
     return result
 
 
+def _star_foul_count_for_lineup(
+    lineup_id: str,
+    lineup_player_map: dict[str, list[int]],
+    foul_counts: dict[int, int],
+) -> int:
+    """Return the foul count for the highest-tier star in this lineup (Tier 1 first, then Tier 2)."""
+    pids = lineup_player_map.get(lineup_id, [])
+    for pid in pids:
+        if TIER_1.get(pid) is not None:
+            return foul_counts.get(pid, 0)
+    for pid in pids:
+        if STAR_PLAYERS.get(pid) == 2:
+            return foul_counts.get(pid, 0)
+    return 0
+
+
+def add_ingame_star_stats(
+    poss_df: pd.DataFrame,
+    lineup_player_map: dict[str, list[int]],
+    h_counts_per_poss: list[dict[int, int]],
+    a_counts_per_poss: list[dict[int, int]],
+) -> pd.DataFrame:
+    """
+    Adds in-game star performance columns. All backward-looking (state before this possession).
+
+    Columns added:
+      home_star_points_this_game  int32 — cumulative points by on-court home Tier 1 star up to this possession
+      away_star_points_this_game  int32 — same for away
+      home_star_foul_count        int32 — fouls by home's highest-tier star currently on court
+      away_star_foul_count        int32 — same for away
+    """
+    n = len(poss_df)
+    player_ids  = poss_df["player_id"].values
+    team_scored = poss_df["team_scored"].values
+    pts_arr     = poss_df["points"].values
+    home_lid    = poss_df["home_lineup_id"].values
+    away_lid    = poss_df["away_lineup_id"].values
+
+    home_star_pts: list[int] = [0] * n
+    away_star_pts: list[int] = [0] * n
+    home_star_fouls: list[int] = [0] * n
+    away_star_fouls: list[int] = [0] * n
+
+    h_running = 0
+    a_running = 0
+
+    for i in range(n):
+        # Write backward-looking state (before this possession)
+        home_star_pts[i]   = h_running
+        away_star_pts[i]   = a_running
+        home_star_fouls[i] = _star_foul_count_for_lineup(
+            str(home_lid[i]), lineup_player_map, h_counts_per_poss[i]
+        )
+        away_star_fouls[i] = _star_foul_count_for_lineup(
+            str(away_lid[i]), lineup_player_map, a_counts_per_poss[i]
+        )
+
+        # Update running star points with this possession's scorer
+        pts = int(pts_arr[i])
+        if pts > 0:
+            pid_raw = player_ids[i]
+            pid = int(pid_raw) if pid_raw is not None and not (isinstance(pid_raw, float) and pid_raw != pid_raw) else -1
+            if pid in STAR_PLAYERS:
+                if team_scored[i] == "home":
+                    h_running += pts
+                elif team_scored[i] == "away":
+                    a_running += pts
+
+    poss_df["home_star_points_this_game"] = home_star_pts
+    poss_df["away_star_points_this_game"] = away_star_pts
+    poss_df["home_star_foul_count"]       = home_star_fouls
+    poss_df["away_star_foul_count"]       = away_star_fouls
+    return poss_df
+
+
 def add_context_features(
     poss_df: pd.DataFrame,
     foul_events: pd.DataFrame,
     games: pd.DataFrame,
     game_id: str,
     timeout_events: pd.DataFrame | None = None,
+    lineup_player_map: dict[str, list[int]] | None = None,
 ) -> pd.DataFrame:
     """
     Adds game-context columns to a single game's possession DataFrame.
@@ -147,10 +223,15 @@ def add_context_features(
         away_trouble_pid: list[int] = []
         home_star_trouble: list[bool] = []
         away_star_trouble: list[bool] = []
+        # Stored for add_ingame_star_stats (star foul count needs per-player dict)
+        h_counts_per_poss: list[dict[int, int]] = []
+        a_counts_per_poss: list[dict[int, int]] = []
 
         for period, clock in poss_clocks:
             h_counts = _player_foul_counts_at(home_fouls, period, clock)
             a_counts = _player_foul_counts_at(away_fouls, period, clock)
+            h_counts_per_poss.append(h_counts)
+            a_counts_per_poss.append(a_counts)
 
             # Home
             h_max = max(h_counts.values(), default=0)
@@ -188,6 +269,8 @@ def add_context_features(
         away_trouble_pid = [-1] * n
         home_star_trouble = [False] * n
         away_star_trouble = [False] * n
+        h_counts_per_poss = [{}] * n
+        a_counts_per_poss = [{}] * n
 
     df["home_key_foul_count"]      = home_foul_counts
     df["away_key_foul_count"]      = away_foul_counts
@@ -374,5 +457,14 @@ def add_context_features(
         df["away_full_timeouts_remaining"]        = _FULL_TIMEOUTS_PER_GAME
 
     df["possessions_since_last_timeout"] = poss_since_to if not game_timeouts.empty else [999] * len(df)
+
+    # ── In-game star stats ────────────────────────────────────────────────────
+    if lineup_player_map is not None:
+        df = add_ingame_star_stats(df, lineup_player_map, h_counts_per_poss, a_counts_per_poss)
+    else:
+        df["home_star_points_this_game"] = 0
+        df["away_star_points_this_game"] = 0
+        df["home_star_foul_count"]       = 0
+        df["away_star_foul_count"]       = 0
 
     return df

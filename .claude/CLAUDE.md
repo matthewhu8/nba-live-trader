@@ -636,6 +636,105 @@ data permanently lost. This is the first thing to build and the first thing to d
 
 ---
 
+## ML Model Stack
+
+Three distinct modeling layers. Don't conflate them.
+
+### Layer 1 — Run Predictor (XGBoost)
+- Input: FeatureRow (88 columns, possession-level)
+- Output: calibrated P(scoring run in next 10 possessions)
+- Current: AUCPR 0.0856 vs baseline 0.0772 (~10% lift, weak but real)
+- **Use isotonic regression calibration** — raw XGBoost scores cluster near base rate (7.6%) and are not trustworthy as probabilities without calibration. This matters for trading.
+- Do NOT use `scale_pos_weight` — shifts probs toward 0.5, destroying calibration
+- Do NOT use focal loss — harder to calibrate post-hoc
+- Optimize decision threshold against Sharpe on simulator, not against accuracy or F1
+- Stay with XGBoost. Trees beat deep learning on tabular data under 1M rows. LSTMs/Transformers add nothing — our features already encode temporal context (momentum windows, run state).
+- Retrain on rolling 60-game window every ~10 games during live season to handle concept drift
+
+### Layer 2 — Kalshi Price Movement Model (XGBoost Regressor)
+- Input: run_prob + current Kalshi bid/ask + game context
+- Output: expected Δ(yes_bid) over next 3 minutes
+- Build this once we have 4+ weeks of real tick data (recorder now fixed)
+- The synthetic price model's parameters (lag, overreaction, mean reversion) should be fit empirically to real tick data — that fitting is a milestone
+
+### Layer 3 — Entry/Exit Agent
+- **Start with contextual bandit (Thompson Sampling)** — treats each possession decision as independent. Trains in 100-200 games. Easy to debug. Good fit for thin, illiquid markets.
+- State: run_prob, yes_bid, quarter, score_diff, lineup_delta, position_state
+- Actions: buy_yes / buy_no / exit / wait
+- Reward: realized PnL after maker fees
+- **Upgrade to PPO** only if bandit plateaus — PPO can learn multi-step planning ("hold through noise") but needs 10x more training data and is much harder to debug
+- Never use: DQN (sparse rewards cause Q-value instability), SAC (continuous action space mismatch)
+- If going full offline RL: use IQL (simple, stable, trains on simulator rollouts)
+
+---
+
+## Live System — Information Flow
+
+Two phases: pre-game (30 min before tip) and in-game (possession by possession).
+
+### Pre-Game (~30 min before tip)
+Runs once. No trades happen here.
+```
+Projected lineups + historical feature store
+    → pregame_analyzer.py
+    → game_context.json (loaded into memory at tip-off)
+```
+Contains: lineup net ratings, player APM lookup, coaching tendencies, watch flags, strategy priors.
+Compute everything slow-changing before the game starts. Nothing in game_context.json is recomputed mid-game.
+
+### In-Game Loop
+```
+Sportradar WebSocket (raw events, ~15-20s latency)
+    → Event Parser (possession parser — see critical note below)
+    → Feature Computer (merges live state + game_context.json)
+    → Run Predictor (XGBoost) → P(run)
+    → Price Movement Model → expected Δ(yes_bid)
+    → RL Agent → BUY YES / BUY NO / EXIT / WAIT
+    → Risk Module (position_limits.py — always)
+    → Execution Layer (kalshi_client.py)
+```
+
+### Latency Reality
+~15-25 seconds from real-world event to order placement. Still faster than retail because:
+- Retail doesn't notice lineup changes
+- Retail reacts to what they saw on TV, not what's coming
+- Retail doesn't have a model
+This is the core of our edge. Don't try to compete on speed.
+
+---
+
+## Live Feature Data — Availability Audit
+
+All 88 features are available in real-time. Nothing requires future data.
+Two engineering problems exist:
+
+### 1. Shot Coordinate System Mismatch (Low Risk)
+- nba_api historical data: shot_x/shot_y in NBA's court coordinate system
+- Sportradar live data: different coordinate system
+- Fix: write a one-time coordinate converter calibrated against a game where both sources exist
+- Affected features: `shot_distance`, and everything derived from it (xPPP, sustainability, run_paint_pct)
+- These features matter for shot quality signals — don't skip the calibration
+
+### 2. Possession Parser (HIGH RISK — most critical piece of live system)
+- Sportradar sends individual events (fouls, shots, free throws, etc.)
+- Our training data is one row per possession
+- The live feature computer needs a state machine that groups events into possessions using the **exact same boundary definition as nba_api**
+- If the parser diverges from training, features will be systematically wrong even though raw data is correct
+- **Validation requirement**: run the parser on a historical game and compare output possession-by-possession against nba_api's output. Must match exactly before going live.
+
+### Feature availability by category:
+| Category | Status |
+|----------|--------|
+| Score, clock, game state | Direct from feed |
+| Momentum/run features | Computed (accumulated from possession history) |
+| Shot quality (xPPP, sustainability) | Computed — requires shot_distance coord conversion |
+| Foul/bonus/timeout features | From foul + timeout event streams |
+| Lineup/APM features | Pre-game loaded (game_context.json) + live lineup tracking |
+| Foul trouble flags | Live foul tracking + pre-game key player list |
+| back_to_back, schedule context | Pre-game (never changes mid-game) |
+
+---
+
 ## Key Reminders for Claude
 - The end goal is live profitable trading. Every decision should serve that.
 - Kalshi recorder is the highest priority — it is time-sensitive, data is lost forever if not running

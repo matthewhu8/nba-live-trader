@@ -52,7 +52,8 @@ TIER_1: dict[int, str] = {
 
     # Franchise stars — limited by injury in 2025-26 but lineup-altering when healthy
     203954:  "Joel Embiid",              # PHI — 2x MVP runner-up; 30%+ USG when healthy
-    203076:  "Anthony Davis",            # DAL — traded from LAL; elite two-way big, 27%+ USG
+    203076:  "Anthony Davis",            # WAS — traded from DAL mid-season; elite two-way big, 27%+ USG
+    1628369: "Jayson Tatum",             # BOS — franchise star; returning from Achilles ~Mar 2026; lineup-altering when healthy
 }
 
 # ---------------------------------------------------------------------------
@@ -72,7 +73,7 @@ TIER_2: dict[int, str] = {
     1631096: "Chet Holmgren",            # OKC — All-Star reserve; elite rim protector + shooter
 
     # High-USG primary options — lineup anchors whose foul trouble signals market moves
-    201935:  "James Harden",             # LAC — 31.3% USG, 3.8 BPM; primary playmaker
+    201935:  "James Harden",             # CLE — traded from LAC (Garland swap); 31.3% USG, 3.8 BPM; primary playmaker
     1630578: "Alperen Şengün",           # HOU — 27.2% USG, 3.9 BPM, 2.7 VORP; dominant center
     1629008: "Michael Porter Jr.",       # BKN — 30.3% USG; primary scorer
     1641718: "Keyonte George",           # UTA — 28.0% USG; franchise primary option
@@ -100,6 +101,9 @@ TIER_2: dict[int, str] = {
     1627734: "Domantas Sabonis",         # SAC — triple-double machine; lineup anchor
     1629014: "Anfernee Simons",          # CHI — primary scorer (via POR→BOS→CHI)
     1629632: "Coby White",              # CHI — primary scorer; HoopsHype preseason top-65
+    1629027: "Trae Young",              # WAS — traded from ATL; 4x All-Star, 28%+ USG; primary playmaker
+    1630532: "Franz Wagner",            # ORL — primary star; All-Star trajectory; 925 poss, 1587 pts in data
+    1628991: "Jaren Jackson Jr.",       # UTA — traded from MEM; DPOY candidate; elite rim protector
 }
 
 # Combined lookup: player_id → tier (1 or 2)
