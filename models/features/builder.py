@@ -60,7 +60,7 @@ FEATURE_SCHEMA = pa.schema([
     pa.field("team_scored",                pa.string()),
     pa.field("points",                     pa.int32()),
 
-    # Lineup state
+    # Lineup state (googoogagag)
     pa.field("home_lineup_id",             pa.string()),
     pa.field("away_lineup_id",             pa.string()),
     pa.field("home_lineup_net_rating",     pa.float32()),
@@ -93,10 +93,8 @@ FEATURE_SCHEMA = pa.schema([
     pa.field("away_max_player_fouls",      pa.int32()),
     pa.field("home_player_in_trouble",     pa.bool_()),
     pa.field("away_player_in_trouble",     pa.bool_()),
-    pa.field("home_trouble_player_id",     pa.int64()),
-    pa.field("away_trouble_player_id",     pa.int64()),
-    pa.field("home_star_in_foul_trouble",  pa.bool_()),
-    pa.field("away_star_in_foul_trouble",  pa.bool_()),
+    pa.field("home_trouble_star_tier",     pa.int32()),
+    pa.field("away_trouble_star_tier",     pa.int32()),
     pa.field("home_star_on_court",         pa.bool_()),
     pa.field("away_star_on_court",         pa.bool_()),
     pa.field("home_back_to_back",          pa.bool_()),
@@ -180,6 +178,7 @@ def process_game(
     lineup_ratings: pd.DataFrame,
     player_ratings: pd.DataFrame | None = None,
     timeout_events: pd.DataFrame | None = None,
+    player_tier_map: dict[int, int] | None = None,
 ) -> pd.DataFrame:
     """
     Run all feature modules on a single game's possessions.
@@ -198,6 +197,7 @@ def process_game(
         df, foul_events, games, game_id,
         timeout_events=timeout_events,
         lineup_player_map=lineup_player_map,
+        player_tier_map=player_tier_map,
     )
 
     # Target variables (forward-looking — for training only)
@@ -217,6 +217,7 @@ def build_feature_store(
     lineup_ratings: pd.DataFrame,
     player_ratings: pd.DataFrame | None = None,
     timeout_events: pd.DataFrame | None = None,
+    player_tier_map: dict[int, int] | None = None,
 ) -> pd.DataFrame:
     """Process all games and return the full feature store DataFrame."""
     games_sorted = games.sort_values("game_date")["game_id"].tolist()
@@ -248,6 +249,7 @@ def build_feature_store(
                 game_id, game_poss, foul_events, games, game_lineups,
                 player_ratings=game_players,
                 timeout_events=timeout_events,
+                player_tier_map=player_tier_map,
             )
             all_rows.append(feature_df)
         except Exception as exc:
@@ -314,11 +316,27 @@ def main() -> None:
         len(possessions), len(games), len(foul_events), len(lineup_ratings),
     )
 
+    import duckdb
+    import os
+    db_path = "kalshi_trading.duckdb"
+    player_tier_map = {}
+    if os.path.exists(db_path):
+        con = duckdb.connect(db_path, read_only=True)
+        try:
+            tiers = con.execute("SELECT player_id, star_tier FROM main.dim_players WHERE star_tier IS NOT NULL").fetchall()
+            player_tier_map = {int(p): int(t) for p, t in tiers}
+            logger.info("Loaded player tier map with %d entries", len(player_tier_map))
+        except Exception as e:
+            logger.warning("Could not load dim_players from %s: %s", db_path, e)
+        finally:
+            con.close()
+
     logger.info("Building feature store...")
     feature_df = build_feature_store(
         possessions, games, foul_events, lineup_ratings,
         player_ratings=player_ratings,
         timeout_events=timeout_events,
+        player_tier_map=player_tier_map,
     )
 
     logger.info("Feature store: %d rows, %d columns", len(feature_df), len(feature_df.columns))
