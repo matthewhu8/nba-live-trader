@@ -312,9 +312,11 @@ def compute_rolling_ratings(
     games_sorted = games.sort_values("game_date").reset_index(drop=True)
     decay        = np.log(2) / DECAY_HALFLIFE_GAMES
 
-    # Build player_name lookup from possessions
+    # Build player_name lookup from possessions (skip rows with no scorer)
     player_names: dict[int, str] = {}
     for _, row in possessions.iterrows():
+        if pd.isna(row["player_id"]):
+            continue
         pid  = int(row["player_id"])
         name = str(row["player_name"])
         if pid and name and pid not in player_names:
