@@ -138,6 +138,7 @@ def add_context_features(
     game_id: str,
     timeout_events: pd.DataFrame | None = None,
     lineup_player_map: dict[str, list[int]] | None = None,
+    player_tier_map: dict[int, int] | None = None,
 ) -> pd.DataFrame:
     """
     Adds game-context columns to a single game's possession DataFrame.
@@ -154,10 +155,8 @@ def add_context_features(
       away_max_player_fouls             int
       home_player_in_trouble            bool
       away_player_in_trouble            bool
-      home_trouble_player_id            int64
-      away_trouble_player_id            int64
-      home_star_in_foul_trouble         bool
-      away_star_in_foul_trouble         bool
+      home_trouble_star_tier            int   — 1-5 tier of troubled player (6 if non-star, 0 if none)
+      away_trouble_star_tier            int
       home_back_to_back                 bool
       away_back_to_back                 bool
       home_in_bonus                     bool  — ≥5 team fouls this quarter
@@ -219,10 +218,8 @@ def add_context_features(
         away_max_fouls: list[int] = []
         home_in_trouble: list[bool] = []
         away_in_trouble: list[bool] = []
-        home_trouble_pid: list[int] = []
-        away_trouble_pid: list[int] = []
-        home_star_trouble: list[bool] = []
-        away_star_trouble: list[bool] = []
+        home_trouble_tier: list[int] = []
+        away_trouble_tier: list[int] = []
         # Stored for add_ingame_star_stats (star foul count needs per-player dict)
         h_counts_per_poss: list[dict[int, int]] = []
         a_counts_per_poss: list[dict[int, int]] = []
@@ -242,8 +239,11 @@ def add_context_features(
             )
             home_max_fouls.append(h_max)
             home_in_trouble.append(h_trouble_pid != -1)
-            home_trouble_pid.append(h_trouble_pid)
-            home_star_trouble.append(h_trouble_pid != -1 and h_trouble_pid in STAR_PLAYERS)
+            
+            h_tier = 0
+            if h_trouble_pid != -1:
+                h_tier = player_tier_map.get(h_trouble_pid, 6) if player_tier_map else 6
+            home_trouble_tier.append(h_tier)
 
             # Away
             a_max = max(a_counts.values(), default=0)
@@ -254,8 +254,11 @@ def add_context_features(
             )
             away_max_fouls.append(a_max)
             away_in_trouble.append(a_trouble_pid != -1)
-            away_trouble_pid.append(a_trouble_pid)
-            away_star_trouble.append(a_trouble_pid != -1 and a_trouble_pid in STAR_PLAYERS)
+
+            a_tier = 0
+            if a_trouble_pid != -1:
+                a_tier = player_tier_map.get(a_trouble_pid, 6) if player_tier_map else 6
+            away_trouble_tier.append(a_tier)
 
     else:
         n = len(df)
@@ -265,10 +268,8 @@ def add_context_features(
         away_max_fouls = [0] * n
         home_in_trouble = [False] * n
         away_in_trouble = [False] * n
-        home_trouble_pid = [-1] * n
-        away_trouble_pid = [-1] * n
-        home_star_trouble = [False] * n
-        away_star_trouble = [False] * n
+        home_trouble_tier = [0] * n
+        away_trouble_tier = [0] * n
         h_counts_per_poss = [{}] * n
         a_counts_per_poss = [{}] * n
 
@@ -278,10 +279,8 @@ def add_context_features(
     df["away_max_player_fouls"]    = away_max_fouls
     df["home_player_in_trouble"]   = home_in_trouble
     df["away_player_in_trouble"]   = away_in_trouble
-    df["home_trouble_player_id"]   = home_trouble_pid
-    df["away_trouble_player_id"]   = away_trouble_pid
-    df["home_star_in_foul_trouble"] = home_star_trouble
-    df["away_star_in_foul_trouble"] = away_star_trouble
+    df["home_trouble_star_tier"]   = home_trouble_tier
+    df["away_trouble_star_tier"]   = away_trouble_tier
 
     # Back-to-back flags — computed once from the full schedule and cached
     # to avoid O(n²) recomputation across all games.
