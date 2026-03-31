@@ -31,7 +31,6 @@ Detect run conditions early
         → Exit position
           → Capture the spread, minus fees
 ```
-
 Sharp sportsbooks (DraftKings, FanDuel, Pinnacle) price the game outcome with
 enormous infrastructure. We don't compete with them on that. We exploit Kalshi's
 slower, retail-driven, emotionally-reactive repricing of micro-events within the game.
