@@ -1,0 +1,14 @@
+.env
+.git
+data/raw/
+data/feature_store/
+logs/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+*.parquet
+models/saved/
+backtesting/results/

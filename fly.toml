@@ -1,0 +1,21 @@
+app            = "kalshi-recorder"
+primary_region = "iad"
+
+[build]
+
+# No HTTP service — pure background worker
+# Fly.io requires at least one service or a process definition to keep the VM alive
+
+[processes]
+  app = "python data/ingestion/recorder_daemon.py"
+
+[deploy]
+  strategy = "immediate"
+
+[[vm]]
+  size   = "shared-cpu-1x"
+  memory = "512mb"
+
+[[groups]]
+  name    = "app"
+  count   = 1  # single machine only — no standby needed for a recorder

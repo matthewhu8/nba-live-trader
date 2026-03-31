@@ -31,7 +31,6 @@ Detect run conditions early
         → Exit position
           → Capture the spread, minus fees
 ```
-
 Sharp sportsbooks (DraftKings, FanDuel, Pinnacle) price the game outcome with
 enormous infrastructure. We don't compete with them on that. We exploit Kalshi's
 slower, retail-driven, emotionally-reactive repricing of micro-events within the game.
@@ -633,6 +632,52 @@ data permanently lost. This is the first thing to build and the first thing to d
 - [ ] Phase 6: Live trading
 
 **Current phase: Phase 1 — build the Kalshi recorder first.**
+
+---
+
+## Common Commands
+
+All commands run from the project root with `source venv/bin/activate` first.
+
+### Data Pipeline
+
+```bash
+# Fetch PBP for games missing from possessions parquet, then update local DuckDB + sync to cloud
+python -m data.ingestion.nba_api_client                        # all missing games
+python -m data.ingestion.nba_api_client --since 2026-03-13     # only games on/after this date
+python -m data.ingestion.nba_api_client --game 0022501039      # single game
+
+# Build/update local DuckDB only
+python -m data.ingestion.duckdb_loader
+
+# Build local DuckDB, then push new rows to MotherDuck (additive — never deletes remote rows)
+python -m data.ingestion.duckdb_loader --sync-motherduck
+
+# Pull new rows from MotherDuck into local DB (additive — never deletes local rows)
+python -m data.ingestion.duckdb_loader --pull-motherduck
+
+# DESTRUCTIVE: replace entire local DB with MotherDuck copy (use for fresh setup or reset)
+python -m data.ingestion.duckdb_loader --pull-motherduck-full
+```
+
+### Sync behavior
+Both `--sync-motherduck` and `--pull-motherduck` are additive merges keyed on each table's
+natural key (e.g. `game_id + event_id` for possession_feed). Running either direction twice
+is safe — the second run sees everything already exists and does nothing. Remote-only rows
+are never deleted by a push; local-only rows are never deleted by a merge pull.
+
+Use `--pull-motherduck-full` only when you want a clean slate (new machine, corrupted local DB).
+
+### Recorder
+
+```bash
+# Record live Kalshi ticks during NBA games (run continuously on game days)
+python data/ingestion/kalshi_recorder.py
+
+# Check today's game schedule + recommended recorder start time
+python data/ingestion/game_schedule.py
+python data/ingestion/game_schedule.py --date 2026-03-25
+```
 
 ---
 

@@ -2,16 +2,17 @@
 XGBoost run predictor.
 
 Trains a binary classifier to predict target_meaningful_run_5:
-whether the home team will have a meaningful scoring run (6+ points)
-in the next 5 possessions.
+whether the home team will have a meaningful scoring run (6+ net points)
+in the next 5 scoring possessions.
 
-For away-run prediction, features are symmetrically swapped before inference
-(same model, flipped perspective).
+Data source: features.possession_flat in local DuckDB (kalshi_trading.duckdb).
+Pull latest with:
+    python -m data.ingestion.duckdb_loader --pull-possession-flat
 
 Train / val / test split — time-based, never random:
-  Train:  Oct 21 – Nov 30, 2025  (~250 games)
-  Val:    Dec 1,  2025 – Jan 12, 2026  (~200 games)
-  Test:   Jan 13 – Mar 5, 2026   (~340 games) — touch once at final eval
+  Train:  Oct 21, 2025 – Jan 31, 2026
+  Val:    Feb 1  – Mar 5, 2026
+  Test:   Mar 6, 2026 – present  ← touch once at final eval only
 
 Usage:
     python models/run_predictor.py
@@ -23,48 +24,52 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import duckdb
 import numpy as np
 import pandas as pd
-import pyarrow.parquet as pq
 from xgboost import XGBClassifier
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from models.features.targets import add_targets
+
 logger = logging.getLogger(__name__)
 
-FEATURE_STORE_PATH = Path("data/feature_store/feature_rows.parquet")
-GAMES_PATH = Path("data/raw/games_202526.parquet")
+DB_PATH         = Path("kalshi_trading.duckdb")
 MODEL_OUTPUT_PATH = Path("models/saved/run_predictor.pkl")
 
-TRAIN_END = pd.Timestamp("2025-11-30")
-VAL_END   = pd.Timestamp("2026-01-12")
-# test: everything after VAL_END
+TRAIN_END = pd.Timestamp("2026-01-31")
+VAL_END   = pd.Timestamp("2026-03-05")
+# Test: everything after VAL_END — do not touch during development
 
-# Backward-looking feature columns only. Targets and identity columns excluded.
 FEATURE_COLS: list[str] = [
-    # Lineup
-    "lineup_net_rating_delta",
-    "home_lineup_net_rating",
-    "away_lineup_net_rating",
-    "home_lineup_sample_size",
-    "away_lineup_sample_size",
-    "home_lineup_just_changed",
-    "away_lineup_just_changed",
+    # Score × time
+    "score_diff",
+    "period",
+    "minutes_into_game",            # derived: (period-1)*12 + elapsed_in_period
+    "trailing_team_urgency",
+    "comeback_probability_proxy",
+    "q4_close_game",
+    "garbage_time_risk",
+    # Shot info
+    "shot_value",
+    "shot_distance",
     # Momentum
     "home_points_last_5_poss",
     "away_points_last_5_poss",
     "home_points_last_10_poss",
     "away_points_last_10_poss",
-    "current_run_team_encoded",   # derived: 1=home, -1=away, 0=none
+    "current_run_team_encoded",     # derived: 1=home, -1=away, 0=none
     "current_run_length",
     "current_run_points",
-    "home_scoring_sustainable",
-    "away_scoring_sustainable",
-    # Shot composition of run
-    "current_run_3pt_count",
     "current_run_3pt_pct",
     "current_run_paint_pct",
-    # xPPP shot quality
+    # Pace
+    "pace_last_10_possessions",
+    "pace_season_baseline",
+    # Shot quality
+    "home_scoring_sustainable",
+    "away_scoring_sustainable",
     "home_xPPP_last_5",
     "away_xPPP_last_5",
     "home_actual_vs_expected_PPP",
@@ -72,77 +77,133 @@ FEATURE_COLS: list[str] = [
     "home_shot_quality_trend",
     "away_shot_quality_trend",
     # Foul state
-    "home_key_foul_count",
-    "away_key_foul_count",
-    "home_in_bonus",
+    "home_team_fouls_q",            # team fouls this quarter (>= 5 = in bonus)
+    "away_team_fouls_q",
+    "home_cum_fouls",               # cumulative team fouls this game
+    "away_cum_fouls",
+    "home_in_bonus",                # derived: home_team_fouls_q >= 5
     "away_in_bonus",
-    "home_fouls_until_bonus",
+    "home_fouls_until_bonus",       # derived: max(0, 5 - home_team_fouls_q)
     "away_fouls_until_bonus",
-    # Score × time
-    "score_diff",
-    "period",
-    "minutes_into_game",
-    "trailing_team_urgency",
-    "q4_close_game",
-    "garbage_time_risk",
-    # Pace
-    "pace_last_10_possessions",
-    "pace_season_baseline",
-    # Fatigue
-    "home_back_to_back",
-    "away_back_to_back",
-    # Shot info
-    "shot_distance",
-    "shot_value",
+    "home_star_in_foul_trouble",
+    "away_star_in_foul_trouble",
+    "home_star_on_court",
+    "away_star_on_court",
+    # Event context at this possession
+    "was_foul",
+    "was_sub",
+    "had_shooting_foul",
+    "had_personal_foul",
+    "home_sub_count",
+    "away_sub_count",
     # Timeout signals
     "possessions_since_last_timeout",
     "home_called_timeout_in_last_3_poss",
     "away_called_timeout_in_last_3_poss",
-    "timeout_on_opponent_run",
-    "home_full_timeouts_remaining",
+    "home_full_timeouts_remaining",  # derived: max(0, 4 - home_timeouts_used)
     "away_full_timeouts_remaining",
-    # Player APM
-    "home_best_player_apm",
-    "away_best_player_apm",
-    "home_worst_player_apm",
-    "away_worst_player_apm",
-    "home_apm_spread",
-    "away_apm_spread",
-    "home_lineup_apm_sum",
-    "away_lineup_apm_sum",
-    "home_off_court_best_apm",
-    "away_off_court_best_apm",
-    "apm_delta",
+    # Lineup signal
+    "home_lineup_net_rating",
+    "away_lineup_net_rating",
+    "lineup_net_rating_delta",        # THE core signal — matchup quality delta
+    "home_lineup_sample_size",        # possessions together (confidence weight)
+    "away_lineup_sample_size",
+    "home_lineup_just_changed",       # substitution just occurred this possession
+    "away_lineup_just_changed",
 ]
 
 TARGET_COL = "target_meaningful_run_5"
 
 
-def _encode_run_team(series: pd.Series) -> pd.Series:
-    """Map current_run_team → numeric: 'home'=1, 'away'=-1, None/other=0."""
-    return series.map({"home": 1, "away": -1}).fillna(0).astype(float)
+def _load_data() -> pd.DataFrame:
+    """
+    Load scoring possessions from features.possession_flat joined with game_date.
+
+    Only scoring possessions (team_scored IS NOT NULL) are loaded — these are the
+    rows where something happened and the target variable is meaningful.
+    Results are sorted by game_id, event_id to guarantee chronological order within games.
+    """
+    conn = duckdb.connect(str(DB_PATH), read_only=True)
+    df = conn.execute("""
+        SELECT pf.*, dg.game_date
+        FROM features.possession_flat pf
+        JOIN main.dim_games dg ON pf.game_id = dg.game_id
+        WHERE pf.points > 0
+        ORDER BY pf.game_id, pf.event_id
+    """).df()
+    conn.close()
+    logger.info("Loaded %d scoring events (points > 0) from possession_flat", len(df))
+    return df
+
+
+def _add_derived_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Compute feature columns derived from possession_flat fields."""
+    out = df.copy()
+
+    # Minutes elapsed since tip-off (game_clock_secs counts DOWN from 720 per period)
+    elapsed_in_period = (720 - out["game_clock_secs"].clip(0, 720)) / 60
+    out["minutes_into_game"] = (out["period"] - 1) * 12 + elapsed_in_period
+
+    # Bonus state: 5+ team fouls in this quarter
+    out["home_in_bonus"] = (out["home_team_fouls_q"] >= 5).astype(int)
+    out["away_in_bonus"] = (out["away_team_fouls_q"] >= 5).astype(int)
+    out["home_fouls_until_bonus"] = (5 - out["home_team_fouls_q"]).clip(lower=0)
+    out["away_fouls_until_bonus"] = (5 - out["away_team_fouls_q"]).clip(lower=0)
+
+    # Remaining timeouts (each team starts with 4 full timeouts)
+    out["home_full_timeouts_remaining"] = (4 - out["home_timeouts_used"]).clip(lower=0)
+    out["away_full_timeouts_remaining"] = (4 - out["away_timeouts_used"]).clip(lower=0)
+
+    # Run team: string → numeric
+    out["current_run_team_encoded"] = (
+        out["current_run_team"].map({"home": 1, "away": -1}).fillna(0)
+    )
+
+    # Star foul trouble: possession_flat stores trouble_star_tier (0–3); derive bool
+    out["home_star_in_foul_trouble"] = (out["home_trouble_star_tier"] > 0).astype(float)
+    out["away_star_in_foul_trouble"] = (out["away_trouble_star_tier"] > 0).astype(float)
+
+    return out
+
+
+def _add_targets(df: pd.DataFrame) -> pd.DataFrame:
+    """Add forward-looking target variables, computed per game in chronological order."""
+    parts = []
+    for _, game_df in df.groupby("game_id", sort=False):
+        parts.append(add_targets(game_df.reset_index(drop=True)))
+    return pd.concat(parts, ignore_index=True)
 
 
 def prepare_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Add derived columns and return a clean numeric feature matrix."""
+    """Return a clean numeric feature matrix aligned to FEATURE_COLS."""
     out = df.copy()
-    out["current_run_team_encoded"] = _encode_run_team(out["current_run_team"])
 
-    # Booleans → int for XGBoost
     bool_cols = [
-        "home_lineup_just_changed", "away_lineup_just_changed",
         "home_scoring_sustainable", "away_scoring_sustainable",
-        "home_back_to_back", "away_back_to_back",
-        "home_in_bonus", "away_in_bonus",
         "q4_close_game",
+        "home_in_bonus", "away_in_bonus",
+        "home_star_in_foul_trouble", "away_star_in_foul_trouble",
+        "home_star_on_court", "away_star_on_court",
+        "was_foul", "was_sub",
+        "had_shooting_foul", "had_personal_foul",
         "home_called_timeout_in_last_3_poss", "away_called_timeout_in_last_3_poss",
-        "timeout_on_opponent_run",
+        "home_lineup_just_changed", "away_lineup_just_changed",
     ]
     for col in bool_cols:
         if col in out.columns:
-            out[col] = out[col].astype(int)
+            out[col] = out[col].astype(float)
 
-    return out[FEATURE_COLS].fillna(0)
+    # Only keep FEATURE_COLS that exist — allows graceful degradation
+    available = [c for c in FEATURE_COLS if c in out.columns]
+    missing = [c for c in FEATURE_COLS if c not in out.columns]
+    if missing:
+        logger.warning("Features missing from data (will be 0): %s", missing)
+
+    result = out[available].copy()
+    for col in missing:
+        result[col] = 0.0
+
+    return result[FEATURE_COLS].fillna(0)
 
 
 def build_away_features(X: pd.DataFrame) -> pd.DataFrame:
@@ -150,27 +211,37 @@ def build_away_features(X: pd.DataFrame) -> pd.DataFrame:
     Flip home/away perspective for predicting away-team runs.
 
     Returns a new DataFrame with home ↔ away swapped so the same
-    model can predict away scoring runs.
+    model can predict away scoring runs without retraining.
     """
     away = X.copy()
 
     swap_pairs = [
-        ("home_lineup_net_rating",    "away_lineup_net_rating"),
-        ("home_lineup_sample_size",   "away_lineup_sample_size"),
-        ("home_lineup_just_changed",  "away_lineup_just_changed"),
-        ("home_points_last_5_poss",   "away_points_last_5_poss"),
-        ("home_points_last_10_poss",  "away_points_last_10_poss"),
-        ("home_scoring_sustainable",  "away_scoring_sustainable"),
-        ("home_key_foul_count",       "away_key_foul_count"),
+        ("home_points_last_5_poss",           "away_points_last_5_poss"),
+        ("home_points_last_10_poss",          "away_points_last_10_poss"),
+        ("home_scoring_sustainable",          "away_scoring_sustainable"),
+        ("home_team_fouls_q",                 "away_team_fouls_q"),
+        ("home_cum_fouls",                    "away_cum_fouls"),
+        ("home_in_bonus",                     "away_in_bonus"),
+        ("home_fouls_until_bonus",            "away_fouls_until_bonus"),
+        ("home_star_in_foul_trouble",         "away_star_in_foul_trouble"),
+        ("home_star_on_court",                "away_star_on_court"),
+        ("home_sub_count",                    "away_sub_count"),
+        ("home_called_timeout_in_last_3_poss","away_called_timeout_in_last_3_poss"),
+        ("home_full_timeouts_remaining",      "away_full_timeouts_remaining"),
+        ("home_xPPP_last_5",                  "away_xPPP_last_5"),
+        ("home_actual_vs_expected_PPP",       "away_actual_vs_expected_PPP"),
+        ("home_shot_quality_trend",           "away_shot_quality_trend"),
+        ("home_lineup_net_rating",            "away_lineup_net_rating"),
+        ("home_lineup_sample_size",           "away_lineup_sample_size"),
+        ("home_lineup_just_changed",          "away_lineup_just_changed"),
     ]
     for home_col, away_col in swap_pairs:
         if home_col in away.columns and away_col in away.columns:
             away[home_col], away[away_col] = X[away_col].copy(), X[home_col].copy()
 
-    # Flip signed fields
-    away["lineup_net_rating_delta"]   = -X["lineup_net_rating_delta"]
-    away["current_run_team_encoded"]  = -X["current_run_team_encoded"]
-    away["score_diff"]                = -X["score_diff"]
+    away["current_run_team_encoded"] = -X["current_run_team_encoded"]
+    away["score_diff"]               = -X["score_diff"]
+    away["lineup_net_rating_delta"]  = -X["lineup_net_rating_delta"]
 
     return away
 
@@ -184,27 +255,25 @@ class TrainResult:
     n_val: int
 
 
-def train(feature_store_path: Path = FEATURE_STORE_PATH) -> TrainResult:
-    logger.info("Loading feature store from %s", feature_store_path)
-    fr = pq.read_table(feature_store_path).to_pandas()
-    games = pq.read_table(GAMES_PATH).to_pandas()
+def train() -> TrainResult:
+    df = _load_data()
+    df = _add_derived_features(df)
+    df = _add_targets(df)
 
-    # Join game_date for time-based split
-    games["game_date"] = pd.to_datetime(games["game_date"])
-    fr = fr.merge(games[["game_id", "game_date"]], on="game_id", how="left")
+    df["game_date"] = pd.to_datetime(df["game_date"])
 
-    missing_date = fr["game_date"].isna().sum()
+    missing_date = df["game_date"].isna().sum()
     if missing_date > 0:
         logger.warning("%d rows have no game_date — dropping", missing_date)
-        fr = fr.dropna(subset=["game_date"])
+        df = df.dropna(subset=["game_date"])
 
-    # Drop blowout / garbage time from training (model is off during these)
-    fr = fr[~fr["is_blowout"] & ~fr["is_garbage_time"]].copy()
-    logger.info("After blowout/GT filter: %d rows", len(fr))
+    # Drop blowout / garbage time — model is off during these
+    df = df[~df["is_blowout"] & ~df["is_garbage_time"]].copy()
+    logger.info("After blowout/garbage-time filter: %d rows", len(df))
 
-    X_all = prepare_features(fr)
-    y_all = fr[TARGET_COL].astype(int)
-    dates = fr["game_date"]
+    X_all = prepare_features(df)
+    y_all = df[TARGET_COL].astype(int)
+    dates = df["game_date"]
 
     train_mask = dates <= TRAIN_END
     val_mask   = (dates > TRAIN_END) & (dates <= VAL_END)
@@ -218,15 +287,9 @@ def train(feature_store_path: Path = FEATURE_STORE_PATH) -> TrainResult:
         len(X_val),   y_val.sum(),   y_val.mean() * 100,
     )
 
-    # Positive class weight: ratio of negatives to positives
-    pos_count = y_train.sum()
-    neg_count = len(y_train) - pos_count
-    scale_pos_weight = neg_count / pos_count if pos_count > 0 else 1.0
-    logger.info("scale_pos_weight = %.1f", scale_pos_weight)
-
-    # Train without class weighting so output probabilities are calibrated to the
-    # true base rate (~7.6%). Imbalance is handled via AUCPR metric + early stopping.
-    # A predicted probability of 0.15 is then ~2× the base rate — a meaningful signal.
+    # Train without class weighting so output probabilities stay calibrated to
+    # the true base rate (~7-8%). A threshold of 0.15 then means ~2× base rate.
+    # Imbalance is handled via AUCPR metric + early stopping.
     model = XGBClassifier(
         n_estimators=500,
         max_depth=5,
@@ -245,11 +308,11 @@ def train(feature_store_path: Path = FEATURE_STORE_PATH) -> TrainResult:
         verbose=50,
     )
 
-    val_proba = model.predict_proba(X_val)[:, 1]
-    val_aucpr = _compute_aucpr(y_val.values, val_proba)
-    baseline_aucpr = y_val.mean()  # random classifier AUCPR ≈ positive rate
+    val_proba  = model.predict_proba(X_val)[:, 1]
+    val_aucpr  = _compute_aucpr(y_val.values, val_proba)
+    baseline   = float(y_val.mean())
 
-    logger.info("Val AUCPR: %.4f  (baseline random: %.4f)", val_aucpr, baseline_aucpr)
+    logger.info("Val AUCPR: %.4f  (baseline random: %.4f)", val_aucpr, baseline)
 
     importances = dict(zip(FEATURE_COLS, model.feature_importances_))
     top10 = sorted(importances.items(), key=lambda x: -x[1])[:10]
@@ -265,7 +328,6 @@ def train(feature_store_path: Path = FEATURE_STORE_PATH) -> TrainResult:
 
 
 def _compute_aucpr(y_true: np.ndarray, y_proba: np.ndarray) -> float:
-    """Area under precision-recall curve via trapezoidal integration."""
     from sklearn.metrics import average_precision_score
     return float(average_precision_score(y_true, y_proba))
 
@@ -309,11 +371,10 @@ class RunPredictor:
         return float(self.model.predict_proba(X_flipped)[0, 1])
 
     def _dict_to_frame(self, feature_row_dict: dict) -> pd.DataFrame:
-        """Convert a FeatureRow-like dict into a model-ready DataFrame row."""
         row = {col: feature_row_dict.get(col, 0) for col in FEATURE_COLS}
 
-        # current_run_team might still be a string here
-        if "current_run_team_encoded" not in row or row["current_run_team_encoded"] == 0:
+        # current_run_team might still be a string at inference time
+        if not row.get("current_run_team_encoded"):
             raw = feature_row_dict.get("current_run_team")
             row["current_run_team_encoded"] = {"home": 1, "away": -1}.get(raw, 0)
 

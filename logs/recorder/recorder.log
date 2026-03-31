@@ -13669,3 +13669,29 @@ ModuleNotFoundError: No module named 'data.ingestion.kalshi_historical_client'
 2026-03-25T02:46:36  INFO      Flushed 3 rows | session ticks: 26308 | elapsed: 6.4h
 2026-03-25T02:47:51  INFO      Flushed 1 rows | session ticks: 26309 | elapsed: 6.4h
 2026-03-25T12:14:17  INFO      Max runtime (7.0h) reached — stopping.
+2026-03-25T23:30:01  INFO      Starting Kalshi recorder | PID=67273 | series=KXNBASPREAD | max_spread=3 | max_runtime=7.0h
+2026-03-25T23:30:01  INFO      Discovered 15 moneyline-proxy markets (spread ≤ 3)
+2026-03-25T23:30:01  INFO      Subscribed to 15 markets
+2026-03-25T23:35:03  INFO      Flushed 1136 rows | session ticks: 1136 | elapsed: 0.1h
+2026-03-25T23:40:04  INFO      Flushed 1613 rows | session ticks: 2749 | elapsed: 0.2h
+2026-03-25T23:45:06  INFO      Flushed 1598 rows | session ticks: 4347 | elapsed: 0.3h
+2026-03-25T23:50:07  INFO      Flushed 1426 rows | session ticks: 5773 | elapsed: 0.3h
+2026-03-25T23:55:08  INFO      Flushed 1291 rows | session ticks: 7064 | elapsed: 0.4h
+2026-03-26T00:00:09  INFO      Flushed 1673 rows | session ticks: 8737 | elapsed: 0.5h
+2026-03-26T00:05:10  INFO      Flushed 1380 rows | session ticks: 10117 | elapsed: 0.6h
+2026-03-26T00:10:11  INFO      Flushed 1818 rows | session ticks: 11935 | elapsed: 0.7h
+2026-03-26T00:15:12  INFO      Flushed 1707 rows | session ticks: 13642 | elapsed: 0.8h
+2026-03-26T00:20:13  INFO      Flushed 1258 rows | session ticks: 14900 | elapsed: 0.8h
+2026-03-26T00:25:14  INFO      Flushed 964 rows | session ticks: 15864 | elapsed: 0.9h
+2026-03-26T00:30:15  INFO      Flushed 1065 rows | session ticks: 16929 | elapsed: 1.0h
+2026-03-26T00:35:16  INFO      Flushed 651 rows | session ticks: 17580 | elapsed: 1.1h
+2026-03-26T00:40:17  INFO      Flushed 468 rows | session ticks: 18048 | elapsed: 1.2h
+2026-03-26T00:45:51  INFO      Flushed 120 rows | session ticks: 18168 | elapsed: 1.3h
+2026-03-26T00:51:00  INFO      Flushed 8 rows | session ticks: 18176 | elapsed: 1.3h
+2026-03-26T00:56:09  INFO      Flushed 11 rows | session ticks: 18187 | elapsed: 1.4h
+2026-03-26T15:21:38  INFO      Max runtime (7.0h) reached — stopping.
+2026-03-27T22:30:01  INFO      Starting Kalshi recorder | PID=39727 | series=KXNBASPREAD | max_spread=3 | max_runtime=7.0h
+2026-03-27T22:30:01  INFO      Discovered 17 moneyline-proxy markets (spread ≤ 3)
+2026-03-27T22:30:01  INFO      Subscribed to 17 markets
+2026-03-27T22:45:10  INFO      Flushed 2000 rows | session ticks: 2000 | elapsed: 0.0h
+2026-03-29T17:03:57  INFO      Max runtime (7.0h) reached — stopping.
