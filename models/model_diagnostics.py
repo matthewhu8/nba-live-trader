@@ -65,7 +65,7 @@ FEATURE_COLS = [
     "shot_distance",
     "shot_value",
 ]
-TARGET_COL = "target_meaningful_run_5"
+TARGET_COL = "target_meaningful_run_5_scoring"
 BASE_RATE = 0.0760  # from training data
 
 

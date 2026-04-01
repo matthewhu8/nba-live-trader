@@ -228,10 +228,10 @@ class BacktestSimulator:
 
         # Build target lookup for run_actually_occurred validation
         self._target_lookup: dict[tuple[str, int], bool] = {}
-        if "target_meaningful_run_5" in feature_rows.columns:
+        if "target_meaningful_run_5_scoring" in feature_rows.columns:
             for _, r in feature_rows.iterrows():
                 key = (str(r["game_id"]), int(r["possession_id"]))
-                self._target_lookup[key] = bool(r["target_meaningful_run_5"])
+                self._target_lookup[key] = bool(r["target_meaningful_run_5_scoring"])
 
     def run(self, game_ids: list[str] | None = None) -> SimulationResult:
         result = SimulationResult()
