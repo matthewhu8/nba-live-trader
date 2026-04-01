@@ -161,7 +161,7 @@ FEATURE_SCHEMA = pa.schema([
     # Targets — TRAINING ONLY, DO NOT USE AS FEATURES
     pa.field("target_home_next_5_margin",  pa.int32()),
     pa.field("target_home_next_10_margin", pa.int32()),
-    pa.field("target_meaningful_run_5",    pa.bool_()),
+    pa.field("target_meaningful_run_5_scoring", pa.bool_()),
     pa.field("target_meaningful_run_10",   pa.bool_()),
 ])
 

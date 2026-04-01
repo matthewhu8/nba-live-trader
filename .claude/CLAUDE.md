@@ -227,25 +227,15 @@ Training pipeline uses both. Live system uses features only. This is enforced in
 
 ---
 
-## Synthetic Kalshi Price Model (bridge until real data exists)
+## Kalshi Price Data (real tick data — synthetic model scrapped)
 
-No historical Kalshi prices exist yet. To backtest the trading layer before
-collecting weeks of data, generate synthetic prices from sharp book line movement:
+Real intra-game Kalshi tick data is being recorded continuously and uploaded to
+MotherDuck (`kalshi_ticks` table). The synthetic price model has been scrapped —
+we have the real thing.
 
-```
-synthetic_kalshi_price = sharp_book_wp
-  + lag_offset(15-45s, random)          # Kalshi reprices slower
-  + overreaction_term(run_length)        # retail overreacts to runs
-  - mean_reversion_term(time_since_run)  # prices drift back
-  + noise(σ=0.5¢)
-```
-
-Parameters (lag_amount, overreaction_coefficient, reversion_speed) are tuned
-once real Kalshi data is collected. Synthetic model lets you validate strategy
-architecture now, swap real prices in later with zero other changes.
-
-Large discrepancy between synthetic and real backtest results = synthetic model
-had wrong assumptions. This is useful information about how Kalshi actually behaves.
+The tick data feeds directly into Layer 2 (price movement model). The goal is to
+join run_predictor signals with actual Kalshi bid/ask movements and measure whether
+high-confidence run predictions preceded profitable price moves, net of maker fees.
 
 ---
 
@@ -614,24 +604,24 @@ data permanently lost. This is the first thing to build and the first thing to d
 ---
 
 ## Current Status
-- [ ] Phase 1: Kalshi recorder deployed
-- [ ] Phase 1: nba_api ingestion complete
-- [ ] Phase 1: Raw tables normalized
-- [ ] Phase 2: Player ratings (rolling RAPM)
-- [ ] Phase 2: Lineup ratings
+- [x] Phase 1: Kalshi recorder deployed
+- [x] Phase 1: nba_api ingestion complete
+- [x] Phase 1: Raw tables normalized → `features.possession_flat` (400K rows, 86 cols)
+- [x] Phase 2: Player ratings (rolling RAPM)
+- [x] Phase 2: Lineup ratings (47M rows, 1,065 games)
 - [ ] Phase 2: Rotation tendency model
-- [ ] Phase 2: Full feature store built + validated
-- [ ] Phase 3: Backtesting simulator
-- [ ] Phase 3: First two strategies running
-- [ ] Phase 3: First backtest + analysis complete
-- [ ] Phase 4: Run predictor model trained
-- [ ] Phase 4: RL agent trained
+- [x] Phase 2: Feature store built + validated (58 features, lineup signals included)
+- [ ] Phase 3: Backtesting simulator (built but strategies losing — paused)
+- [x] Phase 4: Run predictor trained — AUCPR 0.1075 vs 0.0840 baseline (28% lift)
+- [ ] Phase 4: Layer 2 price movement model ← **CURRENT FOCUS**
+  - Real Kalshi tick data live in MotherDuck (`kalshi_ticks`)
+  - Build XGBoost regressor: run_prob + tick data → expected Δ(yes_bid)
+  - Validates whether our run predictions actually move prices profitably
+- [ ] Phase 4: RL agent
 - [ ] Phase 5: Execution layer (paper mode)
 - [ ] Phase 5: Risk module + kill switch
 - [ ] Phase 6: Paper trading (4+ weeks)
 - [ ] Phase 6: Live trading
-
-**Current phase: Phase 1 — build the Kalshi recorder first.**
 
 ---
 
@@ -685,22 +675,26 @@ python data/ingestion/game_schedule.py --date 2026-03-25
 
 Three distinct modeling layers. Don't conflate them.
 
-### Layer 1 — Run Predictor (XGBoost)
-- Input: FeatureRow (88 columns, possession-level)
-- Output: calibrated P(scoring run in next 10 possessions)
-- Current: AUCPR 0.0856 vs baseline 0.0772 (~10% lift, weak but real)
-- **Use isotonic regression calibration** — raw XGBoost scores cluster near base rate (7.6%) and are not trustworthy as probabilities without calibration. This matters for trading.
+### Layer 1 — Run Predictor (XGBoost Classifier)
+- Input: 58 FEATURE_COLS from `features.possession_flat` — ALL possessions (scoring + non-scoring)
+- Output: calibrated P(`target_meaningful_run_5_scoring`) — home outscores by 6+ in next 5 **scoring** possessions (~3-4 min window, pace-independent)
+- **Current: AUCPR 0.1075 vs baseline 0.0840 (~28% lift)** — retrained 2026-03-31
+  - Train: Oct 21, 2025–Jan 31, 2026 (296,257 rows); Val: Feb 1–Mar 5, 2026 (37,293 rows)
+  - Test: Mar 6, 2026–present — untouched
+  - Top features: current_run_team_encoded, minutes_into_game, away_star_on_court, trailing_team_urgency, away_in_bonus
+- **Use isotonic regression calibration** — raw XGBoost scores cluster near base rate (8.4%) and are not trustworthy as probabilities without calibration. This matters for trading.
 - Do NOT use `scale_pos_weight` — shifts probs toward 0.5, destroying calibration
 - Do NOT use focal loss — harder to calibrate post-hoc
 - Optimize decision threshold against Sharpe on simulator, not against accuracy or F1
 - Stay with XGBoost. Trees beat deep learning on tabular data under 1M rows. LSTMs/Transformers add nothing — our features already encode temporal context (momentum windows, run state).
 - Retrain on rolling 60-game window every ~10 games during live season to handle concept drift
 
-### Layer 2 — Kalshi Price Movement Model (XGBoost Regressor)
-- Input: run_prob + current Kalshi bid/ask + game context
-- Output: expected Δ(yes_bid) over next 3 minutes
-- Build this once we have 4+ weeks of real tick data (recorder now fixed)
-- The synthetic price model's parameters (lag, overreaction, mean reversion) should be fit empirically to real tick data — that fitting is a milestone
+### Layer 2 — Kalshi Price Movement Model (XGBoost Regressor) ← NEXT PHASE
+- Input: run_predictor probability + current Kalshi bid/ask + game context
+- Output: expected Δ(yes_bid) over next 3 minutes — did our prediction actually produce profit?
+- Real intra-game Kalshi tick data is now being recorded and uploaded to `kalshi_ticks` table in MotherDuck (growing continuously)
+- **Synthetic price model is scrapped** — we have real tick data, no need to simulate
+- Build once enough tick data exists to train on. Goal: validate that high run_prob → Kalshi price movement in the predicted direction, net of maker fees
 
 ### Layer 3 — Entry/Exit Agent
 - **Start with contextual bandit (Thompson Sampling)** — treats each possession decision as independent. Trains in 100-200 games. Easy to debug. Good fit for thin, illiquid markets.

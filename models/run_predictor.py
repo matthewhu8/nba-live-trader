@@ -1,7 +1,7 @@
 """
 XGBoost run predictor.
 
-Trains a binary classifier to predict target_meaningful_run_5:
+Trains a binary classifier to predict target_meaningful_run_5_scoring:
 whether the home team will have a meaningful scoring run (6+ net points)
 in the next 5 scoring possessions.
 
@@ -112,27 +112,26 @@ FEATURE_COLS: list[str] = [
     "away_lineup_just_changed",
 ]
 
-TARGET_COL = "target_meaningful_run_5"
+TARGET_COL = "target_meaningful_run_5_scoring"
 
 
 def _load_data() -> pd.DataFrame:
     """
-    Load scoring possessions from features.possession_flat joined with game_date.
+    Load all possessions from features.possession_flat joined with game_date.
 
-    Only scoring possessions (team_scored IS NOT NULL) are loaded — these are the
-    rows where something happened and the target variable is meaningful.
-    Results are sorted by game_id, event_id to guarantee chronological order within games.
+    All possession types are included — scoring, fouls, timeouts, subs — so the
+    model can predict at any game state, not just after a made shot.
+    Results are sorted by game_id, event_id to guarantee chronological order.
     """
     conn = duckdb.connect(str(DB_PATH), read_only=True)
     df = conn.execute("""
         SELECT pf.*, dg.game_date
         FROM features.possession_flat pf
         JOIN main.dim_games dg ON pf.game_id = dg.game_id
-        WHERE pf.points > 0
         ORDER BY pf.game_id, pf.event_id
     """).df()
     conn.close()
-    logger.info("Loaded %d scoring events (points > 0) from possession_flat", len(df))
+    logger.info("Loaded %d possessions from possession_flat", len(df))
     return df
 
 

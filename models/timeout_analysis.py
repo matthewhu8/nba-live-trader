@@ -146,7 +146,7 @@ def analyze_timeouts(features: pd.DataFrame, timeouts: pd.DataFrame) -> dict:
                                          * (1 if run_team == "home" else -1),
                 "next_10_margin":        int(row.get("target_home_next_10_margin", 0))
                                          * (1 if run_team == "home" else -1),
-                "meaningful_run_5":      bool(row.get("target_meaningful_run_5", False)),
+                "meaningful_run_5":      bool(row.get("target_meaningful_run_5_scoring", False)),
             }
 
             if called_timeout:
