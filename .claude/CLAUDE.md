@@ -611,6 +611,7 @@ data permanently lost. This is the first thing to build and the first thing to d
 - [x] Phase 2: Lineup ratings (47M rows, 1,065 games)
 - [ ] Phase 2: Rotation tendency model
 - [x] Phase 2: Feature store built + validated (58 features, lineup signals included)
+- [x] Phase 2: **Nightly post-game pipeline** — runs at 3 AM ET on Fly.io, updates all tables automatically
 - [ ] Phase 3: Backtesting simulator (built but strategies losing — paused)
 - [x] Phase 4: Run predictor trained — AUCPR 0.1075 vs 0.0840 baseline (28% lift)
 - [ ] Phase 4: Layer 2 price movement model ← **CURRENT FOCUS**
@@ -622,6 +623,62 @@ data permanently lost. This is the first thing to build and the first thing to d
 - [ ] Phase 5: Risk module + kill switch
 - [ ] Phase 6: Paper trading (4+ weeks)
 - [ ] Phase 6: Live trading
+
+---
+
+## Nightly Post-Game Pipeline (completed 2026-04-02)
+
+### What it does
+Runs automatically at 3 AM ET on the existing Fly.io recorder machine after all games finish.
+No extra infra — same machine, same Docker image, triggered from `recorder_daemon.py`.
+
+### Files
+- **NEW:** `data/ingestion/post_game_pipeline.py` — main pipeline logic
+- **MODIFIED:** `data/ingestion/recorder_daemon.py` — 3 AM trigger after `_schedule_games` returns
+- **MODIFIED:** `models/ratings/lineup_net_rating.py` — added `games_together: int32` to schema
+
+### Pipeline phases (must run in order)
+```
+Phase 0  Upsert dim_games                  (all other tables FK on game_id)
+Phase 1  Fetch + parse PBP via nba_api     (stateless, no disk cache)
+Phase 2  Build possession_flat rows        (uses pre-tonight ASOF ratings — point-in-time correct)
+Phase 3  Update player_ratings + lineup_ratings  (Ridge regression + EWMA, for tomorrow)
+```
+
+### Key design decisions
+- **Stateless**: all reads/writes go directly to MotherDuck — no local DuckDB, no disk
+- **ASOF ratings**: `MAX(as_of_game_id) WHERE as_of_game_id <= game_id` — works even if ratings are one game stale
+- **Player ratings**: full Ridge regression (same as `player_rapm.py`) run once nightly for ONE new as_of point (~5s, ~40MB peak)
+- **Lineup ratings**: EWMA with adaptive α = `max(0.05, 1/n)` for observed component, then Bayesian shrinkage blend
+- **`games_together`**: new int32 column added to `features.lineup_ratings` in MotherDuck. Historical rows are NULL; pipeline falls back to `possessions_together // 25`
+- **Idempotent**: re-running skips Phase 2 if game_id already in possession_flat; skips Phase 3 inserts if as_of_game_id already exists
+- **INSERT OR IGNORE not available** in DuckDB 1.5.1 without a PRIMARY KEY — pipeline uses plain INSERT with pre-check guards instead
+
+### MotherDuck access
+- `kalshi_trading` database owned by the account whose token is in `.env` / Fly.io secrets
+- The old token was a read-only share token — replaced with owner token on 2026-04-02
+- **IMPORTANT**: Fly.io `MOTHERDUCK_TOKEN` secret also needs updating before deploy:
+  ```bash
+  fly secrets set MOTHERDUCK_TOKEN="<new-token>" -a kalshi-recorder
+  fly deploy -a kalshi-recorder
+  ```
+
+### Verified results (2026-04-02 test run)
+- March 31 games: 1,411 possession_flat rows inserted (7 games)
+- player_ratings: 697 players at `as_of=0022501104`
+- lineup_ratings: 209 new rows at `as_of=0022501104` with `games_together` populated
+- Idempotency confirmed: second run skipped Phase 2 entirely
+- Tonight's games (not yet played): Phase 0 inserted 6 dim_games rows, Phase 1 exited cleanly
+
+### Manual trigger (for testing or backfill)
+```bash
+python -m data.ingestion.post_game_pipeline 2026-03-31
+```
+
+### Known issues / gotchas
+- `duckdb_loader.py` has a broken `INSERT OR IGNORE` on `dim_teams` in DuckDB 1.5.1 — the `--pull-motherduck` and `--pull-motherduck-full` flags don't work locally. Use `--pull-possession-flat` and `--pull-features-schema` as standalone flags instead.
+- Local DuckDB (`kalshi_trading.duckdb`) may be stale — trust MotherDuck as source of truth, work directly against cloud when verifying pipeline results.
+- `possession_flat` in MotherDuck uses `wall_clock_ts` but local feature builder produces `period_wall_clock` — the pipeline handles this by aligning DataFrame columns to the target table schema before inserting.
 
 ---
 

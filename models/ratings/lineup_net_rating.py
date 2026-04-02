@@ -47,6 +47,10 @@ LINEUP_RATINGS_SCHEMA = pa.schema([
     pa.field("possessions_together", pa.int32()),
     pa.field("shrinkage_weight",     pa.float32()),
     pa.field("player_ids",           pa.string()),
+    # Exact game count for adaptive EWMA alpha in nightly pipeline.
+    # Historical rows (computed before this field existed) will be NULL;
+    # the pipeline falls back to possessions_together // 25.
+    pa.field("games_together",       pa.int32()),
 ])
 
 
