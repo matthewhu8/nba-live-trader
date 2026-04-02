@@ -1,5 +1,7 @@
-data_w/
 logs/
 .env
 kalshi_trading.duckdb
 venv
+data/feature_store/
+data/raw/
+data/ingestion/__pycache__/
