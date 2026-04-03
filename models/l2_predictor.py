@@ -4,7 +4,6 @@ Layer 2 — Kalshi Price Movement Model
 XGBoost regressor predicting expected Δ(yes_bid) over the next 30-180 seconds.
 Requires 4+ weeks of real tick data.
 """
-
 import logging
 import pickle
 import sys
