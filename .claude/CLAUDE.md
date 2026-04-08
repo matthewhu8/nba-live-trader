@@ -614,10 +614,10 @@ data permanently lost. This is the first thing to build and the first thing to d
 - [x] Phase 2: **Nightly post-game pipeline** — runs at 3 AM ET on Fly.io, updates all tables automatically
 - [ ] Phase 3: Backtesting simulator (built but strategies losing — paused)
 - [x] Phase 4: Run predictor trained — AUCPR 0.1075 vs 0.0840 baseline (28% lift)
-- [ ] Phase 4: Layer 2 price movement model ← **CURRENT FOCUS**
-  - Real Kalshi tick data live in MotherDuck (`kalshi_ticks`)
-  - Build XGBoost regressor: run_prob + tick data → expected Δ(yes_bid)
-  - Validates whether our run predictions actually move prices profitably
+- [ ] Phase 4: Layer 2 trade outcome model ← **CURRENT FOCUS**
+  - Real Kalshi tick data live in MotherDuck (`kalshi_ticks`) — 76 games recorded
+  - Architecture decided: train on L1-entry rows only, hybrid exit simulation as target, log-odds units, 30–70¢ band
+  - Must build exit simulator before retraining — current model (fixed 120s, all rows, raw cents) is not valid
 - [ ] Phase 4: RL agent
 - [ ] Phase 5: Execution layer (paper mode)
 - [ ] Phase 5: Risk module + kill switch
@@ -746,19 +746,27 @@ Three distinct modeling layers. Don't conflate them.
 - Stay with XGBoost. Trees beat deep learning on tabular data under 1M rows. LSTMs/Transformers add nothing — our features already encode temporal context (momentum windows, run state).
 - Retrain on rolling 60-game window every ~10 games during live season to handle concept drift
 
-### Layer 2 — Kalshi Price Movement Model (XGBoost Regressor) ← NEXT PHASE
-- Input: run_predictor probability + current Kalshi bid/ask + game context
-- Output: expected Δ(yes_bid) over next 3 minutes — did our prediction actually produce profit?
-- Real intra-game Kalshi tick data is now being recorded and uploaded to `kalshi_ticks` table in MotherDuck (growing continuously)
-- **Synthetic price model is scrapped** — we have real tick data, no need to simulate
-- Build once enough tick data exists to train on. Goal: validate that high run_prob → Kalshi price movement in the predicted direction, net of maker fees
+### Layer 2 — Trade Outcome Model (XGBoost Regressor)
+- **Training set: L1-entry rows only** — rows where L1 run_prob exceeds the entry threshold. L2 is never called on rows we wouldn't trade, so it should never train on them. Training distribution must match inference distribution.
+- **Trade direction from L1** — L1 determines which side to enter (home run → buy YES, away run → buy NO). The PnL label sign flips accordingly. Raw Δ(yes_bid) is always adjusted for direction before labeling.
+- **Target: simulated PnL under hybrid exit strategy** — NOT Δ(yes_bid) at fixed t+120s. For each training row, simulate forward through tick + possession data and exit at whichever fires first:
+  1. Stop Loss triggered (price moves X¢ against position)
+  2. Take Profit triggered (price moves Y¢ in favor)
+  3. `current_team_run` flips to opposing team or neutral
+  4. N scoring possessions elapsed (primary time stop — pace-independent)
+  5. `is_blowout` or `is_garbage_time` becomes true
+- **Target units: log-odds change**, not raw cents. `logit(p_exit/100) - logit(p_entry/100)` normalizes for price level — a 10¢ move at 50¢ is a different probability shift than at 80¢. This prevents high-price buckets from dominating training.
+- **Trade only in 30–70¢ band** — restrict entry rows to `30 ≤ yes_bid ≤ 70`. Outside this range, market certainty is too high for basketball signal to move price meaningfully.
+- Real intra-game Kalshi tick data recorded continuously to `kalshi_ticks` in MotherDuck.
+- **Synthetic price model is scrapped** — we have real tick data.
+- Current model (`models/saved/kalshi_price_movement_predictor.pkl`) was trained with fixed 120s target on all rows — do not use as-is. Retrain once exit simulation is built.
 
 ### Layer 3 — Entry/Exit Agent
 - **Start with contextual bandit (Thompson Sampling)** — treats each possession decision as independent. Trains in 100-200 games. Easy to debug. Good fit for thin, illiquid markets.
-- State: run_prob, yes_bid, quarter, score_diff, lineup_delta, position_state
+- State: run_prob, L2_expected_pnl, yes_bid, quarter, score_diff, lineup_delta, position_state
 - Actions: buy_yes / buy_no / exit / wait
-- Reward: realized PnL after maker fees
-- **Upgrade to PPO** only if bandit plateaus — PPO can learn multi-step planning ("hold through noise") but needs 10x more training data and is much harder to debug
+- Reward: realized PnL after maker fees (must match hybrid exit simulation used to train L2)
+- **Upgrade to PPO** only if bandit plateaus — PPO can learn multi-step planning but needs 10x more data and is much harder to debug
 - Never use: DQN (sparse rewards cause Q-value instability), SAC (continuous action space mismatch)
 - If going full offline RL: use IQL (simple, stable, trains on simulator rollouts)
 
