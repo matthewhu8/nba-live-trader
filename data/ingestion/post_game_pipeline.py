@@ -780,6 +780,20 @@ def run_post_game_pipeline(game_date: date, games: list[GameInfo]) -> None:
             conn.close()
         build_possession_flat_phase(parsed, unprocessed, games_df, tier_map)
 
+    # Phase 2b: Populate wall_clock_ts for tonight's games.
+    # Required by the collapsed price movement predictor to ASOF-join to Kalshi ticks.
+    # Runs immediately after possession_flat insert so new games are always populated.
+    try:
+        from data.ingestion.backfill_wall_clock_ts import backfill_game
+        conn = _md_connect()
+        try:
+            for game in games:
+                backfill_game(game.game_id, game.game_date, conn)
+        finally:
+            conn.close()
+    except Exception:
+        logger.exception("Phase 2b: wall_clock_ts backfill failed — non-fatal, continuing")
+
     # Phase 3
     as_of_game_id = max(parsed.keys())
     update_ratings_phase(parsed, as_of_game_id)
