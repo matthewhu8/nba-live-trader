@@ -12,3 +12,4 @@ venv/
 *.parquet
 models/saved/
 backtesting/results/
+.claude/
