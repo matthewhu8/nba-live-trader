@@ -5,3 +5,4 @@ python-dotenv>=1.0
 nba_api>=1.4
 pandas>=2.0
 duckdb>=1.1
+scipy>=1.11
