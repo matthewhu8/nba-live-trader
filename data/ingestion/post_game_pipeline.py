@@ -788,7 +788,7 @@ def run_post_game_pipeline(game_date: date, games: list[GameInfo]) -> None:
         conn = _md_connect()
         try:
             for game in games:
-                backfill_game(game.game_id, game.game_date, conn)
+                backfill_game(game.game_id, game.tipoff_utc.date(), conn)
         finally:
             conn.close()
     except Exception:
