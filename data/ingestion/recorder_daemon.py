@@ -121,7 +121,7 @@ async def run_daemon() -> None:
 
     while True:
         today    = date.today()
-        fetch_at = _schedule_fetch_utc(today)
+        fetch_at = _schedule_fetch_utc(today) # 7 AM ET
         now      = datetime.now(tz=timezone.utc)
 
         if now < fetch_at:
@@ -193,7 +193,7 @@ def main() -> None:
         datefmt="%Y-%m-%dT%H:%M:%S",
     )
 
-    loop      = asyncio.new_event_loop()
+    loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     main_task = None
 
