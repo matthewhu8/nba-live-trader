@@ -1,8 +1,0 @@
-{
-  "n_timeout_events": 4001,
-  "n_control_events": 6480,
-  "timeout_next5_mean": -0.05448637840539865,
-  "control_next5_mean": -0.10046296296296296,
-  "timeout_run_continued_5": 0.4451387153211697,
-  "control_run_continued_5": 0.45108024691358023
-}
