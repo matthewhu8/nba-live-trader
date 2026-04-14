@@ -735,6 +735,93 @@ def update_ratings_phase(
         conn.close()
 
 
+def update_team_ratings_phase(parsed: dict[str, dict[str, pd.DataFrame]], as_of_game_id: str) -> None:
+    """
+    Phase 3d: Update features.team_ratings (EWMA + Shrinkage) with tonight's data.
+    """
+    from models.ratings.team_ratings import compute_game_team_stats, apply_team_ewma
+    
+    conn = _md_connect()
+    try:
+        # Dynamically compute running league average roughly safely
+        league_avg_res = conn.execute("""
+            SELECT AVG(pts * 100.0 / NULLIF(poss, 0)) FROM (
+                SELECT SUM(points) as pts, COUNT(*) as poss
+                FROM possession_feed WHERE possessing_team IN ('home', 'away')
+                GROUP BY game_id, possessing_team
+            )
+        """).fetchone()
+        league_avg_ortg = league_avg_res[0] if (league_avg_res and league_avg_res[0]) else 110.0
+
+        for game_id, dfs in parsed.items():
+            if "possession_feed" not in dfs: continue
+            raw_stats = compute_game_team_stats(dfs["possession_feed"])
+            if not raw_stats: continue
+            
+            # For each team (home/away)
+            for side, tricode_col in [('home', 'home_team'), ('away', 'away_team')]:
+                tricode_res = conn.execute(f"SELECT {tricode_col} FROM dim_games WHERE game_id='{game_id}'").fetchone()
+                if not tricode_res: continue
+                tricode = tricode_res[0]
+                
+                curr_state = conn.execute(f"""
+                    SELECT games_played, ewma_off_rating, ewma_def_rating, last_5_net_ratings 
+                    FROM features.team_ratings WHERE team_tricode='{tricode}' 
+                    ORDER BY as_of_game_id DESC LIMIT 1
+                """).df()
+                state_dict = curr_state.iloc[0].to_dict() if not curr_state.empty else {}
+                
+                raw = raw_stats[side]
+                updated = apply_team_ewma(state_dict, raw['ortg'], raw['drtg'], float(league_avg_ortg))
+                
+                # Cumulative pace average across this team's games up to tonight
+                pace_res = conn.execute(f"""
+                    SELECT AVG(pf.pace_season_baseline) 
+                    FROM possession_feed pf JOIN dim_games g ON pf.game_id = g.game_id 
+                    WHERE (g.home_team='{tricode}' OR g.away_team='{tricode}') 
+                      AND pf.pace_season_baseline > 0 AND g.game_id <= '{game_id}'
+                """).fetchone()
+                pace = pace_res[0] if (pace_res and pace_res[0]) else 15.0
+                
+                # Replace logic ensures updates if ran twice
+                conn.execute(f"""
+                    INSERT OR REPLACE INTO features.team_ratings (
+                        team_tricode, as_of_game_id, games_played, ewma_off_rating, ewma_def_rating, ewma_net_rating,
+                        off_rating, def_rating, net_rating, avg_secs_per_poss, last_5_net_ratings
+                    ) VALUES (
+                        '{tricode}', '{as_of_game_id}', {updated['games_played']}, 
+                        {updated['ewma_off_rating']}, {updated['ewma_def_rating']}, {updated['ewma_net_rating']},
+                        {updated['off_rating']}, {updated['def_rating']}, {updated['net_rating']},
+                        {pace}, '{updated['last_5_net_ratings']}'
+                    )
+                """)
+        logger.info("Phase 3d: updated team_ratings for tonight's games")
+    finally:
+        conn.close()
+
+
+def build_pregame_features_phase(games: list, game_date: date) -> None:
+    """
+    Phase 4: Compute 10 pregame features for tonight's games using purely ASOF state.
+    """
+    from models.features.pregame_features import compute_pregame_features
+    import pandas as pd
+    conn = _md_connect()
+    try:
+        inserted = 0
+        for game in games:
+            features = compute_pregame_features(
+                conn=conn, game_id=game.game_id, game_date=str(game_date), 
+                home_team=game.home_team, away_team=game.away_team
+            )
+            df = pd.DataFrame([features])
+            conn.execute("INSERT OR REPLACE INTO features.pregame SELECT * FROM df")
+            inserted += 1
+        logger.info("Phase 4: inserted %d games into features.pregame", inserted)
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -797,6 +884,10 @@ def run_post_game_pipeline(game_date: date, games: list[GameInfo]) -> None:
     # Phase 3
     as_of_game_id = max(parsed.keys())
     update_ratings_phase(parsed, as_of_game_id)
+    update_team_ratings_phase(parsed, as_of_game_id)
+
+    # Phase 4
+    build_pregame_features_phase(games, game_date)
 
     logger.info(
         "Post-game pipeline complete for %s — as_of_game_id=%s",
