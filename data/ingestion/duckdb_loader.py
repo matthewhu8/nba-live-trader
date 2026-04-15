@@ -1465,6 +1465,43 @@ def sync_from_motherduck(
     logger.info("Pull from MotherDuck complete [%s].", mode)
 
 
+def init_features_tables(conn: duckdb.DuckDBPyConnection) -> None:
+    """Creates the bare schema for features.team_ratings and features.pregame."""
+    conn.execute("CREATE SCHEMA IF NOT EXISTS features")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS features.team_ratings (
+            team_tricode        VARCHAR NOT NULL,
+            as_of_game_id       VARCHAR NOT NULL,
+            games_played        INTEGER,
+            ewma_off_rating     FLOAT,
+            ewma_def_rating     FLOAT,
+            ewma_net_rating     FLOAT,
+            off_rating          FLOAT,
+            def_rating          FLOAT,
+            net_rating          FLOAT,
+            avg_secs_per_poss   FLOAT,
+            last_5_net_ratings  VARCHAR,
+            PRIMARY KEY (team_tricode, as_of_game_id)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS features.pregame (
+            game_id                 VARCHAR PRIMARY KEY,
+            team_net_rating_delta   FLOAT,
+            home_off_rating         FLOAT,
+            away_off_rating         FLOAT,
+            home_def_rating         FLOAT,
+            away_def_rating         FLOAT,
+            roster_rapm_gap         FLOAT,
+            missing_rapm_impact     FLOAT,
+            rest_advantage          FLOAT,
+            expected_pace           FLOAT,
+            form_delta              FLOAT
+        )
+    """)
+    logger.info("init_features_tables: ensured features.team_ratings and features.pregame exist")
+
+
 # ---------------------------------------------------------------------------
 # Feature schema pull
 # ---------------------------------------------------------------------------
@@ -1677,6 +1714,7 @@ def main() -> None:
     build_possession_feed(conn)
     build_player_game_stats(conn)
     enrich_possession_feed(conn)
+    init_features_tables(conn)
 
     conn.close()
     logger.info("Local DuckDB build complete: %s", args.db)

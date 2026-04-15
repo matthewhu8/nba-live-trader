@@ -1,0 +1,245 @@
+"""
+Hybrid Exit Simulator for MMoE Target B (price trajectory).
+
+For each entry row (possession with Kalshi tick data), simulates forward through
+real tick + possession data and exits at whichever condition fires first:
+  1. Take Profit (TP): yes_bid moves >= tp_cents in our favor
+  2. Stop Loss (SL):   yes_bid moves >= sl_cents against us
+  3. Momentum flip:    current_run_team changes to opposing team or neutral
+  4. Time gate:        120 seconds elapsed (hard deadline)
+  5. Garbage time:     is_blowout or is_garbage_time becomes True
+
+Outputs per entry row:
+  - 10-checkpoint price trajectory (logit delta units, every 12s)
+  - exit_price, exit_reason, exit_time_offset_s, simulated_pnl
+
+Price lookup rule: for each checkpoint time t, use the FIRST tick with ts >= t
+(merge_asof direction="forward"). This ensures we see price after the event,
+not before — no lookahead bias.
+
+Trade direction:
+  - Home run prediction → BUY YES → favorable = price up → entry_side=+1
+  - Away run prediction → BUY NO  → favorable = price down → entry_side=-1
+  PnL = entry_side * (exit_price - entry_price)
+"""
+
+import logging
+from dataclasses import dataclass
+from typing import Optional
+
+import numpy as np
+import pandas as pd
+from scipy.special import logit
+
+logger = logging.getLogger(__name__)
+
+CHECKPOINT_SECONDS = [12, 24, 36, 48, 60, 72, 84, 96, 108, 120]
+N_CHECKPOINTS = len(CHECKPOINT_SECONDS)
+MAX_SECONDS = CHECKPOINT_SECONDS[-1]
+
+EXIT_REASONS = ("take_profit", "stop_loss", "momentum_flip", "time_gate", "garbage_time")
+
+
+@dataclass
+class ExitResult:
+    exit_price: float
+    exit_reason: str
+    exit_time_offset_s: float
+    simulated_pnl: float
+    trajectory: list[float]  # 10 values in logit-delta units
+
+
+def _logit_delta(entry_price: float, checkpoint_price: float) -> float:
+    """Convert raw cent prices to log-odds delta, clipping to avoid inf."""
+    p_entry = np.clip(entry_price / 100.0, 0.01, 0.99)
+    p_check = np.clip(checkpoint_price / 100.0, 0.01, 0.99)
+    return float(logit(p_check) - logit(p_entry))
+
+
+def _lookup_price_at_or_after(
+    ticks: pd.DataFrame,
+    target_ts: pd.Timestamp,
+    fallback_price: float,
+) -> float:
+    """Return yes_bid from the first tick at or after target_ts."""
+    future = ticks[ticks["ts"] >= target_ts]
+    if future.empty:
+        return fallback_price
+    return float(future.iloc[0]["yes_bid"])
+
+
+def simulate_exit(
+    entry_wall_clock: pd.Timestamp,
+    entry_yes_bid: float,
+    entry_run_team: Optional[str],
+    future_ticks: pd.DataFrame,
+    future_possessions: pd.DataFrame,
+    tp: float = 5.0,
+    sl: float = 3.0,
+    entry_side: int = 1,
+) -> ExitResult:
+    """
+    Simulate one trade exit from a single entry point.
+
+    Args:
+        entry_wall_clock: wall clock timestamp at entry possession end
+        entry_yes_bid: yes_bid at entry (cents)
+        entry_run_team: current_run_team value at entry ("home", "away", or None)
+        future_ticks: all ticks for this game with ts > entry_wall_clock, sorted by ts
+        future_possessions: all possessions for this game after entry, sorted by wall_clock_ts
+        tp: take profit threshold in cents
+        sl: stop loss threshold in cents
+        entry_side: +1 for BUY YES (home run), -1 for BUY NO (away run)
+    """
+    deadline = entry_wall_clock + pd.Timedelta(seconds=MAX_SECONDS)
+    window_ticks = future_ticks[future_ticks["ts"] <= deadline].copy()
+    window_possessions = future_possessions[
+        future_possessions["wall_clock_ts"] <= deadline
+    ].copy()
+
+    exit_price = entry_yes_bid
+    exit_reason = "time_gate"
+    exit_time_offset_s = MAX_SECONDS
+
+    # Walk forward through ticks to find first exit condition
+    for _, tick in window_ticks.iterrows():
+        current_bid = float(tick["yes_bid"])
+        elapsed_s = (tick["ts"] - entry_wall_clock).total_seconds()
+
+        # Check garbage time via possession state at this point in time
+        poss_so_far = window_possessions[
+            window_possessions["wall_clock_ts"] <= tick["ts"]
+        ]
+        if not poss_so_far.empty:
+            last_poss = poss_so_far.iloc[-1]
+            if last_poss.get("is_blowout", False) or last_poss.get("is_garbage_time", False):
+                exit_price = current_bid
+                exit_reason = "garbage_time"
+                exit_time_offset_s = elapsed_s
+                break
+
+            # Momentum flip: run_team changed from entry state
+            current_run_team = last_poss.get("current_run_team", None)
+            if entry_run_team is not None and current_run_team != entry_run_team:
+                exit_price = current_bid
+                exit_reason = "momentum_flip"
+                exit_time_offset_s = elapsed_s
+                break
+
+        # TP / SL (direction-adjusted)
+        move = entry_side * (current_bid - entry_yes_bid)
+        if move >= tp:
+            exit_price = current_bid
+            exit_reason = "take_profit"
+            exit_time_offset_s = elapsed_s
+            break
+        if move <= -sl:
+            exit_price = current_bid
+            exit_reason = "stop_loss"
+            exit_time_offset_s = elapsed_s
+            break
+
+    # Build 10-checkpoint trajectory with exit clipping
+    trajectory: list[float] = []
+    exit_abs_ts = entry_wall_clock + pd.Timedelta(seconds=exit_time_offset_s)
+
+    for checkpoint_s in CHECKPOINT_SECONDS:
+        checkpoint_ts = entry_wall_clock + pd.Timedelta(seconds=checkpoint_s)
+        if checkpoint_ts <= exit_abs_ts:
+            price = _lookup_price_at_or_after(future_ticks, checkpoint_ts, exit_price)
+        else:
+            # After exit: freeze at exit price
+            price = exit_price
+        trajectory.append(_logit_delta(entry_yes_bid, price))
+
+    simulated_pnl = entry_side * (exit_price - entry_yes_bid)
+
+    return ExitResult(
+        exit_price=exit_price,
+        exit_reason=exit_reason,
+        exit_time_offset_s=exit_time_offset_s,
+        simulated_pnl=simulated_pnl,
+        trajectory=trajectory,
+    )
+
+
+def build_trajectory_targets(
+    entry_rows: pd.DataFrame,
+    all_ticks: pd.DataFrame,
+    all_possessions: pd.DataFrame,
+    tp: float = 5.0,
+    sl: float = 3.0,
+) -> pd.DataFrame:
+    """
+    Build trajectory targets for all entry rows with Kalshi tick data.
+
+    Args:
+        entry_rows: possession rows that have wall_clock_ts and yes_bid — one row per
+                    potential trade entry. Must have columns:
+                      game_id, wall_clock_ts, yes_bid, current_run_team,
+                      current_run_team_encoded (1=home, -1=away, 0=none)
+        all_ticks: all Kalshi ticks (main.kalshi_ticks), must have ts, game_id, yes_bid
+        all_possessions: all possessions (features.possession_flat), must have
+                         game_id, wall_clock_ts, current_run_team, is_blowout, is_garbage_time
+
+    Returns:
+        entry_rows with added columns:
+          traj_0 .. traj_9  — 10 logit-delta checkpoints
+          exit_price, exit_reason, exit_time_offset_s, simulated_pnl
+    """
+    if entry_rows.empty:
+        return entry_rows
+
+    ticks_sorted = all_ticks.sort_values("ts").copy()
+    poss_sorted = all_possessions.sort_values("wall_clock_ts").copy()
+
+    traj_cols = [f"traj_{i}" for i in range(N_CHECKPOINTS)]
+    meta_cols = ["exit_price", "exit_reason", "exit_time_offset_s", "simulated_pnl"]
+
+    # Reset index to ensure contiguous 0..N-1 labels — we write results back by label.
+    out = entry_rows.copy().reset_index(drop=True)
+    for col in traj_cols + ["exit_price", "exit_time_offset_s", "simulated_pnl"]:
+        out[col] = np.nan
+    out["exit_reason"] = None
+
+    # Process per-game. Iterate over the reset-indexed `out` so idx is always valid.
+    for game_id, game_entries in out.groupby("game_id"):
+        game_ticks = ticks_sorted[ticks_sorted["game_id"] == game_id].copy()
+        game_poss = poss_sorted[poss_sorted["game_id"] == game_id].copy()
+
+        if game_ticks.empty:
+            logger.warning("No ticks for game %s — skipping %d entries", game_id, len(game_entries))
+            continue
+
+        for idx, row in game_entries.iterrows():
+            entry_ts: pd.Timestamp = pd.Timestamp(row["wall_clock_ts"])
+            entry_bid = float(row["yes_bid"])
+            entry_run_team = row.get("current_run_team", None)
+
+            run_encoded = row.get("current_run_team_encoded", 0)
+            entry_side = 1 if run_encoded >= 0 else -1
+
+            future_ticks = game_ticks[game_ticks["ts"] > entry_ts]
+            future_poss = game_poss[game_poss["wall_clock_ts"] > entry_ts]
+
+            sim = simulate_exit(
+                entry_wall_clock=entry_ts,
+                entry_yes_bid=entry_bid,
+                entry_run_team=entry_run_team,
+                future_ticks=future_ticks,
+                future_possessions=future_poss,
+                tp=tp,
+                sl=sl,
+                entry_side=entry_side,
+            )
+
+            for i, val in enumerate(sim.trajectory):
+                out.at[idx, f"traj_{i}"] = val
+            out.at[idx, "exit_price"]        = sim.exit_price
+            out.at[idx, "exit_reason"]        = sim.exit_reason
+            out.at[idx, "exit_time_offset_s"] = sim.exit_time_offset_s
+            out.at[idx, "simulated_pnl"]      = sim.simulated_pnl
+
+    traj_filled = out[traj_cols].notna().all(axis=1).sum()
+    logger.info("build_trajectory_targets: filled trajectories for %d/%d rows", traj_filled, len(out))
+    return out
