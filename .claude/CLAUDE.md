@@ -614,11 +614,16 @@ data permanently lost. This is the first thing to build and the first thing to d
 - [x] Phase 2: **Nightly post-game pipeline** — runs at 3 AM ET on Fly.io, updates all tables automatically
 - [ ] Phase 3: Backtesting simulator (built but strategies losing — paused)
 - [x] Phase 4: Run predictor trained — AUCPR 0.1075 vs 0.0840 baseline (28% lift)
-- [ ] Phase 4: Layer 2 trade outcome model ← **CURRENT FOCUS**
-  - Real Kalshi tick data live in MotherDuck (`kalshi_ticks`) — 76 games recorded
-  - Architecture decided: train on L1-entry rows only, hybrid exit simulation as target, log-odds units, 30–70¢ band
-  - Must build exit simulator before retraining — current model (fixed 120s, all rows, raw cents) is not valid
-- [ ] Phase 4: RL agent
+- [x] Phase 4: **MMoE model trained (2026-04-15)** — replaces L1 + L2 with a single PyTorch multi-task network ← **COMPLETED**
+  - **Head A (run classifier):** AUCPR 0.1533 vs 0.0840 baseline (+82%) and vs 0.1075 XGBoost (+43%)
+  - **Head B (price trajectory):** RMSE 0.5525 log-odds delta; Dir Acc 59.2% on meaningful-exit rows
+  - **Head C (run survival hazard):** Brier 0.0939 across 10 horizons
+  - Architecture: 83 input features (58 physics + 10 pregame + 14 market + 1 market flag), 3 experts (64-dim MLP), 3 gating networks, 3 heads. ~37K params.
+  - Data: 433K basketball rows (Heads A/C) + 24K joint rows with Kalshi ticks (Head B), 148 games
+  - Train/val split: basketball time-based (Jan 2026 cutoff); Head B: Mar 23–Apr 6 train / Apr 7–12 val
+  - Model artifacts: `models/saved/mmoe.pt`, `models/saved/mmoe_scaler.pkl`
+  - Key fix: zero-inflated trajectory targets (42% of traj_9 == 0) caused 13.1% dir acc bug; fixed via signal-filtered Huber loss mask (`abs mean > 0.02`) + directional accuracy threshold (`abs final chkpt > 0.05`)
+- [ ] Phase 4: RL agent ← **CURRENT FOCUS**
 - [ ] Phase 5: Execution layer (paper mode)
 - [ ] Phase 5: Risk module + kill switch
 - [ ] Phase 6: Paper trading (4+ weeks)
