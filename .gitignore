@@ -5,3 +5,7 @@ venv
 data/feature_store/
 data/raw/
 data/ingestion/__pycache__/
+models/mmoe/__pycache__/
+models/__pycache__/
+models/targets/__pycache__/
+
