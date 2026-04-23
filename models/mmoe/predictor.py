@@ -25,8 +25,8 @@ from sklearn.preprocessing import StandardScaler
 from models.mmoe.feature_config import ALL_FEATURE_COLS
 from models.mmoe.model import MMoEModel
 
-MODEL_PATH  = Path("models/saved/mmoe.pt")
-SCALER_PATH = Path("models/saved/mmoe_scaler.pkl")
+MODEL_PATH  = Path("models/saved/mmoe_delay20.pt")
+SCALER_PATH = Path("models/saved/mmoe_scaler_delay20.pkl")
 
 
 @dataclass

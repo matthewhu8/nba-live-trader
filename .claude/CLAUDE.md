@@ -263,72 +263,6 @@ class BaseStrategy:
         """Force-close open positions. Log game summary."""
 ```
 
-### Strategies to Implement (in order)
-
-**`MeanReversionStrategy`**
-Fade scoring runs above threshold when shot quality is low (unsustainable scoring).
-Entry: run_length > X AND home_scoring_sustainable == False.
-Exit: run reverses OR time limit reached.
-Hypothesis: retail overreacts to runs built on contested shots. Price snaps back.
-
-**`LineupEdgeStrategy`**
-Enter when lineup_net_rating_delta exceeds threshold after a substitution.
-Entry: home_lineup_just_changed AND lineup_net_rating_delta > X.
-Exit: next substitution OR time limit.
-Hypothesis: Kalshi doesn't immediately price in lineup quality changes.
-
-**`RotationAnticipationStrategy`**
-Enter just before expected substitution that will create favorable lineup delta.
-Entry: rotation_signal > 0.7 AND historical sub creates favorable matchup.
-Exit: substitution occurs and position filled.
-Hypothesis: we know the sub is coming before it happens. Enter before the move.
-
-**`MomentumStrategy`**
-Enter in direction of current run when shot quality is high (sustainable scoring).
-Entry: run_length > X AND scoring_sustainable == True.
-Exit: run ends OR score_diff becomes blowout.
-Hypothesis: sustainable scoring runs continue longer than market expects.
-
-**`CompositeStrategy`**
-Combines signals from multiple sub-strategies with weighted confidence scores.
-This is what the RL agent eventually becomes — a learned version of this weighting.
-
----
-
-## Simulation Engine
-
-Replays historical games, enforces reality, calls strategy hooks.
-
-```
-For each game (strict chronological order — never shuffle):
-  → Fetch pregame context → strategy.on_game_start()
-
-  For each possession (strict time order):
-    → Load feature row from feature store
-    → Enforce data latency: live feed features delayed 15-20s
-      (pre-game computed features have no latency)
-    → Check is_garbage_time / is_blowout → skip if true
-    → strategy.on_possession() → get signal
-    → If signal:
-        → risk/position_limits.py check
-        → Place simulated limit order at signal price
-        → Simulate fill probability based on order book depth
-        → Track unfilled orders (may not fill if price moves away)
-    → For open positions: strategy.on_position_update()
-    → Apply maker fees to all fills
-    → Update PnL tracker
-    → Record full decision log (used for analysis)
-
-  → strategy.on_game_end()
-  → Force-close open positions at last available price
-  → Write game summary to results
-```
-
-**Latency is not optional.** Every feature from a live feed (substitutions, scores,
-play-by-play) must be delayed by 15-20s in simulation. Skipping this makes
-backtests fantasy. Pre-game computed features (lineup ratings, tendencies) have
-no latency — those were computed before the game started.
-
 ---
 
 ## Backtesting Evaluation Framework
@@ -588,10 +522,9 @@ data permanently lost. This is the first thing to build and the first thing to d
 14. First backtest run + analysis
 
 ### Phase 4 — Model Layer
-15. `models/run_predictor.py` — XGBoost on feature store
-16. Remaining strategies (rotation_anticipation, momentum, composite)
-17. `models/rl_agent.py` — trained through simulator
-18. `pregame/pregame_analyzer.py`
+15. MMoE model — ✅ complete (`models/mmoe/`)
+16. `models/rl_agent.py` — trained through backtesting simulator
+17. `pregame/pregame_analyzer.py`
 
 ### Phase 5 — Execution
 19. `execution/kalshi_client.py` — Kalshi REST + WebSocket
@@ -615,17 +548,22 @@ data permanently lost. This is the first thing to build and the first thing to d
 - [ ] Phase 2: Rotation tendency model
 - [x] Phase 2: Feature store built + validated (58 features, lineup signals included)
 - [x] Phase 2: **Nightly post-game pipeline** — runs at 3 AM ET on Fly.io, updates all tables automatically
-- [ ] Phase 3: Backtesting simulator (built but strategies losing — paused)
-- [x] Phase 4: Run predictor trained — AUCPR 0.1075 vs 0.0840 baseline (28% lift)
-- [x] Phase 4: **MMoE model trained (2026-04-15)** — replaces L1 + L2 with a single PyTorch multi-task network ← **COMPLETED**
-  - **Head A (run classifier):** AUCPR 0.1533 vs 0.0840 baseline (+82%) and vs 0.1075 XGBoost (+43%)
+- [x] Phase 3: **MMoE backtest complete (2026-04-23)** — edge validated on Apr 7–12 val set ← **COMPLETED**
+  - Baseline (naïve entry): 92 trades, 29.3% win rate, **-$3,086 net**
+  - **Best config**: `--use-traj-for-side --min-abs-traj 0.08 --min-run-length 2 --hold-seconds 240`
+  - Best result: 19 trades, **42.1% win rate, +$2,463 net** (100 contracts, 48 val games)
+  - Q3 strongest quarter: 71.4% win rate, +$2,584 net
+  - Key fix: entry direction from Head B `traj_final` sign, not basketball `run_team_encoded`
+  - Key filters: `|traj_final| ≥ 0.08` (Head B confidence) + `run_length ≥ 2` (no single-basket noise)
+  - 240s hold > 120s: market reprices over 3-4 min; 300s adds noise (50% SL rate)
+  - Backtest script: `python -m backtesting.mmoe_backtest --use-traj-for-side --min-abs-traj 0.08 --min-run-length 2 --hold-seconds 240`
+- [x] Phase 4: **MMoE model trained (2026-04-15)**
+  - **Head A (run classifier):** AUCPR 0.1533 vs 0.0840 baseline (+82%)
   - **Head B (price trajectory):** RMSE 0.5525 log-odds delta; Dir Acc 59.2% on meaningful-exit rows
   - **Head C (run survival hazard):** Brier 0.0939 across 10 horizons
   - Architecture: 83 input features (58 physics + 10 pregame + 14 market + 1 market flag), 3 experts (64-dim MLP), 3 gating networks, 3 heads. ~37K params.
   - Data: 433K basketball rows (Heads A/C) + 24K joint rows with Kalshi ticks (Head B), 148 games
-  - Train/val split: basketball time-based (Jan 2026 cutoff); Head B: Mar 23–Apr 6 train / Apr 7–12 val
-  - Model artifacts: `models/saved/mmoe.pt`, `models/saved/mmoe_scaler.pkl`
-  - Key fix: zero-inflated trajectory targets (42% of traj_9 == 0) caused 13.1% dir acc bug; fixed via signal-filtered Huber loss mask (`abs mean > 0.02`) + directional accuracy threshold (`abs final chkpt > 0.05`)
+  - Model artifacts: `models/saved/mmoe_delay20.pt`, `models/saved/mmoe_scaler_delay20.pkl`
 - [ ] Phase 4: RL agent ← **CURRENT FOCUS**
 - [ ] Phase 5: Execution layer (paper mode)
 - [ ] Phase 5: Risk module + kill switch
@@ -738,10 +676,7 @@ python data/ingestion/game_schedule.py --date 2026-03-25
 
 ## ML Model Stack
 
-Two modeling layers. The old 3-layer XGBoost stack (L1 run predictor → L2 price movement → L3 agent)
-has been superseded by the MMoE. Don't rebuild the layered XGBoost approach.
-
-### Layer 1 — MMoE (Multi-task Mixture-of-Experts, PyTorch) ← PRIMARY MODEL
+### MMoE (Multi-task Mixture-of-Experts, PyTorch) ← PRIMARY MODEL
 A single unified network that replaces both the XGBoost run predictor and the price movement regressor.
 
 - **Architecture:** 83 input features (58 basketball + 10 pregame + 14 market + 1 market flag),
@@ -772,10 +707,7 @@ A single unified network that replaces both the XGBoost run predictor and the pr
 - Single inference call at decision time instead of two separate model calls
 - Multi-task regularization reduces overfitting on each individual head
 
-**XGBoost run predictor (`models/saved/run_predictor.pkl`) is retired** — do not use for new work.
-Keep the file for reference only.
-
-### Layer 2 — Entry/Exit Agent (RL)
+### Entry/Exit Agent (RL)
 Sits on top of MMoE. Handles the sequential decision problem: not just "is a run coming and will
 price move" but "should I enter NOW, how big, and when do I exit."
 
