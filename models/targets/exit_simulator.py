@@ -77,6 +77,7 @@ def simulate_exit(
     tp: float = 5.0,
     sl: float = 3.0,
     entry_side: int = 1,
+    max_seconds: Optional[int] = None,
 ) -> ExitResult:
     """
     Simulate one trade exit from a single entry point.
@@ -90,8 +91,10 @@ def simulate_exit(
         tp: take profit threshold in cents
         sl: stop loss threshold in cents
         entry_side: +1 for BUY YES (home run), -1 for BUY NO (away run)
+        max_seconds: time gate override in seconds (defaults to MAX_SECONDS=120)
     """
-    deadline = entry_wall_clock + pd.Timedelta(seconds=MAX_SECONDS)
+    hold_limit = max_seconds if max_seconds is not None else MAX_SECONDS
+    deadline = entry_wall_clock + pd.Timedelta(seconds=hold_limit)
     window_ticks = future_ticks[future_ticks["ts"] <= deadline].copy()
     window_possessions = future_possessions[
         future_possessions["wall_clock_ts"] <= deadline
@@ -99,7 +102,7 @@ def simulate_exit(
 
     exit_price = entry_yes_bid
     exit_reason = "time_gate"
-    exit_time_offset_s = MAX_SECONDS
+    exit_time_offset_s = hold_limit
 
     # Walk forward through ticks to find first exit condition
     for _, tick in window_ticks.iterrows():
@@ -139,7 +142,8 @@ def simulate_exit(
             exit_time_offset_s = elapsed_s
             break
 
-    # Build 10-checkpoint trajectory with exit clipping
+    # Build 10-checkpoint trajectory with exit clipping.
+    # Checkpoints always use CHECKPOINT_SECONDS (training-compatible fixed intervals).
     trajectory: list[float] = []
     exit_abs_ts = entry_wall_clock + pd.Timedelta(seconds=exit_time_offset_s)
 

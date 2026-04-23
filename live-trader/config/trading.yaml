@@ -15,8 +15,8 @@ risk:
   max_contracts_per_order: 100
 
 agent:
-  min_yes_bid: 30          # only trade in 30-70¢ band
-  max_yes_bid: 70
+  min_yes_bid: 20          # only trade in 30-70¢ band
+  max_yes_bid: 80
   min_run_prob_entry: 0.15  # ~2x base rate
 
 feeds:
