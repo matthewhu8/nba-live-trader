@@ -1,0 +1,32 @@
+# Live trading configuration
+# paper_mode: true is the default — set to false only for real money
+
+trading:
+  paper_mode: true
+
+inference:
+  base_url: "http://localhost:8001"
+  timeout_ms: 500
+
+risk:
+  max_total_exposure_cents: 5000      # $50 max open across all games
+  max_per_game_exposure_cents: 2000   # $20 max open per game
+  max_daily_loss_cents: 10000         # $100 daily loss limit — halt all trading
+  max_contracts_per_order: 100
+
+agent:
+  min_yes_bid: 30          # only trade in 30-70¢ band
+  max_yes_bid: 70
+  min_run_prob_entry: 0.15  # ~2x base rate
+
+feeds:
+  nba_poll_interval_ms: 3000
+  kalshi_stale_threshold_ms: 30000   # emit stale sentinel after 30s silence
+
+observability:
+  redis_stream: "possession_events"
+  log_level: "info"
+
+# Feature column order — must match models/mmoe/feature_config.py ALL_FEATURE_COLS
+# Go reads this to align the 83-float vector sent to/from Python
+feature_cols_checksum: "83_cols_v1"  # bump when feature_config.py changes

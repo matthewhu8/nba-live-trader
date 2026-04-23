@@ -233,9 +233,10 @@ Real intra-game Kalshi tick data is being recorded continuously and uploaded to
 MotherDuck (`kalshi_ticks` table). The synthetic price model has been scrapped —
 we have the real thing.
 
-The tick data feeds directly into Layer 2 (price movement model). The goal is to
-join run_predictor signals with actual Kalshi bid/ask movements and measure whether
-high-confidence run predictions preceded profitable price moves, net of maker fees.
+The tick data is a direct input to the MMoE model (Head B — price trajectory).
+The goal is to join basketball possession features with Kalshi bid/ask movements
+and train the model end-to-end to predict run probability, price direction, and
+run survival — all from one unified network, net of maker fees.
 
 ---
 
@@ -408,8 +409,8 @@ Once backtesting validates an edge, this is the live system:
 [Feature Computer] (real-time, uses feature store patterns)
   → builds feature row for each possession
         ↓
-[Run Prediction Model]
-  → probability of run + direction
+[MMoE Model] (models/saved/mmoe.pt)
+  → Head A: P(run) | Head B: Δ(yes_bid) | Head C: survival hazard
         ↓
 [RL Agent / Signal Generator]
   → trade / wait / exit decision
@@ -428,11 +429,12 @@ Once backtesting validates an edge, this is the live system:
 
 ## RL Agent
 
-Sits on top of run prediction model. Handles the sequential decision problem:
-not just "is a run coming" but "should I enter NOW, how big, and when do I exit."
+Sits on top of the MMoE. Handles the sequential decision problem:
+not just "what does the model predict" but "should I enter NOW, how big, and when do I exit."
 
 ```
-State:  run_probability, kalshi_price, game_context,
+State:  mmoe_run_prob (Head A), mmoe_price_delta (Head B), mmoe_survival (Head C),
+        yes_bid, quarter, score_diff, lineup_delta,
         current_position, time_in_position, recent_pnl
 Action: buy_yes, buy_no, exit, wait
 Reward: realized PnL after maker fees
@@ -447,6 +449,7 @@ What the agent learns that rules can't capture:
 - Don't enter when score_diff is large (blowout kills price movement)
 - This lineup signal is reliable in Q2 but not Q4
 - Shot quality matters more than run length for entry timing
+- When Head C survival drops fast → cut early; when it stays high → hold
 - When to cut a losing position vs. hold through noise
 
 ---
@@ -735,45 +738,60 @@ python data/ingestion/game_schedule.py --date 2026-03-25
 
 ## ML Model Stack
 
-Three distinct modeling layers. Don't conflate them.
+Two modeling layers. The old 3-layer XGBoost stack (L1 run predictor → L2 price movement → L3 agent)
+has been superseded by the MMoE. Don't rebuild the layered XGBoost approach.
 
-### Layer 1 — Run Predictor (XGBoost Classifier)
-- Input: 58 FEATURE_COLS from `features.possession_flat` — ALL possessions (scoring + non-scoring)
-- Output: calibrated P(`target_meaningful_run_5_scoring`) — home outscores by 6+ in next 5 **scoring** possessions (~3-4 min window, pace-independent)
-- **Current: AUCPR 0.1075 vs baseline 0.0840 (~28% lift)** — retrained 2026-03-31
-  - Train: Oct 21, 2025–Jan 31, 2026 (296,257 rows); Val: Feb 1–Mar 5, 2026 (37,293 rows)
-  - Test: Mar 6, 2026–present — untouched
-  - Top features: current_run_team_encoded, minutes_into_game, away_star_on_court, trailing_team_urgency, away_in_bonus
-- **Use isotonic regression calibration** — raw XGBoost scores cluster near base rate (8.4%) and are not trustworthy as probabilities without calibration. This matters for trading.
-- Do NOT use `scale_pos_weight` — shifts probs toward 0.5, destroying calibration
-- Do NOT use focal loss — harder to calibrate post-hoc
-- Optimize decision threshold against Sharpe on simulator, not against accuracy or F1
-- Stay with XGBoost. Trees beat deep learning on tabular data under 1M rows. LSTMs/Transformers add nothing — our features already encode temporal context (momentum windows, run state).
-- Retrain on rolling 60-game window every ~10 games during live season to handle concept drift
+### Layer 1 — MMoE (Multi-task Mixture-of-Experts, PyTorch) ← PRIMARY MODEL
+A single unified network that replaces both the XGBoost run predictor and the price movement regressor.
 
-### Layer 2 — Trade Outcome Model (XGBoost Regressor)
-- **Training set: L1-entry rows only** — rows where L1 run_prob exceeds the entry threshold. L2 is never called on rows we wouldn't trade, so it should never train on them. Training distribution must match inference distribution.
-- **Trade direction from L1** — L1 determines which side to enter (home run → buy YES, away run → buy NO). The PnL label sign flips accordingly. Raw Δ(yes_bid) is always adjusted for direction before labeling.
-- **Target: simulated PnL under hybrid exit strategy** — NOT Δ(yes_bid) at fixed t+120s. For each training row, simulate forward through tick + possession data and exit at whichever fires first:
-  1. Stop Loss triggered (price moves X¢ against position)
-  2. Take Profit triggered (price moves Y¢ in favor)
-  3. `current_team_run` flips to opposing team or neutral
-  4. N scoring possessions elapsed (primary time stop — pace-independent)
-  5. `is_blowout` or `is_garbage_time` becomes true
-- **Target units: log-odds change**, not raw cents. `logit(p_exit/100) - logit(p_entry/100)` normalizes for price level — a 10¢ move at 50¢ is a different probability shift than at 80¢. This prevents high-price buckets from dominating training.
-- **Trade only in 30–70¢ band** — restrict entry rows to `30 ≤ yes_bid ≤ 70`. Outside this range, market certainty is too high for basketball signal to move price meaningfully.
-- Real intra-game Kalshi tick data recorded continuously to `kalshi_ticks` in MotherDuck.
-- **Synthetic price model is scrapped** — we have real tick data.
-- Current model (`models/saved/kalshi_price_movement_predictor.pkl`) was trained with fixed 120s target on all rows — do not use as-is. Retrain once exit simulation is built.
+- **Architecture:** 83 input features (58 basketball + 10 pregame + 14 market + 1 market flag),
+  3 expert networks (64-dim MLP), 3 gating networks, 3 task heads. ~37K params.
+- **Head A — Run Classifier:** P(meaningful run in next 5 scoring possessions)
+  - AUCPR 0.1533 vs 0.0840 baseline (+82%) and vs 0.1075 XGBoost (+43%)
+- **Head B — Price Trajectory:** expected Δ(yes_bid) in log-odds over the hold window
+  - RMSE 0.5525 log-odds delta; Dir Acc 59.2% on meaningful-exit rows
+  - Trained only on joint rows where Kalshi ticks exist (24K rows, 148 games)
+- **Head C — Run Survival Hazard:** probability run is still ongoing at each of 10 time horizons
+  - Brier score 0.0939 across all horizons — used for dynamic exit timing
+- **Model artifacts:** `models/saved/mmoe.pt`, `models/saved/mmoe_scaler.pkl`
+- **Data split:** basketball time-based (Jan 2026 cutoff); Head B: Mar 23–Apr 6 train / Apr 7–12 val
+- **Trade only in 30–70¢ band** — restrict entry rows to `30 ≤ yes_bid ≤ 70`. Outside this range,
+  market certainty is too high for basketball signal to move price meaningfully.
+- **Target units for Head B: log-odds change** — `logit(p_exit/100) - logit(p_entry/100)`.
+  Normalizes for price level so a 10¢ move at 50¢ ≠ 10¢ move at 80¢.
+- **Retrain cadence:** rolling 60-game window every ~10 games during live season to handle concept drift.
+  All three heads retrain together — they share the expert networks.
+- **Key fix on record:** zero-inflated trajectory targets (42% of traj_9 == 0) caused a 13.1% dir acc
+  bug; fixed via signal-filtered Huber loss mask (`abs mean > 0.02`) + directional accuracy threshold
+  (`abs final checkpoint > 0.05`).
 
-### Layer 3 — Entry/Exit Agent
-- **Start with contextual bandit (Thompson Sampling)** — treats each possession decision as independent. Trains in 100-200 games. Easy to debug. Good fit for thin, illiquid markets.
-- State: run_prob, L2_expected_pnl, yes_bid, quarter, score_diff, lineup_delta, position_state
-- Actions: buy_yes / buy_no / exit / wait
-- Reward: realized PnL after maker fees (must match hybrid exit simulation used to train L2)
-- **Upgrade to PPO** only if bandit plateaus — PPO can learn multi-step planning but needs 10x more data and is much harder to debug
+**Why MMoE over separate XGBoost models:**
+- Shared experts capture basketball context that matters for both run prediction AND price movement
+- Head B (price) can only train on the ~5% of rows where Kalshi ticks exist — the shared experts
+  transfer knowledge from 433K basketball rows to inform that thin Head B training set
+- Single inference call at decision time instead of two separate model calls
+- Multi-task regularization reduces overfitting on each individual head
+
+**XGBoost run predictor (`models/saved/run_predictor.pkl`) is retired** — do not use for new work.
+Keep the file for reference only.
+
+### Layer 2 — Entry/Exit Agent (RL)
+Sits on top of MMoE. Handles the sequential decision problem: not just "is a run coming and will
+price move" but "should I enter NOW, how big, and when do I exit."
+
+- **Start with contextual bandit (Thompson Sampling)** — treats each possession as independent.
+  Trains in 100-200 games. Easy to debug. Good fit for thin, illiquid markets.
+- **State:** mmoe_run_prob (Head A), mmoe_price_delta (Head B), mmoe_survival (Head C),
+  yes_bid, quarter, score_diff, lineup_delta, current_position, time_in_position
+- **Actions:** buy_yes / buy_no / exit / wait
+- **Reward:** realized PnL after maker fees
+- **Upgrade to PPO** only if bandit plateaus — PPO can learn multi-step planning but needs 10x
+  more data and is much harder to debug
 - Never use: DQN (sparse rewards cause Q-value instability), SAC (continuous action space mismatch)
 - If going full offline RL: use IQL (simple, stable, trains on simulator rollouts)
+
+**Exit logic informed by Head C (survival):** when the survival hazard drops sharply across horizons,
+that's a signal the run is ending — use it to trigger exit before the price reverts.
 
 ---
 
@@ -796,8 +814,7 @@ Compute everything slow-changing before the game starts. Nothing in game_context
 Sportradar WebSocket (raw events, ~15-20s latency)
     → Event Parser (possession parser — see critical note below)
     → Feature Computer (merges live state + game_context.json)
-    → Run Predictor (XGBoost) → P(run)
-    → Price Movement Model → expected Δ(yes_bid)
+    → MMoE Model → Head A: P(run) | Head B: Δ(yes_bid) | Head C: survival hazard
     → RL Agent → BUY YES / BUY NO / EXIT / WAIT
     → Risk Module (position_limits.py — always)
     → Execution Layer (kalshi_client.py)

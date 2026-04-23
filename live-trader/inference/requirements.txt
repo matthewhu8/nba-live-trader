@@ -1,0 +1,11 @@
+"""
+Inference layer for our execution service to execute the models predictions based on the input
+from the Go ingestion engine. 
+"""
+
+import fastapi
+import uvicorn 
+import torch
+import numpy as np 
+
+

@@ -49,6 +49,13 @@ BBALL_VAL_END    = pd.Timestamp("2026-03-05")
 # Head B (joint market) splits: 80/20 within tick-data window
 HEADB_SPLIT_DATE = pd.Timestamp("2026-04-07")  # ~80/20 within 148-game window
 
+# Feed delay: time from IRL game event to when we can act on it.
+# NBA CDN polling:  ~17s CDN delay + ~1.5s avg poll wait = 20s
+# Sportradar WS:    ~2-5s broadcast delay only           =  5s
+# Used to shift the market feature lookup so training reflects live entry conditions.
+FEED_DELAY_SECONDS_NBA        = 20
+FEED_DELAY_SECONDS_SPORTRADAR =  5
+
 # ── Column lists ────────────────────────────────────────────────────────────
 
 TRAJ_COLS  = [f"traj_{i}" for i in range(10)]
@@ -299,11 +306,13 @@ def _compute_market_features_for_game(game_ticks: pd.DataFrame) -> pd.DataFrame:
 def _join_ticks_to_possessions(
     possessions: pd.DataFrame,
     ticks: pd.DataFrame,
+    feed_delay_seconds: int = FEED_DELAY_SECONDS_NBA,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Backward ASOF join: for each possession, attach the most recent Kalshi tick
-    at or before that possession's wall_clock_ts. Operates per game to prevent
-    cross-game contamination.
+    at or before (wall_clock_ts + feed_delay_seconds). The delay simulates the
+    real-time lag between when a game event occurs and when we can act on it,
+    ensuring training uses the same market snapshot we'd observe in live trading.
 
     Returns:
         (joint_df, basketball_only_df)
@@ -313,11 +322,15 @@ def _join_ticks_to_possessions(
     possessions["wall_clock_ts"] = pd.to_datetime(possessions["wall_clock_ts"], utc=True)
     ticks["ts"] = pd.to_datetime(ticks["ts"], utc=True)
 
+    # Shift lookup window forward by feed delay to match live entry conditions
+    delay = pd.Timedelta(seconds=feed_delay_seconds)
+    possessions["_join_ts"] = possessions["wall_clock_ts"] + delay
+
     joint_parts: list[pd.DataFrame] = []
     games_with_ticks = set(ticks["game_id"].unique())
 
     for game_id, poss_game in possessions.groupby("game_id"):
-        poss_game = poss_game.sort_values("wall_clock_ts").copy()
+        poss_game = poss_game.sort_values("_join_ts").copy()
 
         if game_id not in games_with_ticks:
             continue
@@ -334,10 +347,10 @@ def _join_ticks_to_possessions(
                 "open_interest_change_60s", "bid_velocity_30s",
                 "bid_acceleration_30s", "bid_vs_last_divergence", "has_market_data",
             ]],
-            left_on="wall_clock_ts",
+            left_on="_join_ts",
             right_on="ts",
             direction="backward",
-        ).drop(columns=["ts"], errors="ignore")
+        ).drop(columns=["ts", "_join_ts"], errors="ignore")
 
         # Possession-level d_yes_bid and d_spread (within game)
         merged = merged.sort_values("event_id").copy()
@@ -503,6 +516,7 @@ def build_dataloaders(
     tp: float = 5.0,
     sl: float = 3.0,
     num_workers: int = 0,
+    feed_delay_seconds: int = FEED_DELAY_SECONDS_NBA,
 ) -> tuple[DataLoader, DataLoader, StandardScaler]:
     """
     Full data pipeline: load → feature engineer → targets → split → DataLoaders.
@@ -526,8 +540,9 @@ def build_dataloaders(
     # Tick parsing + home-contract selection
     ticks = _select_home_best_contract(ticks_raw, possessions)
 
+    logger.info("Feed delay: %ds (market features look up tick at wall_clock_ts + %ds)", feed_delay_seconds, feed_delay_seconds)
     # Split possessions into joint (has ticks) and basketball-only
-    joint_df, bball_only = _join_ticks_to_possessions(possessions, ticks)
+    joint_df, bball_only = _join_ticks_to_possessions(possessions, ticks, feed_delay_seconds=feed_delay_seconds)
 
     # --- Targets ---
     # Run target + hazard for all rows (both datasets)
