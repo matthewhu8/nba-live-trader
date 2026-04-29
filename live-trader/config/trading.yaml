@@ -15,9 +15,13 @@ risk:
   max_contracts_per_order: 100
 
 agent:
-  min_yes_bid: 20          # only trade in 30-70¢ band
-  max_yes_bid: 80
+  min_yes_bid: 30
+  max_yes_bid: 70
   min_run_prob_entry: 0.15  # ~2x base rate
+  take_profit_cents: 8
+  stop_loss_cents: 5
+  max_hold_possessions: 6
+  position_size_contracts: 100
 
 feeds:
   nba_poll_interval_ms: 3000

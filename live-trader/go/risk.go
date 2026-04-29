@@ -15,7 +15,7 @@ import (
 	"sync/atomic"
 )
 
-type Config struct {
+type RiskConfig struct {
 	MaxTotalExposureCents   int
 	MaxPerGameExposureCents int
 	MaxDailyLossCents       int
@@ -24,14 +24,14 @@ type Config struct {
 
 type Ledger struct {
 	mu              sync.Mutex
-	cfg             Config
+	cfg             RiskConfig
 	totalExposure   int            // cents, current open across all games
 	perGameExposure map[string]int // game_id → open exposure in cents
 	dailyPnL        int            // cents, negative = loss
 	killSwitch      *KillSwitch
 }
 
-func NewLedger(cfg Config, ks *KillSwitch) *Ledger {
+func NewLedger(cfg RiskConfig, ks *KillSwitch) *Ledger {
 	return &Ledger{
 		cfg:             cfg,
 		perGameExposure: make(map[string]int),
