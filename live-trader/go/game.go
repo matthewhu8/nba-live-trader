@@ -15,7 +15,7 @@ package main
 
 import (
 	"context"
-	"time"
+
 )
 
 type GameEngine struct {
@@ -26,18 +26,6 @@ type GameEngine struct {
 	orderRouter     *Router
 	riskLedger      *Ledger
 	killSwitch      *KillSwitch
-	bandit          *Bandit
-	logger          *Logger
-	cfg             *Config
-	// runtime state
-	position        *PaperPosition
-	possCount       int
-	totalPipelineMS int64
-	signalCount     int
-	positionsOpened int
-	positionsClosed int
-	netPnLDollars   float64
-	wins            int
 }
 
 func NewGameEngine(
@@ -46,9 +34,6 @@ func NewGameEngine(
 	orderRouter *Router,
 	ledger *Ledger,
 	ks *KillSwitch,
-	bandit *Bandit,
-	logger *Logger,
-	cfg *Config,
 ) *GameEngine {
 	return &GameEngine{
 		gameID:          gameID,
@@ -58,16 +43,11 @@ func NewGameEngine(
 		orderRouter:     orderRouter,
 		riskLedger:      ledger,
 		killSwitch:      ks,
-		bandit:          bandit,
-		logger:          logger,
-		cfg:             cfg,
 	}
 }
 
 // Run blocks until ctx is cancelled.
 func (g *GameEngine) Run(ctx context.Context) {
-	defer g.emitSummary()
-
 	possessionCh := make(chan NBAEvent, 10)
 	tickCh := make(chan KalshiTick, 100)
 
@@ -104,95 +84,24 @@ func (g *GameEngine) onEvent(ctx context.Context, event NBAEvent) {
 		return
 	}
 
-	start := time.Now()
 	marketSnap := g.ringBuffer.Snapshot()
 
+	// Python service receives raw event + market snapshot.
+	// Returns action + full MMoE output + assembled feature dict (for logging).
 	resp, err := g.inferenceClient.ProcessPossession(ctx, g.gameID, event, marketSnap)
 	if err != nil {
-		zlog.Error().Str("game_id", g.gameID).Err(err).Msg("inference error")
+		// Log and skip this possession — don't crash the engine
 		return
-	}
-
-	g.possCount++
-	g.totalPipelineMS += resp.PipelineMS
-
-	g.logger.EmitPossession(g.gameID, event, resp, false, start)
-
-	// Check exit before considering new entries.
-	if g.position != nil {
-		if resp.IsGarbageTime || resp.IsBlowout {
-			pnl := calcNetPnL(g.position.Size, g.position.EntryPrice, resp.YesBid)
-			g.logger.EmitExit(g.gameID, "GARBAGE_TIME", g.position, resp.YesBid, pnl, g.possCount-g.position.EntryPossID)
-			g.updatePnL(pnl)
-			g.position = nil
-			g.logger.EmitGarbageTime(g.gameID, resp)
-			return
-		}
-
-		possHeld := g.possCount - g.position.EntryPossID
-		g.logger.EmitHold(g.gameID, g.position, resp, possHeld)
-
-		shouldExit, reason, pnl := g.orderRouter.CheckExit(g.position, resp.YesBid, g.possCount, g.cfg)
-		if shouldExit {
-			g.logger.EmitExit(g.gameID, reason, g.position, resp.YesBid, pnl, possHeld)
-			g.updatePnL(pnl)
-			g.position = nil
-			return
-		}
-		return // still holding — don't consider new entries
 	}
 
 	if resp.IsGarbageTime || resp.IsBlowout {
-		g.logger.EmitGarbageTime(g.gameID, resp)
 		return
 	}
 
-	action := g.bandit.Decide(resp, false)
-	if action != BuyYes {
-		return
-	}
-
-	approved, _ := g.riskLedger.Check(string(action), g.gameID, resp.YesBid)
+	approved, _ := g.riskLedger.Check(resp.Action, g.gameID, resp.YesBid)
 	if !approved {
 		return
 	}
 
-	pos := g.orderRouter.Place(g.gameID, resp, g.possCount, g.cfg)
-	if pos == nil {
-		return
-	}
-
-	g.position = pos
-	g.positionsOpened++
-	g.signalCount++
-	g.logger.EmitEntry(g.gameID, pos, resp)
-}
-
-func (g *GameEngine) updatePnL(pnl float64) {
-	g.netPnLDollars += pnl
-	g.positionsClosed++
-	if pnl > 0 {
-		g.wins++
-	}
-}
-
-func (g *GameEngine) emitSummary() {
-	var avgPipeline float64
-	if g.possCount > 0 {
-		avgPipeline = float64(g.totalPipelineMS) / float64(g.possCount)
-	}
-	var winRate float64
-	if g.positionsClosed > 0 {
-		winRate = float64(g.wins) / float64(g.positionsClosed)
-	}
-	g.logger.EmitGameSummary(GameSummary{
-		GameID:          g.gameID,
-		PossCount:       g.possCount,
-		AvgPipelineMS:   avgPipeline,
-		SignalCount:     g.signalCount,
-		PositionsOpened: g.positionsOpened,
-		PositionsClosed: g.positionsClosed,
-		NetPnLDollars:   g.netPnLDollars,
-		WinRate:         winRate,
-	})
+	g.orderRouter.Place(ctx, g.gameID, resp)
 }

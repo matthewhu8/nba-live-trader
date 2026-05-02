@@ -1,3 +1,10 @@
+// Entry point for the live trading engine.
+// For now: test mode polls a single game's NBA feed and prints events.
+//
+// Usage:
+//
+//	go run . --game 0022501234           poll a specific game ID (Ctrl+C to stop)
+//	go run . --game 0022501234 --test    run for 30s then exit
 package main
 
 import (
@@ -7,81 +14,44 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 )
 
+// currently set to only run nba live feed to ensure we are processing
+// each possession correctly (for dev purposes)
 func main() {
-	gameID := flag.String("game", "", "NBA game ID (e.g. 0042500121)")
-	ticker := flag.String("ticker", "", "Kalshi market ticker (e.g. KXNBASPREAD-...)")
-	testMode := flag.Bool("test", false, "run for 30s then exit")
+	// process inputs to determine mode
+	gameID := flag.String("game", "", "NBA game ID to poll (e.g. 0022501234)")
+	marketTicker := flag.String("market", "", "Kalshi market ticker (e.g. NBA_Game_20260423_LALHOU)") // returns address of string
 	flag.Parse()
 
 	if *gameID == "" {
-		log.Fatal("--game is required (e.g. --game 0042500121)")
-	}
-	if *ticker == "" {
-		log.Fatal("--ticker is required (e.g. --ticker KXNBASPREAD-...)")
-	}
-
-	cfg, err := LoadConfig("config/trading.yaml")
-	if err != nil {
-		log.Fatalf("failed to load config: %v", err)
+		log.Fatal("usage: go run . --game <game_id>")
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	if *testMode {
-		var tc context.CancelFunc
-		ctx, tc = context.WithTimeout(ctx, 30*time.Second)
-		defer tc()
+	// set up channels for streaming data from the NBA feed and Kalshi feed
+	events := make(chan NBAEvent, 500) // channel for NBA events (possessions)
+	nbaFeed := NewNBAFeed(*gameID)
+	go nbaFeed.Run(ctx, events) // runs NBAFeed in a goroutine and continuously polls for new events, outputting to events channel
+
+	ticks := make(chan KalshiTick, 50000) // channel for Kalshi ticks
+	kalshiFeed := NewKalshiFeed(*marketTicker, "") // marketTicker is the address of the string, so *marketTicker is the value
+	go kalshiFeed.Run(ctx, ticks)
+	
+	for {
+		select {
+		case ev := <-events:
+			log.Printf("NBA EVENT action=%d type=%-15s period=%d clock=%s home=%s away=%s desc=%q",
+				ev.ActionNumber, ev.ActionType, ev.Period, ev.Clock,
+				ev.ScoreHome, ev.ScoreAway, ev.Description)
+		case tick := <-ticks:
+			log.Printf("TICK: yes_bid=%d yes_ask=%d yes_last=%d volume=%d open_interest=%d is_stale=%t",
+				tick.YesBid, tick.YesAsk, tick.YesLast, tick.Volume, tick.OpenInterest, tick.IsStale)
+		case <-ctx.Done():
+			log.Println("shutting down")
+			return
+		}
 	}
-
-	client := NewInferenceClient(cfg.Inference.BaseURL)
-	router := NewRouter("", cfg.Trading.PaperMode)
-	ks := NewKillSwitch()
-	ledger := NewLedger(RiskConfig{
-		MaxTotalExposureCents:   cfg.Risk.MaxTotalExposureCents,
-		MaxPerGameExposureCents: cfg.Risk.MaxPerGameExposureCents,
-		MaxDailyLossCents:       cfg.Risk.MaxDailyLossCents,
-		MaxContractsPerOrder:    cfg.Risk.MaxContractsPerOrder,
-	}, ks)
-	logger := NewLogger(cfg.Trading.PaperMode, cfg.Observability.RedisStream)
-	bandit := NewBandit(cfg)
-
-	zlog.Info().
-		Str("event", "startup").
-		Str("game", *gameID).
-		Str("ticker", *ticker).
-		Bool("paper_mode", cfg.Trading.PaperMode).
-		Msg("[STARTUP]")
-
-	homeID, awayID, err := fetchTeamIDs(ctx, *gameID)
-	if err != nil {
-		log.Fatalf("failed to fetch team IDs for game %s: %v", *gameID, err)
-	}
-
-	zlog.Info().
-		Str("event", "startup").
-		Int64("home_team_id", homeID).
-		Int64("away_team_id", awayID).
-		Msg("[STARTUP]")
-
-	if err := client.StartGame(ctx, *gameID, *ticker, homeID, awayID); err != nil {
-		log.Fatalf("failed to start game on inference service: %v", err)
-	}
-
-	zlog.Info().
-		Str("event", "startup").
-		Str("inference_url", cfg.Inference.BaseURL).
-		Msg("[STARTUP] inference service connected")
-
-	engine := NewGameEngine(*gameID, *ticker, client, router, ledger, ks, bandit, logger, cfg)
-	engine.Run(ctx)
-
-	if err := client.EndGame(context.Background(), *gameID); err != nil {
-		zlog.Warn().Str("game", *gameID).Err(err).Msg("end game cleanup failed (non-fatal)")
-	}
-
-	zlog.Info().Msg("shutdown complete")
 }

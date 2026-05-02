@@ -18,12 +18,6 @@ import (
 	"time"
 )
 
-const (
-	nbaPollInterval = 3 * time.Second
-	nbaCDNURL       = "https://cdn.nba.com/static/json/liveData/playbyplay/playbyplay_%s.json"
-	nbaHTTPTimeout  = 5 * time.Second
-)
-
 // NBAEvent is one action from the NBA CDN play-by-play response.
 // Field names match the CDN JSON schema directly.
 type NBAEvent struct {
@@ -58,6 +52,12 @@ type NBAFeed struct {
 	client        *http.Client
 }
 
+const (
+	nbaPollInterval = 3 * time.Second
+	nbaCDNURL       = "https://cdn.nba.com/static/json/liveData/playbyplay/playbyplay_%s.json"
+	nbaHTTPTimeout  = 5 * time.Second
+)
+
 func NewNBAFeed(gameID string) *NBAFeed {
 	return &NBAFeed{
 		gameID: gameID,
@@ -77,7 +77,7 @@ func (f *NBAFeed) Run(ctx context.Context, out chan<- NBAEvent) {
 	defer ticker.Stop()
 	for {
 		select {
-		case <-ticker.C:
+		case <-ticker.C: 
 			f.poll(ctx, out)
 		case <-ctx.Done():
 			return
