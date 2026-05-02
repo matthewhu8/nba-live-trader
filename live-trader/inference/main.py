@@ -1,36 +1,258 @@
-import fastapi
-import torch as torch
-import numpy as np
-import pandas as pd
-import numpy as np
-import pandas as pd
-import torch
-import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
-from torch.optim import Adam
-from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_absolute_error, mean_squared_error
-import json
+"""
+Inference service — FastAPI application.
+
+Receives raw NBA CDN events from the Go ingestion engine, runs them through
+the possession parser + feature computer + MMoE model, and returns structured
+inference results. The Go agent makes the final BUY/SELL decision.
+
+Routes:
+    POST /game/{game_id}/start       — init GameState with pregame data
+    POST /game/{game_id}/possession  — process event → inference → response
+    POST /game/{game_id}/end         — cleanup + log game summary
+    GET  /game/{game_id}/state       — debug snapshot
+    GET  /health                     — liveness check
+"""
+
+import logging
 import time
-import warnings
-import joblib
-import gc
+from contextlib import asynccontextmanager
+from datetime import datetime
+from typing import Optional
 
-app = fastapi.FastAPI()
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 
-class XFeatureInput(fastapi.BaseModel):
-    x_physics: list[list[float]]
-    x_pregame: list[list[float]]
-    x_market: list[list[float]]
+from inference.features import FeatureComputer
+from inference.game_state import GameState, PredictionRecord
+from inference.possession import PossessionBuilder
+from inference.pregame import load_pregame
+from models.mmoe.predictor import MMoEPredictor
 
-@app.post("/predict")
-async def predict(request: XFeatureInput):
-    pass
-    # recieves X vector from Go with features grouped into 3 categories
-    # 1. x_physics
-    # 2. x_pregame
-    # 3. x_market
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)-8s  %(message)s",
+)
+
+_predictor: Optional[MMoEPredictor] = None
+_games: dict[str, GameState] = {}
 
 
-    
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _predictor
+    try:
+        _predictor = MMoEPredictor.load()
+        logging.info("[STARTUP] MMoE model loaded successfully")
+    except FileNotFoundError as exc:
+        logging.warning("[STARTUP] MMoE model not found — running without inference: %s", exc)
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
+
+
+# ── Pydantic models ────────────────────────────────────────────────────────────
+
+class GameStartRequest(BaseModel):
+    market_ticker: str
+    home_team_id:  int
+    away_team_id:  int
+
+
+class PossessionRequest(BaseModel):
+    raw_event:       dict
+    kalshi_snapshot: list[float]  # 14 floats in MARKET_COLS order
+    wall_clock_ts:   str          # ISO-8601
+
+
+class PossessionResponse(BaseModel):
+    action:          str          # always "WAIT" — Go agent makes final BUY/SELL decision
+    run_prob:        float
+    trajectory:      list[float]  # 10 log-odds delta checkpoints from Head B
+    hazard:          list[float]  # 10 survival hazard values from Head C
+    yes_bid:         int          # from kalshi_snapshot[0] (cents)
+    yes_ask:         int          # from kalshi_snapshot[1] (cents)
+    is_garbage_time: bool
+    is_blowout:      bool
+    features:        dict[str, float]
+    pipeline_ms:     int
+
+
+# ── Routes ─────────────────────────────────────────────────────────────────────
+
+@app.post("/game/{game_id}/start")
+async def game_start(game_id: str, request: GameStartRequest):
+    pregame = await load_pregame(game_id)
+
+    state = GameState(
+        game_id      = game_id,
+        home_team_id = pregame["home_team_id"],
+        away_team_id = pregame["away_team_id"],
+    )
+
+    # 11 pregame feature floats — static for the entire game
+    pregame_float_keys = {
+        "team_net_rating_delta", "home_off_rating", "away_off_rating",
+        "home_def_rating", "away_def_rating", "roster_rapm_gap",
+        "missing_rapm_impact", "rest_advantage", "expected_pace",
+        "form_delta", "has_pregame_data",
+    }
+    state.pregame      = {k: v for k, v in pregame.items() if k in pregame_float_keys}
+    state.lineup_ratings = pregame["lineup_ratings"]
+    state.player_apm     = pregame["player_apm"]
+    state.star_players   = pregame["star_players"]
+    state.home_b2b       = pregame["home_b2b"]
+    state.away_b2b       = pregame["away_b2b"]
+    state.pace_baseline  = pregame["pace_baseline"]
+
+    _games[game_id] = state
+
+    logging.info(
+        "[PREGAME] game=%s market=%s home_id=%d away_id=%d b2b=(%s/%s) pace=%.1f",
+        game_id,
+        request.market_ticker,
+        state.home_team_id,
+        state.away_team_id,
+        state.home_b2b,
+        state.away_b2b,
+        state.pace_baseline,
+    )
+
+    return {"status": "ok", "game_id": game_id}
+
+
+@app.post("/game/{game_id}/possession", response_model=PossessionResponse)
+async def game_possession(game_id: str, request: PossessionRequest):
+    state = _games.get(game_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail=f"Game {game_id} not started")
+
+    t0 = time.time()
+
+    row = PossessionBuilder.parse(request.raw_event, state)
+
+    if row is None:
+        state.update_from_event(request.raw_event)
+        pipeline_ms = int((time.time() - t0) * 1000)
+        return PossessionResponse(
+            action          = "WAIT",
+            run_prob        = 0.0,
+            trajectory      = [0.0] * 10,
+            hazard          = [0.0] * 10,
+            yes_bid         = int(request.kalshi_snapshot[0]) if request.kalshi_snapshot else 0,
+            yes_ask         = int(request.kalshi_snapshot[1]) if len(request.kalshi_snapshot) > 1 else 0,
+            is_garbage_time = False,
+            is_blowout      = False,
+            features        = {},
+            pipeline_ms     = pipeline_ms,
+        )
+
+    # Build features BEFORE advancing state — preserves shift(1) invariant
+    features = FeatureComputer.compute(row, state, request.kalshi_snapshot)
+
+    if _predictor is not None:
+        output = _predictor.predict(features)
+    else:
+        from models.mmoe.predictor import MMoEOutput
+        output = MMoEOutput(run_prob=0.0, trajectory=[0.0] * 10, hazard=[0.0] * 10)
+
+    # Advance rolling state AFTER feature extraction
+    state.advance(row)
+
+    wall_clock = datetime.fromisoformat(request.wall_clock_ts)
+    yes_bid = int(request.kalshi_snapshot[0]) if request.kalshi_snapshot else 0
+    yes_ask = int(request.kalshi_snapshot[1]) if len(request.kalshi_snapshot) > 1 else 0
+
+    state.prediction_history.append(PredictionRecord(
+        possession_id = row.possession_id,
+        wall_clock_ts = wall_clock,
+        features      = features,
+        run_prob      = output.run_prob,
+        trajectory    = output.trajectory,
+        hazard        = output.hazard,
+        action        = "WAIT",
+        yes_bid       = yes_bid,
+        yes_ask       = yes_ask,
+    ))
+
+    is_garbage_time = features.get("garbage_time_risk", 0.0) >= 1.0
+    is_blowout      = abs(features.get("score_diff", 0.0)) > 20
+    clock_str       = f"Q{row.period} {int(row.game_clock_secs // 60)}:{int(row.game_clock_secs % 60):02d}"
+    traj_final      = output.trajectory[-1] if output.trajectory else 0.0
+    pipeline_ms     = int((time.time() - t0) * 1000)
+
+    logging.info(
+        "[POSSESSION] game=%s poss_id=%d %s run_prob=%.2f traj_final=%+.3f pipeline=%dms",
+        game_id,
+        row.possession_id,
+        clock_str,
+        output.run_prob,
+        traj_final,
+        pipeline_ms,
+    )
+
+    return PossessionResponse(
+        action          = "WAIT",
+        run_prob        = output.run_prob,
+        trajectory      = output.trajectory,
+        hazard          = output.hazard,
+        yes_bid         = yes_bid,
+        yes_ask         = yes_ask,
+        is_garbage_time = is_garbage_time,
+        is_blowout      = is_blowout,
+        features        = features,
+        pipeline_ms     = pipeline_ms,
+    )
+
+
+@app.post("/game/{game_id}/end")
+async def game_end(game_id: str):
+    state = _games.pop(game_id, None)
+    if state is None:
+        raise HTTPException(status_code=404, detail=f"Game {game_id} not found")
+
+    logging.info(
+        "[GAME END] game=%s total_possessions=%d total_predictions=%d",
+        game_id,
+        state.possession_count,
+        len(state.prediction_history),
+    )
+    return {"status": "ok", "game_id": game_id, "total_possessions": state.possession_count}
+
+
+@app.get("/game/{game_id}/state")
+async def game_state(game_id: str):
+    state = _games.get(game_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail=f"Game {game_id} not started")
+
+    return {
+        "game_id":             state.game_id,
+        "possession_count":    state.possession_count,
+        "current_period":      state.current_period,
+        "home_score":          state.pending_home_score,
+        "away_score":          state.pending_away_score,
+        "score_diff":          state.pending_home_score - state.pending_away_score,
+        "run_team":            state.run_team,
+        "run_length":          state.run_length,
+        "run_points":          state.run_points,
+        "home_lineup":         state.home_lineup,
+        "away_lineup":         state.away_lineup,
+        "home_team_fouls":     dict(state.home_team_fouls),
+        "away_team_fouls":     dict(state.away_team_fouls),
+        "home_timeouts_used":  state.home_timeouts_used,
+        "away_timeouts_used":  state.away_timeouts_used,
+        "home_b2b":            state.home_b2b,
+        "away_b2b":            state.away_b2b,
+        "pace_baseline":       state.pace_baseline,
+        "predictions_cached":  len(state.prediction_history),
+    }
+
+
+@app.get("/health")
+async def health():
+    return {
+        "status":       "ok",
+        "games_active": len(_games),
+        "model_loaded": _predictor is not None,
+    }

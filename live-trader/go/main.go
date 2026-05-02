@@ -14,7 +14,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 )
 
 // currently set to only run nba live feed to ensure we are processing
@@ -22,7 +21,7 @@ import (
 func main() {
 	// process inputs to determine mode
 	gameID := flag.String("game", "", "NBA game ID to poll (e.g. 0022501234)")
-	testMode := flag.Bool("test", false, "run for 30s then exit")
+	marketTicker := flag.String("market", "", "Kalshi market ticker (e.g. NBA_Game_20260423_LALHOU)") // returns address of string
 	flag.Parse()
 
 	if *gameID == "" {
@@ -32,23 +31,24 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	if *testMode {
-		var tc context.CancelFunc
-		ctx, tc = context.WithTimeout(ctx, 30*time.Second)
-		defer tc()
-		log.Printf("test mode: polling game=%s for 30s", *gameID)
-	}
+	// set up channels for streaming data from the NBA feed and Kalshi feed
+	events := make(chan NBAEvent, 500) // channel for NBA events (possessions)
+	nbaFeed := NewNBAFeed(*gameID)
+	go nbaFeed.Run(ctx, events) // runs NBAFeed in a goroutine and continuously polls for new events, outputting to events channel
 
-	events := make(chan NBAEvent, 500)
-	feed := NewNBAFeed(*gameID)
-	go feed.Run(ctx, events) // runs NBAFeed in a goroutine and continuously polls for new events, outputting to events channel
-
+	ticks := make(chan KalshiTick, 50000) // channel for Kalshi ticks
+	kalshiFeed := NewKalshiFeed(*marketTicker, "") // marketTicker is the address of the string, so *marketTicker is the value
+	go kalshiFeed.Run(ctx, ticks)
+	
 	for {
 		select {
 		case ev := <-events:
-			log.Printf("EVENT action=%d type=%-15s period=%d clock=%s home=%s away=%s desc=%q",
+			log.Printf("NBA EVENT action=%d type=%-15s period=%d clock=%s home=%s away=%s desc=%q",
 				ev.ActionNumber, ev.ActionType, ev.Period, ev.Clock,
 				ev.ScoreHome, ev.ScoreAway, ev.Description)
+		case tick := <-ticks:
+			log.Printf("TICK: yes_bid=%d yes_ask=%d yes_last=%d volume=%d open_interest=%d is_stale=%t",
+				tick.YesBid, tick.YesAsk, tick.YesLast, tick.Volume, tick.OpenInterest, tick.IsStale)
 		case <-ctx.Done():
 			log.Println("shutting down")
 			return

@@ -13,7 +13,6 @@
 // Start simple: fixed threshold rules first, bandit layer on top once validated.
 package main
 
-
 type Action string
 
 const (
@@ -23,16 +22,8 @@ const (
 	Exit   Action = "EXIT"
 )
 
-// Hard entry filters — checked before bandit fires.
-// If any fail, return WAIT immediately (no bandit sampling needed).
-const (
-	minYesBid       = 30 // cents — below this, certainty too high for our signal
-	maxYesBid       = 70 // cents
-	minRunProbEntry = 0.15 // ~2x base rate of 7.6%
-)
-
 type ContextKey struct {
-	Quarter       int
+	Quarter         int
 	ScoreDiffBucket int // bucketed: ≤5, 6-12, 13-20
 	RunLengthBucket int // bucketed: 0, 1-3, 4-6, 7+
 }
@@ -43,34 +34,48 @@ type BetaParams struct {
 }
 
 type Bandit struct {
-	params map[ContextKey][4]BetaParams // 4 arms: Wait, BuyYes, BuyNo, Exit
+	minYesBid        int
+	maxYesBid        int
+	minRunProbEntry  float32
+	maxHazardForHold float32
+	params           map[ContextKey][4]BetaParams // 4 arms: Wait, BuyYes, BuyNo, Exit — reserved for future bandit
 }
 
-func NewBandit() *Bandit {
-	return &Bandit{params: make(map[ContextKey][4]BetaParams)}
+func NewBandit(cfg *Config) *Bandit {
+	return &Bandit{
+		minYesBid:        cfg.Agent.MinYesBid,
+		maxYesBid:        cfg.Agent.MaxYesBid,
+		minRunProbEntry:  cfg.Agent.MinRunProbEntry,
+		maxHazardForHold: 0.75,
+		params:           make(map[ContextKey][4]BetaParams),
+	}
 }
 
 // Decide returns the recommended action given the MMoE output and current game state.
-func (b *Bandit) Decide(resp *PossessionResponse, hasOpenPosition bool) Action {
-	// Hard filters first
+// Checks hard filters first, then uses threshold rules to enter or exit.
+func (b *Bandit) Decide(resp *PossessionResponse, hasPosition bool) Action {
 	if resp.IsGarbageTime || resp.IsBlowout {
 		return Wait
 	}
-	if resp.YesBid < minYesBid || resp.YesBid > maxYesBid {
-		return Wait
-	}
-	if resp.RunProb < minRunProbEntry && !hasOpenPosition {
+	if resp.YesBid < b.minYesBid || resp.YesBid > b.maxYesBid {
 		return Wait
 	}
 
-	// TODO: extract context key from resp
-	// TODO: sample from Beta distributions for each arm
-	// TODO: return arm with highest sample
+	if hasPosition {
+		// Head C: survival hazard at horizon 4 (mid-hold check)
+		if resp.Hazard[4] > b.maxHazardForHold {
+			return Exit
+		}
+		return Wait
+	}
+
+	if resp.RunProb >= b.minRunProbEntry {
+		return BuyYes
+	}
 	return Wait
 }
 
 // Update adjusts Beta parameters after a trade closes.
-// reward > 0: win (increment alpha), reward <= 0: loss (increment beta)
-func (b *Bandit) Update(ctx ContextKey, armIdx int, reward float64) {
-	// TODO
-}
+// reward > 0: win (increment alpha), reward <= 0: loss (increment beta).
+// No-op until bandit training is enabled.
+func (b *Bandit) Update(ctx ContextKey, armIdx int, reward float64) {}
