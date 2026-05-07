@@ -103,5 +103,6 @@ func (g *GameEngine) onEvent(ctx context.Context, event NBAEvent) {
 		return
 	}
 
-	g.orderRouter.Place(ctx, g.gameID, resp)
+	// TODO: wire up full order placement once Config is available on GameEngine
+	// g.orderRouter.Place(g.gameID, resp, event.ActionNumber, cfg)
 }

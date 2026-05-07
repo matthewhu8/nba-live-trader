@@ -32,24 +32,30 @@ type PaperPosition struct {
 	EntryTime   time.Time
 }
 
-// Place records a paper trade entry. Returns nil if conditions not met.
-// Only call when paperMode == true and action == BUY_YES.
-func (r *Router) Place(gameID string, resp *PossessionResponse, possID int, cfg *Config) *PaperPosition {
+// Place records a paper trade entry. Returns nil if paper mode is off.
+// Caller is responsible for checking the Bandit action before calling.
+func (r *Router) Place(gameID string, resp *PossessionResponse, possID int, cfg *Config, direction string) *PaperPosition {
 	if !r.paperMode {
-		return nil
-	}
-	if resp.Action != string(BuyYes) {
 		return nil
 	}
 
 	size := cfg.Agent.PositionSizeContracts
-	fee := makerFee(size, resp.YesBid)
+	
+	entryPrice := resp.YesBid
+	if direction == "NO" {
+		entryPrice = 100 - resp.YesAsk
+		if resp.YesAsk == 0 {
+			entryPrice = 100 - resp.YesBid
+		}
+	}
+
+	fee := makerFee(size, entryPrice)
 	_ = fee // logged by caller via EmitEntry
 
 	return &PaperPosition{
 		GameID:      gameID,
-		Direction:   "YES",
-		EntryPrice:  resp.YesBid,
+		Direction:   direction,
+		EntryPrice:  entryPrice,
 		Size:        size,
 		EntryPossID: possID,
 		EntryTime:   time.Now(),
@@ -59,17 +65,25 @@ func (r *Router) Place(gameID string, resp *PossessionResponse, possID int, cfg 
 // CheckExit evaluates whether an open position should be closed.
 // Returns (shouldExit, reason, netPnLDollars).
 // exitPrice is the current yes_bid in cents.
-func (r *Router) CheckExit(pos *PaperPosition, currentBid, possID int, cfg *Config) (bool, string, float64) {
-	priceDelta := currentBid - pos.EntryPrice
+func (r *Router) CheckExit(pos *PaperPosition, resp *PossessionResponse, possID int, cfg *Config) (bool, string, float64) {
+	currentPrice := resp.YesBid
+	if pos.Direction == "NO" {
+		currentPrice = 100 - resp.YesAsk
+		if resp.YesAsk == 0 {
+			currentPrice = 100 - resp.YesBid
+		}
+	}
+	
+	priceDelta := currentPrice - pos.EntryPrice
 
 	if priceDelta >= cfg.Agent.TakeProfitCents {
-		return true, "TAKE_PROFIT", calcNetPnL(pos.Size, pos.EntryPrice, currentBid)
+		return true, "TAKE_PROFIT", calcNetPnL(pos.Size, pos.EntryPrice, currentPrice)
 	}
 	if -priceDelta >= cfg.Agent.StopLossCents {
-		return true, "STOP_LOSS", calcNetPnL(pos.Size, pos.EntryPrice, currentBid)
+		return true, "STOP_LOSS", calcNetPnL(pos.Size, pos.EntryPrice, currentPrice)
 	}
 	if possID-pos.EntryPossID >= cfg.Agent.MaxHoldPossessions {
-		return true, "TIME_STOP", calcNetPnL(pos.Size, pos.EntryPrice, currentBid)
+		return true, "TIME_STOP", calcNetPnL(pos.Size, pos.EntryPrice, currentPrice)
 	}
 	return false, "", 0
 }

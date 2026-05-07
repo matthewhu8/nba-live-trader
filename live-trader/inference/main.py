@@ -27,6 +27,7 @@ from inference.game_state import GameState, PredictionRecord
 from inference.possession import PossessionBuilder
 from inference.pregame import load_pregame
 from models.mmoe.predictor import MMoEPredictor
+from inference.dashboard import router as dashboard_router, broadcast_prediction
 
 logging.basicConfig(
     level=logging.INFO,
@@ -49,6 +50,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+app.include_router(dashboard_router)
 
 
 # ── Pydantic models ────────────────────────────────────────────────────────────
@@ -82,7 +84,11 @@ class PossessionResponse(BaseModel):
 
 @app.post("/game/{game_id}/start")
 async def game_start(game_id: str, request: GameStartRequest):
-    pregame = await load_pregame(game_id)
+    pregame = await load_pregame(
+        game_id,
+        fallback_home_team_id=request.home_team_id,
+        fallback_away_team_id=request.away_team_id,
+    )
 
     state = GameState(
         game_id      = game_id,
@@ -191,7 +197,7 @@ async def game_possession(game_id: str, request: PossessionRequest):
         pipeline_ms,
     )
 
-    return PossessionResponse(
+    response = PossessionResponse(
         action          = "WAIT",
         run_prob        = output.run_prob,
         trajectory      = output.trajectory,
@@ -203,6 +209,23 @@ async def game_possession(game_id: str, request: PossessionRequest):
         features        = features,
         pipeline_ms     = pipeline_ms,
     )
+
+    # Broadcast to live dashboard SSE subscribers
+    broadcast_prediction(game_id, {
+        "possession_id": row.possession_id,
+        "run_prob":      output.run_prob,
+        "trajectory":    output.trajectory,
+        "hazard":        output.hazard,
+        "yes_bid":       yes_bid,
+        "yes_ask":       yes_ask,
+        "action":        "WAIT",
+        "is_garbage_time": is_garbage_time,
+        "is_blowout":    is_blowout,
+        "pipeline_ms":   pipeline_ms,
+        "features":      features,
+    })
+
+    return response
 
 
 @app.post("/game/{game_id}/end")

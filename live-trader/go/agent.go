@@ -70,7 +70,11 @@ func (b *Bandit) Decide(resp *PossessionResponse, hasPosition bool) Action {
 	}
 
 	if resp.RunProb >= b.minRunProbEntry {
-		return BuyYes
+		if resp.Trajectory[9] > 0 {
+			return BuyYes
+		} else if resp.Trajectory[9] < 0 {
+			return BuyNo
+		}
 	}
 	return Wait
 }

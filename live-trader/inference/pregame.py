@@ -39,21 +39,58 @@ NBA_TEAM_IDS: dict[str, int] = {
 }
 
 
-async def load_pregame(game_id: str) -> dict[str, Any]:
+async def load_pregame(
+    game_id: str,
+    fallback_home_team_id: int = 0,
+    fallback_away_team_id: int = 0,
+) -> dict[str, Any]:
     """
     Load all static game context needed by GameState at tip-off.
     Returns a flat dict with pregame feature floats plus lineup_ratings,
     player_apm, star_players, home/away team ids, b2b flags, and pace_baseline.
+
+    Gracefully handles missing games (e.g. playoff games not yet in dim_games)
+    by returning zeroed pregame features with has_pregame_data=0.0.
     """
-    conn = duckdb.connect(f"md:kalshi_trading?motherduck_token={_MOTHERDUCK_TOKEN}")
+    pregame_features: dict[str, float] = {}
+    lineup_ratings: dict[str, float] = {}
+    player_apm: dict[int, float] = {}
+    b2b_data: dict[str, Any] = {
+        "home_team_id": fallback_home_team_id,
+        "away_team_id": fallback_away_team_id,
+        "home_b2b": False,
+        "away_b2b": False,
+    }
 
     try:
-        pregame_features = _load_pregame_features(conn, game_id)
-        lineup_ratings   = _load_lineup_ratings(conn, game_id)
-        player_apm       = _load_player_apm(conn, game_id)
-        b2b_data         = _load_b2b_and_team_ids(conn, game_id)
-    finally:
-        conn.close()
+        conn = duckdb.connect(f"md:kalshi_trading?motherduck_token={_MOTHERDUCK_TOKEN}")
+        try:
+            pregame_features = _load_pregame_features(conn, game_id)
+            lineup_ratings   = _load_lineup_ratings(conn, game_id)
+            player_apm       = _load_player_apm(conn, game_id)
+            b2b_data         = _load_b2b_and_team_ids(conn, game_id)
+        except ValueError as exc:
+            logging.warning(
+                "[PREGAME] game=%s not found in dim_games — using fallback defaults: %s",
+                game_id, exc,
+            )
+        finally:
+            conn.close()
+    except Exception as exc:
+        logging.warning(
+            "[PREGAME] MotherDuck connection failed — running without pregame data: %s",
+            exc,
+        )
+
+    # Ensure pregame features have all expected keys (zeroed if missing)
+    _pregame_col_names = [
+        "team_net_rating_delta", "home_off_rating", "away_off_rating",
+        "home_def_rating", "away_def_rating", "roster_rapm_gap",
+        "missing_rapm_impact", "rest_advantage", "expected_pace", "form_delta",
+    ]
+    for col in _pregame_col_names:
+        pregame_features.setdefault(col, 0.0)
+    pregame_features.setdefault("has_pregame_data", 0.0)
 
     pace_baseline = pregame_features.get("expected_pace", 0.0) or 14.0
 

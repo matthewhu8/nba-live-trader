@@ -164,3 +164,37 @@ func (c *InferenceClient) ProcessPossession(
 	}
 	return &resp, nil
 }
+
+// TradePayload is sent back to Python when the Go engine executes a paper trade.
+type TradePayload struct {
+	Action    string  `json:"action"`
+	Direction string  `json:"direction"`
+	Price     int     `json:"price"`
+	Size      int     `json:"size"`
+	PnL       float64 `json:"pnl"`
+	Reason    string  `json:"reason"`
+}
+
+// ReportTrade sends a fire-and-forget HTTP request to the Python dashboard endpoint.
+func (c *InferenceClient) ReportTrade(gameID string, payload TradePayload) {
+	url := fmt.Sprintf("%s/game/%s/trade", c.baseURL, gameID)
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	
+	// Create a new context with a short timeout so we don't block
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(data))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	
+	resp, err := c.slowClient.Do(req)
+	if err == nil {
+		resp.Body.Close()
+	}
+}
