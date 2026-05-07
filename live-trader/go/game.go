@@ -1,12 +1,12 @@
 // GameEngine orchestrates a single live game.
 // Runs 3 concurrent goroutines and a main decision loop:
 //
-//   goroutine 1 (NBAFeed):     polls CDN every 3s, emits NBAEvent to possessionCh
-//   goroutine 2 (KalshiFeed):  WebSocket, emits KalshiTick to tickCh
-//   goroutine 3 (RingBuffer):  consumes tickCh, maintains rolling market windows
+//	goroutine 1 (NBAFeed):     polls CDN every 3s, emits NBAEvent to possessionCh
+//	goroutine 2 (KalshiFeed):  WebSocket, emits KalshiTick to tickCh
+//	goroutine 3 (RingBuffer):  consumes tickCh, maintains rolling market windows
 //
-//   main select loop:
-//     on NBAEvent → call Python inference service → agent decision → risk check → order
+//	main select loop:
+//	  on NBAEvent → call Python inference service → agent decision → risk check → order
 //
 // The Python inference service receives (raw_event + market_snapshot) and returns
 // (action, run_prob, trajectory[10], hazard[10], features[83]).
@@ -15,7 +15,6 @@ package main
 
 import (
 	"context"
-
 )
 
 type GameEngine struct {
@@ -26,6 +25,7 @@ type GameEngine struct {
 	orderRouter     *Router
 	riskLedger      *Ledger
 	killSwitch      *KillSwitch
+	cfg             *Config
 }
 
 func NewGameEngine(
@@ -34,6 +34,7 @@ func NewGameEngine(
 	orderRouter *Router,
 	ledger *Ledger,
 	ks *KillSwitch,
+	cfg *Config,
 ) *GameEngine {
 	return &GameEngine{
 		gameID:          gameID,
@@ -43,6 +44,7 @@ func NewGameEngine(
 		orderRouter:     orderRouter,
 		riskLedger:      ledger,
 		killSwitch:      ks,
+		cfg:             cfg,
 	}
 }
 
@@ -83,7 +85,6 @@ func (g *GameEngine) onEvent(ctx context.Context, event NBAEvent) {
 	if g.killSwitch.IsSet() {
 		return
 	}
-
 	marketSnap := g.ringBuffer.Snapshot()
 
 	// Python service receives raw event + market snapshot.
@@ -103,5 +104,5 @@ func (g *GameEngine) onEvent(ctx context.Context, event NBAEvent) {
 		return
 	}
 
-	g.orderRouter.Place(ctx, g.gameID, resp)
+	g.orderRouter.Place(g.gameID, resp, event.ActionNumber, g.cfg)
 }

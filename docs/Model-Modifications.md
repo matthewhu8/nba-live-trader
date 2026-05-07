@@ -1,0 +1,2 @@
+## Leveraging sportslines to abstract features away to ensure we aren't generating pure noise 
+- Many sportsbooks produce odds using some array of features. If we use the sportlines themselves as a feature ourselves, we shouldn't have features in our own model that's already baked into the sportsbook line? 

@@ -13,7 +13,6 @@ The previous system utilized two isolated models (the "telephone game" flaw). La
 ---
 
 ## 2. Data Engineering & The Master State Vector
-
 The new architecture requires unifying two datasets that operate on different clock schemas. We synchronize them at the exact millisecond of the decision point.
 
 ### The Input Space (X)

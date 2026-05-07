@@ -31,15 +31,15 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	// set up channels for streaming data from the NBA feed and Kalshi feed
-	events := make(chan NBAEvent, 500) // channel for NBA events (possessions)
+	// set up channels and go routines for streaming data from the NBA feed and Kalshi feed
+	events := make(chan NBAEvent, 1000)
 	nbaFeed := NewNBAFeed(*gameID)
-	go nbaFeed.Run(ctx, events) // runs NBAFeed in a goroutine and continuously polls for new events, outputting to events channel
+	go nbaFeed.Run(ctx, events)
 
-	ticks := make(chan KalshiTick, 50000) // channel for Kalshi ticks
-	kalshiFeed := NewKalshiFeed(*marketTicker, "") // marketTicker is the address of the string, so *marketTicker is the value
+	ticks := make(chan KalshiTick, 50000)
+	kalshiFeed := NewKalshiFeed(*marketTicker, "")
 	go kalshiFeed.Run(ctx, ticks)
-	
+
 	for {
 		select {
 		case ev := <-events:
