@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/joho/godotenv" // need to import this once online again
 )
 
 const (
@@ -97,7 +98,7 @@ func (f *KalshiFeed) runSession(ctx context.Context, out chan<- KalshiTick) (con
 		return false, fmt.Errorf("build auth headers: %w", err)
 	}
 
-	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
+	dialer := websocket.Dialer{HandshakeTimeout: 6 * time.Second}
 	conn, _, err := dialer.DialContext(ctx, kalshiWSURL, headers)
 	if err != nil {
 		return false, fmt.Errorf("dial %s: %w", kalshiWSURL, err)
@@ -171,24 +172,33 @@ func (f *KalshiFeed) runSession(ctx context.Context, out chan<- KalshiTick) (con
 
 // authHeaders generates the three RSA-PSS signed request headers.
 func (f *KalshiFeed) authHeaders() (http.Header, error) {
-	keyID := os.Getenv("KALSHI_KEY_ID")
-	pemPath := os.Getenv("KALSHI_PEM_PATH")
-
-	if keyID == "" {
-		return nil, fmt.Errorf("KALSHI_KEY_ID env var not set")
-	}
-	if pemPath == "" {
-		return nil, fmt.Errorf("KALSHI_PEM_PATH env var not set")
-	}
-
-	pemBytes, err := os.ReadFile(pemPath)
+	err := godotenv.Load(".env")
 	if err != nil {
-		return nil, fmt.Errorf("read PEM %q: %w", pemPath, err)
+		return nil, fmt.Errorf("trouble importing Kalshi keys from .env file")
 	}
 
-	block, _ := pem.Decode(pemBytes)
+	keyID := os.Getenv("KALSHI_API_KEY")
+	rsaKeyStr := os.Getenv("RSA_KEY_KALSHI")
+
+	if keyID == "" || rsaKeyStr == "" {
+		return nil, fmt.Errorf("env var(s) not set")
+	}
+
+	// Decode the base64 encoded RSA key
+	decodedKeyBytes, err := base64.StdEncoding.DecodeString(rsaKeyStr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode RSA key: %w", err)
+	}
+
+	// CODE BELOW IS LEGACY - we directly paste base64 string in the environment variable
+	// pemBytes, err := os.ReadFile(pemPath)
+	// if err != nil {
+	// 	return nil, fmt.Errorf("read PEM %q: %w", pemPath, err)
+	// }
+
+	block, _ := pem.Decode(decodedKeyBytes)
 	if block == nil {
-		return nil, fmt.Errorf("no PEM block found in %q", pemPath)
+		return nil, fmt.Errorf("no PEM block found in %q", decodedKeyBytes)
 	}
 
 	rsaKey, err := parseRSAKey(block.Bytes)

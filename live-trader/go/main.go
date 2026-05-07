@@ -18,7 +18,16 @@ import (
 
 // currently set to only run nba live feed to ensure we are processing
 // each possession correctly (for dev purposes)
+// should use coordinate but just focusing on making sure a singular Game Engine would work
 func main() {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	ks := NewKillSwitch()
+	cfg := NewRiskConfig(500, 220, 100, 2)
+	ledger := NewLedger(*cfg, ks)
+	masterCoord := NewCoordinator(ledger, ks)
+	masterCoord.Run(ctx)
+
 	gameID := flag.String("game", "", "NBA game ID to poll (e.g. 0022501234)")
 	marketTicker := flag.String("market", "", "Kalshi market ticker (e.g. NBA_Game_20260423_LALHOU)") // returns address of string
 	flag.Parse()
@@ -26,9 +35,6 @@ func main() {
 	if *gameID == "" {
 		log.Fatal("usage: go run . --game <game_id>")
 	}
-
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
 
 	// set up channels and go routines for streaming data from the NBA feed and Kalshi feed
 	events := make(chan NBAEvent, 1000)
