@@ -19,7 +19,6 @@ import (
 // currently set to only run nba live feed to ensure we are processing
 // each possession correctly (for dev purposes)
 func main() {
-	// process inputs to determine mode
 	gameID := flag.String("game", "", "NBA game ID to poll (e.g. 0022501234)")
 	marketTicker := flag.String("market", "", "Kalshi market ticker (e.g. NBA_Game_20260423_LALHOU)") // returns address of string
 	flag.Parse()

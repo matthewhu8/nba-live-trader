@@ -81,6 +81,7 @@ func (f *KalshiFeed) Run(ctx context.Context, out chan<- KalshiTick) {
 		case <-time.After(backoff):
 		}
 
+		// backoff strategy helps manage WS connection retries
 		backoff *= 2
 		if backoff > maxBackoff {
 			backoff = maxBackoff
