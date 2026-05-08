@@ -33,7 +33,7 @@ logging.basicConfig(
     format="%(asctime)s  %(levelname)-8s  %(message)s",
 )
 
-_predictor: Optional[MMoEPredictor] = None
+_predictor: Optional[MMoEPredictor] = None # our MMoE model
 _games: dict[str, GameState] = {}
 
 

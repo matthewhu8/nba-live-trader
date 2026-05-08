@@ -16,16 +16,16 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
-	"encoding/pem"
 	"fmt"
 	"math"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/joho/godotenv" // need to import this once online again
+	"github.com/joho/godotenv"
 )
 
 const (
@@ -181,27 +181,17 @@ func (f *KalshiFeed) authHeaders() (http.Header, error) {
 	rsaKeyStr := os.Getenv("RSA_KEY_KALSHI")
 
 	if keyID == "" || rsaKeyStr == "" {
-		return nil, fmt.Errorf("env var(s) not set")
+		return nil, fmt.Errorf("KALSHI_API_KEY or RSA_KEY_KALSHI env var not set")
 	}
 
-	// Decode the base64 encoded RSA key
-	decodedKeyBytes, err := base64.StdEncoding.DecodeString(rsaKeyStr)
+	// RSA_KEY_KALSHI is the raw PEM body (base64 DER) — strip any newlines.
+	cleaned := strings.NewReplacer(`\n`, "", "\n", "", "\r", "").Replace(rsaKeyStr)
+	derBytes, err := base64.StdEncoding.DecodeString(cleaned)
 	if err != nil {
-		return nil, fmt.Errorf("failed to decode RSA key: %w", err)
+		return nil, fmt.Errorf("base64 decode RSA key: %w", err)
 	}
 
-	// CODE BELOW IS LEGACY - we directly paste base64 string in the environment variable
-	// pemBytes, err := os.ReadFile(pemPath)
-	// if err != nil {
-	// 	return nil, fmt.Errorf("read PEM %q: %w", pemPath, err)
-	// }
-
-	block, _ := pem.Decode(decodedKeyBytes)
-	if block == nil {
-		return nil, fmt.Errorf("no PEM block found in %q", decodedKeyBytes)
-	}
-
-	rsaKey, err := parseRSAKey(block.Bytes)
+	rsaKey, err := parseRSAKey(derBytes)
 	if err != nil {
 		return nil, err
 	}

@@ -22,11 +22,13 @@ import (
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	ks := NewKillSwitch()
-	cfg := NewRiskConfig(500, 220, 100, 2)
-	ledger := NewLedger(*cfg, ks)
-	masterCoord := NewCoordinator(ledger, ks)
-	masterCoord.Run(ctx)
+
+	// CODE FOR COORDINATOR - UNCOMMENT LATER IN DEVELOPMENT
+	// ks := NewKillSwitch()
+	// cfg := NewRiskConfig(500, 220, 100, 2)
+	// ledger := NewLedger(*cfg, ks)
+	// masterCoord := NewCoordinator(ledger, ks)
+	// masterCoord.Run(ctx)
 
 	gameID := flag.String("game", "", "NBA game ID to poll (e.g. 0022501234)")
 	marketTicker := flag.String("market", "", "Kalshi market ticker (e.g. NBA_Game_20260423_LALHOU)") // returns address of string
