@@ -3,10 +3,11 @@
 // All operations are mutex-protected — safe for concurrent game goroutines.
 //
 // Hard limits (loaded from config/trading.yaml):
-//   max_total_exposure_cents    — max open exposure across all games combined
-//   max_per_game_exposure_cents — max open exposure for a single game
-//   max_daily_loss_cents        — stop trading for the day if exceeded
-//   max_contracts_per_order     — single order size cap
+//
+//	max_total_exposure_cents    — max open exposure across all games combined
+//	max_per_game_exposure_cents — max open exposure for a single game
+//	max_daily_loss_cents        — stop trading for the day if exceeded
+//	max_contracts_per_order     — single order size cap
 package main
 
 import (
@@ -20,6 +21,15 @@ type RiskConfig struct {
 	MaxPerGameExposureCents int
 	MaxDailyLossCents       int
 	MaxContractsPerOrder    int
+}
+
+func NewRiskConfig(mTEC int, mPGEC int, mDLC int, mCPO int) *RiskConfig {
+	return &RiskConfig{
+		MaxTotalExposureCents:   mTEC,
+		MaxPerGameExposureCents: mPGEC,
+		MaxDailyLossCents:       mDLC,
+		MaxContractsPerOrder:    mCPO,
+	}
 }
 
 type Ledger struct {
@@ -87,6 +97,6 @@ type KillSwitch struct {
 	val atomic.Bool
 }
 
-func NewKillSwitch() *KillSwitch { return &KillSwitch{} }
-func (ks *KillSwitch) Set()      { ks.val.Store(true) }
+func NewKillSwitch() *KillSwitch   { return &KillSwitch{} }
+func (ks *KillSwitch) Set()        { ks.val.Store(true) }
 func (ks *KillSwitch) IsSet() bool { return ks.val.Load() }

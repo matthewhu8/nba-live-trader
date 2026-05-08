@@ -18,8 +18,18 @@ import (
 
 // currently set to only run nba live feed to ensure we are processing
 // each possession correctly (for dev purposes)
+// should use coordinate but just focusing on making sure a singular Game Engine would work
 func main() {
-	// process inputs to determine mode
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	// CODE FOR COORDINATOR - UNCOMMENT LATER IN DEVELOPMENT
+	// ks := NewKillSwitch()
+	// cfg := NewRiskConfig(500, 220, 100, 2)
+	// ledger := NewLedger(*cfg, ks)
+	// masterCoord := NewCoordinator(ledger, ks)
+	// masterCoord.Run(ctx)
+
 	gameID := flag.String("game", "", "NBA game ID to poll (e.g. 0022501234)")
 	marketTicker := flag.String("market", "", "Kalshi market ticker (e.g. NBA_Game_20260423_LALHOU)") // returns address of string
 	flag.Parse()
@@ -28,18 +38,15 @@ func main() {
 		log.Fatal("usage: go run . --game <game_id>")
 	}
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-
-	// set up channels for streaming data from the NBA feed and Kalshi feed
-	events := make(chan NBAEvent, 500) // channel for NBA events (possessions)
+	// set up channels and go routines for streaming data from the NBA feed and Kalshi feed
+	events := make(chan NBAEvent, 1000)
 	nbaFeed := NewNBAFeed(*gameID)
-	go nbaFeed.Run(ctx, events) // runs NBAFeed in a goroutine and continuously polls for new events, outputting to events channel
+	go nbaFeed.Run(ctx, events)
 
-	ticks := make(chan KalshiTick, 50000) // channel for Kalshi ticks
-	kalshiFeed := NewKalshiFeed(*marketTicker, "") // marketTicker is the address of the string, so *marketTicker is the value
+	ticks := make(chan KalshiTick, 50000)
+	kalshiFeed := NewKalshiFeed(*marketTicker, "")
 	go kalshiFeed.Run(ctx, ticks)
-	
+
 	for {
 		select {
 		case ev := <-events:

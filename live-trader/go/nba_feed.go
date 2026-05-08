@@ -1,9 +1,6 @@
 // NBAFeed polls the NBA Stats CDN for live play-by-play events.
-//
 // Endpoint: cdn.nba.com/static/json/liveData/playbyplay/playbyplay_{gameID}.json
 // Poll interval: 3s (CDN cache TTL during live games — polling faster is pointless)
-// Lag behind real events: ~15-20s (CDN delay, not network)
-//
 // Emits only NEW events (actionNumber > last seen) to avoid reprocessing.
 // Never panics — logs errors and skips the poll cycle on failure.
 package main
@@ -21,21 +18,21 @@ import (
 // NBAEvent is one action from the NBA CDN play-by-play response.
 // Field names match the CDN JSON schema directly.
 type NBAEvent struct {
-	ActionNumber      int    `json:"actionNumber"`
-	ActionType        string `json:"actionType"` // "2pt", "3pt", "rebound", "substitution", "foul", "timeout"
-	Period            int    `json:"period"`
-	Clock             string `json:"clock"`      // "PT06M23.00S"
-	TeamID            int64  `json:"teamId"`
-	PersonID          int64  `json:"personId"`
-	ShotResult        string `json:"shotResult"` // "Made" | "Missed" | ""
+	ActionNumber      int     `json:"actionNumber"`
+	ActionType        string  `json:"actionType"` // "2pt", "3pt", "rebound", "substitution", "foul", "timeout"
+	Period            int     `json:"period"`
+	Clock             string  `json:"clock"` // "PT06M23.00S"
+	TeamID            int64   `json:"teamId"`
+	PersonID          int64   `json:"personId"`
+	ShotResult        string  `json:"shotResult"` // "Made" | "Missed" | ""
 	ShotDistance      float64 `json:"shotDistance"`
-	ShotArea          string `json:"area"`
-	IsFieldGoal       int    `json:"isFieldGoal"`
-	ScoreHome         string `json:"scoreHome"`
-	ScoreAway         string `json:"scoreAway"`
-	FoulPersonalTotal int    `json:"foulPersonalTotal"`
-	SubType           string `json:"subType"` // "offensive" | "defensive" for rebounds
-	Description       string `json:"description"`
+	ShotArea          string  `json:"area"`
+	IsFieldGoal       int     `json:"isFieldGoal"`
+	ScoreHome         string  `json:"scoreHome"`
+	ScoreAway         string  `json:"scoreAway"`
+	FoulPersonalTotal int     `json:"foulPersonalTotal"`
+	SubType           string  `json:"subType"` // "offensive" | "defensive" for rebounds
+	Description       string  `json:"description"`
 }
 
 // cdnResponse mirrors the top-level JSON structure from the NBA CDN.
@@ -49,6 +46,7 @@ type cdnResponse struct {
 type NBAFeed struct {
 	gameID        string
 	lastActionNum int
+	lastPossId    int
 	client        *http.Client
 }
 
@@ -58,9 +56,12 @@ const (
 	nbaHTTPTimeout  = 5 * time.Second
 )
 
+// initializes the NBAFeed
 func NewNBAFeed(gameID string) *NBAFeed {
 	return &NBAFeed{
-		gameID: gameID,
+		gameID:        gameID,
+		lastActionNum: -1,
+		lastPossId:    -1,
 		client: &http.Client{
 			Timeout: nbaHTTPTimeout,
 			Transport: &http.Transport{
@@ -73,11 +74,11 @@ func NewNBAFeed(gameID string) *NBAFeed {
 
 // Run polls until ctx is cancelled. New events are sent to out.
 func (f *NBAFeed) Run(ctx context.Context, out chan<- NBAEvent) {
-	ticker := time.NewTicker(nbaPollInterval)
+	ticker := time.NewTicker(nbaPollInterval) // 3 seconds
 	defer ticker.Stop()
 	for {
 		select {
-		case <-ticker.C: 
+		case <-ticker.C:
 			f.poll(ctx, out)
 		case <-ctx.Done():
 			return
@@ -93,19 +94,23 @@ func (f *NBAFeed) poll(ctx context.Context, out chan<- NBAEvent) {
 		log.Printf("[nba_feed] build request error game=%s: %v", f.gameID, err)
 		return
 	}
-	// Mimic a browser — CDN blocks obvious bot user-agents
+
+	// need the request header to mimic browser visiting their backend endpoint (avoids rate limiting)
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Referer", "https://www.nba.com/")
 	req.Header.Set("Origin", "https://www.nba.com")
 
+	// sending request and getting reponse
 	resp, err := f.client.Do(req)
 	if err != nil {
 		log.Printf("[nba_feed] GET error game=%s: %v", f.gameID, err)
 		return
 	}
+
 	defer resp.Body.Close()
 
+	// response errors in communication
 	if resp.StatusCode == http.StatusTooManyRequests {
 		log.Printf("[nba_feed] RATE LIMITED (429) game=%s — backing off", f.gameID)
 		time.Sleep(10 * time.Second)
@@ -115,7 +120,6 @@ func (f *NBAFeed) poll(ctx context.Context, out chan<- NBAEvent) {
 		log.Printf("[nba_feed] unexpected status %d game=%s", resp.StatusCode, f.gameID)
 		return
 	}
-
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Printf("[nba_feed] read body error game=%s: %v", f.gameID, err)

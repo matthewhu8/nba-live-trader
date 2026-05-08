@@ -16,15 +16,16 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
-	"encoding/pem"
 	"fmt"
 	"math"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/joho/godotenv"
 )
 
 const (
@@ -81,6 +82,7 @@ func (f *KalshiFeed) Run(ctx context.Context, out chan<- KalshiTick) {
 		case <-time.After(backoff):
 		}
 
+		// backoff strategy helps manage WS connection retries
 		backoff *= 2
 		if backoff > maxBackoff {
 			backoff = maxBackoff
@@ -96,7 +98,7 @@ func (f *KalshiFeed) runSession(ctx context.Context, out chan<- KalshiTick) (con
 		return false, fmt.Errorf("build auth headers: %w", err)
 	}
 
-	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
+	dialer := websocket.Dialer{HandshakeTimeout: 6 * time.Second}
 	conn, _, err := dialer.DialContext(ctx, kalshiWSURL, headers)
 	if err != nil {
 		return false, fmt.Errorf("dial %s: %w", kalshiWSURL, err)
@@ -170,27 +172,26 @@ func (f *KalshiFeed) runSession(ctx context.Context, out chan<- KalshiTick) (con
 
 // authHeaders generates the three RSA-PSS signed request headers.
 func (f *KalshiFeed) authHeaders() (http.Header, error) {
-	keyID := os.Getenv("KALSHI_KEY_ID")
-	pemPath := os.Getenv("KALSHI_PEM_PATH")
-
-	if keyID == "" {
-		return nil, fmt.Errorf("KALSHI_KEY_ID env var not set")
-	}
-	if pemPath == "" {
-		return nil, fmt.Errorf("KALSHI_PEM_PATH env var not set")
-	}
-
-	pemBytes, err := os.ReadFile(pemPath)
+	err := godotenv.Load(".env")
 	if err != nil {
-		return nil, fmt.Errorf("read PEM %q: %w", pemPath, err)
+		return nil, fmt.Errorf("trouble importing Kalshi keys from .env file")
 	}
 
-	block, _ := pem.Decode(pemBytes)
-	if block == nil {
-		return nil, fmt.Errorf("no PEM block found in %q", pemPath)
+	keyID := os.Getenv("KALSHI_API_KEY")
+	rsaKeyStr := os.Getenv("RSA_KEY_KALSHI")
+
+	if keyID == "" || rsaKeyStr == "" {
+		return nil, fmt.Errorf("KALSHI_API_KEY or RSA_KEY_KALSHI env var not set")
 	}
 
-	rsaKey, err := parseRSAKey(block.Bytes)
+	// RSA_KEY_KALSHI is the raw PEM body (base64 DER) — strip any newlines.
+	cleaned := strings.NewReplacer(`\n`, "", "\n", "", "\r", "").Replace(rsaKeyStr)
+	derBytes, err := base64.StdEncoding.DecodeString(cleaned)
+	if err != nil {
+		return nil, fmt.Errorf("base64 decode RSA key: %w", err)
+	}
+
+	rsaKey, err := parseRSAKey(derBytes)
 	if err != nil {
 		return nil, err
 	}

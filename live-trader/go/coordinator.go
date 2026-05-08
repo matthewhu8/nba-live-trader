@@ -10,7 +10,6 @@ package main
 import (
 	"context"
 	"sync"
-
 )
 
 type Coordinator struct {
