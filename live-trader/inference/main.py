@@ -265,6 +265,26 @@ async def game_possession(game_id: str, request: PossessionRequest):
     )
 
     if jl is not None:
+        # The "model" sub-block carries the deepest interpretability data:
+        # gated outputs, gating weights (which experts each head trusted),
+        # and per-expert opinions (what each head would predict if it
+        # trusted only one expert). Together these answer "what is the
+        # model thinking" — disagreement among experts means a borderline
+        # call; consensus means the model is confident.
+        model_block = {
+            "gated": {
+                "run_prob":   output.run_prob,
+                "trajectory": output.trajectory,
+                "hazard":     output.hazard,
+            },
+            "gating_weights":  output.gating_weights,
+            "expert_opinions": {
+                "run_prob":   output.expert_opinions_run,
+                "trajectory": output.expert_opinions_traj,
+                "hazard":     output.expert_opinions_haz,
+            },
+        }
+
         jl.emit(
             "possession",
             game_id,
@@ -280,13 +300,11 @@ async def game_possession(game_id: str, request: PossessionRequest):
             yes_bid          = yes_bid,
             yes_ask          = yes_ask,
             has_market_data  = bool(features.get("has_market_data", 0.0)),
-            run_prob         = output.run_prob,
-            trajectory       = output.trajectory,
-            hazard           = output.hazard,
             traj_final       = traj_final,
             is_garbage_time  = is_garbage_time,
             is_blowout       = is_blowout,
             pipeline_ms      = pipeline_ms,
+            model            = model_block,
             features         = features,
         )
 
