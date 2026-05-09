@@ -34,7 +34,11 @@ from dotenv import load_dotenv
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from data.ingestion.kalshi_historical_client import KalshiAuth
+from data.ingestion.kalshi_historical_client import (
+    KalshiAuth,
+    kalshi_auth_from_env,
+    kalshi_ssl_context,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,8 +46,8 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-BASE_URL  = "https://api.elections.kalshi.com/trade-api/v2"
-WS_URL    = "wss://api.elections.kalshi.com/trade-api/ws/v2"
+BASE_URL  = os.environ.get("KALSHI_REST_BASE_URL", "https://external-api.kalshi.com/trade-api/v2").rstrip("/")
+WS_URL    = os.environ.get("KALSHI_WS_URL", "wss://external-api-ws.kalshi.com/trade-api/ws/v2")
 SERIES    = "KXNBASPREAD"
 LOCK_FILE = Path("logs/recorder/recorder.pid")
 
@@ -465,7 +469,8 @@ class KalshiRecorder:
 
         consecutive_failures = 0
 
-        async with aiohttp.ClientSession() as session:
+        connector = aiohttp.TCPConnector(ssl=kalshi_ssl_context())
+        async with aiohttp.ClientSession(connector=connector) as session:
             while self._running:
                 # Check max runtime at the top of every reconnect cycle.
                 # This fires even when no WebSocket messages arrive (e.g. no active
@@ -531,17 +536,12 @@ async def main() -> None:
     if not _acquire_lock():
         return  # Another instance is already running
 
-    key_id      = os.environ.get("API_KEY_ID")
-    pem_content = os.environ.get("PRIVATE_RSA_KEY_PEM")   # preferred: key contents as string
-    pem_path    = os.environ.get("PRIVATE_RSA_KEY")        # fallback: path to .pem file
-
-    if not key_id or (not pem_content and not pem_path):
+    try:
+        auth = kalshi_auth_from_env()
+    except RuntimeError:
         _release_lock()
-        raise RuntimeError(
-            "API_KEY_ID and either PRIVATE_RSA_KEY_PEM (string) or PRIVATE_RSA_KEY (path) must be set"
-        )
+        raise
 
-    auth     = KalshiAuth(key_id=key_id, private_key_pem=pem_content, private_key_path=pem_path)
     recorder = KalshiRecorder(auth)
 
     loop      = asyncio.get_running_loop()

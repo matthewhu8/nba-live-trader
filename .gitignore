@@ -1,5 +1,8 @@
 logs/
 .env
+*.key
+*.pem
+live-basketball.txt
 kalshi_trading.duckdb
 venv/
 data/feature_store/
@@ -14,4 +17,3 @@ __pycache__/
 # Go compiled binaries
 live-trader/go/live-trader
 live-trader/go/go
-

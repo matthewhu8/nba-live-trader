@@ -234,8 +234,8 @@ canvas{width:100%!important;height:100%!important}
   <div class="cd">
     <div class="ct">🏀 Scoring Run Probability</div>
     <div class="rp-val" id="rp" style="color:var(--td)">--</div>
-    <div class="rp-bar"><div class="rp-fill" id="rpF" style="width:0"></div><div class="rp-thresh" style="left:15%"></div></div>
-    <div class="rp-lbl">Buy threshold: 15% · <span id="runTeam" style="font-weight:600">No active run</span></div>
+    <div class="rp-bar"><div class="rp-fill" id="rpF" style="width:0"></div><div class="rp-thresh" style="left:10%"></div></div>
+    <div class="rp-lbl">Buy threshold: 10% · <span id="runTeam" style="font-weight:600">No active run</span></div>
   </div>
 
   <div class="cd">
@@ -299,8 +299,10 @@ function go(){
   const id=document.getElementById('gid').value.trim();
   if(!id)return;
   
-  if (id === '0042500232') { homeTeam = 'SAS'; awayTeam = 'MIN'; market = 'SAS -22'; }
-  else if (id === '0042500212') { homeTeam = 'NYK'; awayTeam = 'PHI'; market = 'NYK -1'; }
+  if (id === '0042500232' || id === '0042500233') { homeTeam = 'MIN'; awayTeam = 'SAS'; market = 'SAS +22'; }
+  else if (id === '0042500212' || id === '0042500213') { homeTeam = 'PHI'; awayTeam = 'NYK'; market = 'PHI -1'; }
+  else if (id === '0042500222') { homeTeam = 'OKC'; awayTeam = 'LAL'; market = 'OKC -1'; }
+  else if (id === '0042500202') { homeTeam = 'DET'; awayTeam = 'CLE'; market = 'DET +11'; }
   else { homeTeam = 'HOME'; awayTeam = 'AWAY'; market = 'Spread'; }
   
   document.getElementById('mktTitle').textContent = `Market Orderbook (${market})`;
@@ -350,10 +352,10 @@ function upd(d){
 
   // Signal banner
   const sig=document.getElementById('sig'), st=document.getElementById('sigTxt'), ss=document.getElementById('sigSub');
-  if(rp>=0.15 && tr[9]>0){
+  if(rp>=0.10 && tr[9]>0){
     sig.className='signal buy'; st.textContent='★ BUY YES'; st.style.color='#22c55e';
     ss.textContent='Run detected + price rising → entry signal';
-  } else if(rp>=0.15 && tr[9]<0){
+  } else if(rp>=0.10 && tr[9]<0){
     sig.className='signal buy'; st.textContent='★ BUY NO'; st.style.color='#ef4444';
     ss.textContent=`Run detected + price falling → entry signal`;
   } else {
@@ -364,9 +366,9 @@ function upd(d){
   // Run probability
   const rpE=document.getElementById('rp');
   rpE.textContent=(rp*100).toFixed(1)+'%';
-  rpE.style.color=rp>=.15?'#22c55e':rp>=.10?'#eab308':'#9ca3af';
+  rpE.style.color=rp>=.10?'#22c55e':rp>=.05?'#eab308':'#9ca3af';
   document.getElementById('rpF').style.width=(rp*100)+'%';
-  document.getElementById('rpF').style.background=rp>=.15?'#22c55e':rp>=.10?'#eab308':'#3b82f6';
+  document.getElementById('rpF').style.background=rp>=.10?'#22c55e':rp>=.05?'#eab308':'#3b82f6';
 
   // Who's running
   const rt=f.current_run_team_encoded||0, rl=f.current_run_length||0, rpts=f.current_run_points||0;
@@ -431,7 +433,7 @@ function upd(d){
   // Log
   const ll=document.createElement('div');ll.className='ll';
   const ts=new Date().toLocaleTimeString();
-  const rc=rp>=.15?'color:#22c55e':'color:#9ca3af';
+  const rc=rp>=.10?'color:#22c55e':'color:#9ca3af';
   const tc=tr[9]>0?'color:#22c55e':tr[9]<0?'color:#ef4444':'color:#9ca3af';
   ll.innerHTML='<span style="color:#6b7280">'+ts+'</span> '+
     'Run:<span style="'+rc+';font-weight:600"> '+(rp*100).toFixed(1)+'%</span> · '+
@@ -440,7 +442,8 @@ function upd(d){
   const log=document.getElementById('log');
   log.appendChild(ll);log.scrollTop=log.scrollHeight;
 
-  if(rp>=.15){sigs++;document.getElementById('tSig').textContent=sigs}
+  if(rp>=.10){sigs++;document.getElementById('tSig').textContent=sigs}
+  if(d.market_ticker)document.getElementById('mktTitle').textContent='Market Orderbook ('+d.market_ticker+')';
 }
 </script>
 </body>

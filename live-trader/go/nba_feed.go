@@ -21,21 +21,22 @@ import (
 // NBAEvent is one action from the NBA CDN play-by-play response.
 // Field names match the CDN JSON schema directly.
 type NBAEvent struct {
-	ActionNumber      int    `json:"actionNumber"`
-	ActionType        string `json:"actionType"` // "2pt", "3pt", "rebound", "substitution", "foul", "timeout"
-	Period            int    `json:"period"`
-	Clock             string `json:"clock"`      // "PT06M23.00S"
-	TeamID            int64  `json:"teamId"`
-	PersonID          int64  `json:"personId"`
-	ShotResult        string `json:"shotResult"` // "Made" | "Missed" | ""
+	ActionNumber      int     `json:"actionNumber"`
+	ActionType        string  `json:"actionType"` // "2pt", "3pt", "rebound", "substitution", "foul", "timeout"
+	Period            int     `json:"period"`
+	Clock             string  `json:"clock"` // "PT06M23.00S"
+	TeamID            int64   `json:"teamId"`
+	PersonID          int64   `json:"personId"`
+	ShotResult        string  `json:"shotResult"` // "Made" | "Missed" | ""
 	ShotDistance      float64 `json:"shotDistance"`
-	ShotArea          string `json:"area"`
-	IsFieldGoal       int    `json:"isFieldGoal"`
-	ScoreHome         string `json:"scoreHome"`
-	ScoreAway         string `json:"scoreAway"`
-	FoulPersonalTotal int    `json:"foulPersonalTotal"`
-	SubType           string `json:"subType"` // "offensive" | "defensive" for rebounds
-	Description       string `json:"description"`
+	ShotArea          string  `json:"area"`
+	IsFieldGoal       int     `json:"isFieldGoal"`
+	ScoreHome         string  `json:"scoreHome"`
+	ScoreAway         string  `json:"scoreAway"`
+	FoulPersonalTotal int     `json:"foulPersonalTotal"`
+	SubType           string  `json:"subType"` // "offensive" | "defensive" for rebounds
+	Description       string  `json:"description"`
+	IsBackfill        bool    `json:"-"`
 }
 
 // cdnResponse mirrors the top-level JSON structure from the NBA CDN.
@@ -49,6 +50,7 @@ type cdnResponse struct {
 type NBAFeed struct {
 	gameID        string
 	lastActionNum int
+	bootstrapped  bool
 	client        *http.Client
 }
 
@@ -77,7 +79,7 @@ func (f *NBAFeed) Run(ctx context.Context, out chan<- NBAEvent) {
 	defer ticker.Stop()
 	for {
 		select {
-		case <-ticker.C: 
+		case <-ticker.C:
 			f.poll(ctx, out)
 		case <-ctx.Done():
 			return
@@ -128,6 +130,12 @@ func (f *NBAFeed) poll(ctx context.Context, out chan<- NBAEvent) {
 		return
 	}
 
+	if !f.bootstrapped {
+		f.emitStartupBackfill(out, payload.Game.Actions)
+		f.bootstrapped = true
+		return
+	}
+
 	newCount := 0
 	for _, event := range payload.Game.Actions {
 		if event.ActionNumber <= f.lastActionNum {
@@ -148,4 +156,27 @@ func (f *NBAFeed) poll(ctx context.Context, out chan<- NBAEvent) {
 	if newCount > 0 {
 		log.Printf("[nba_feed] game=%s polled %d new events (last_action=%d)", f.gameID, newCount, f.lastActionNum)
 	}
+}
+
+func (f *NBAFeed) emitStartupBackfill(out chan<- NBAEvent, events []NBAEvent) {
+	replayed := 0
+	for _, event := range events {
+		if event.ActionNumber > f.lastActionNum {
+			f.lastActionNum = event.ActionNumber
+		}
+		event.IsBackfill = true
+		select {
+		case out <- event:
+			replayed++
+		default:
+			log.Printf("[nba_feed] channel full, dropping backfill event %d game=%s", event.ActionNumber, f.gameID)
+		}
+	}
+
+	log.Printf(
+		"[nba_feed] game=%s startup backfill replayed %d events through action=%d; trading starts on next live poll",
+		f.gameID,
+		replayed,
+		f.lastActionNum,
+	)
 }

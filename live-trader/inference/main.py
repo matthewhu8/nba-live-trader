@@ -91,9 +91,10 @@ async def game_start(game_id: str, request: GameStartRequest):
     )
 
     state = GameState(
-        game_id      = game_id,
-        home_team_id = pregame["home_team_id"],
-        away_team_id = pregame["away_team_id"],
+        game_id       = game_id,
+        market_ticker = request.market_ticker,
+        home_team_id  = pregame["home_team_id"],
+        away_team_id  = pregame["away_team_id"],
     )
 
     # 11 pregame feature floats — static for the entire game
@@ -223,6 +224,7 @@ async def game_possession(game_id: str, request: PossessionRequest):
         "is_blowout":    is_blowout,
         "pipeline_ms":   pipeline_ms,
         "features":      features,
+        "market_ticker": state.market_ticker,
     })
 
     return response

@@ -24,7 +24,7 @@ from dotenv import load_dotenv
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from data.ingestion.game_schedule import GameInfo, get_todays_games, is_edt, save_schedule
-from data.ingestion.kalshi_historical_client import KalshiAuth
+from data.ingestion.kalshi_historical_client import KalshiAuth, kalshi_auth_from_env
 from data.ingestion.kalshi_recorder import KalshiRecorder
 
 logger = logging.getLogger(__name__)
@@ -50,15 +50,7 @@ def _pipeline_trigger_utc(d: date) -> datetime:
 
 
 def _build_auth() -> KalshiAuth:
-    key_id      = os.environ.get("API_KEY_ID")
-    pem_content = os.environ.get("PRIVATE_RSA_KEY_PEM")
-    pem_path    = os.environ.get("PRIVATE_RSA_KEY")
-
-    if not key_id or (not pem_content and not pem_path):
-        raise RuntimeError(
-            "API_KEY_ID and either PRIVATE_RSA_KEY_PEM or PRIVATE_RSA_KEY must be set"
-        )
-    return KalshiAuth(key_id=key_id, private_key_pem=pem_content, private_key_path=pem_path)
+    return kalshi_auth_from_env()
 
 
 async def _run_game(auth: KalshiAuth, game: GameInfo) -> None:

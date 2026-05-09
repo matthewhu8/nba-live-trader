@@ -62,6 +62,7 @@ class PredictionRecord:
 @dataclass
 class GameState:
     game_id: str
+    market_ticker: str = "Spread"
 
     # ── Game identity (loaded at start) ──────────────────────────────────────
     home_team_id: int = 0   # NBA teamId integer — used to map CDN events to home/away

@@ -105,12 +105,17 @@ func (l *Logger) EmitPossession(
 		trajSign = "+"
 	}
 
+	actionLabel := resp.Action
+	if event.IsBackfill {
+		actionLabel = "BACKFILL"
+	}
+
 	line := fmt.Sprintf(
 		"%s  Q%d %s  %-8s  run=%.2f  traj=%s%.2f  bid=%d¢  ask=%d¢  game=%s  pipeline=%dms",
 		ts(),
 		event.Period,
 		formatClock(event.Clock),
-		resp.Action,
+		actionLabel,
 		resp.RunProb,
 		trajSign, trajFinal,
 		resp.YesBid,
@@ -227,6 +232,16 @@ func (l *Logger) EmitGarbageTime(gameID string, resp *PossessionResponse) {
 
 	fmt.Fprintf(os.Stdout, "%s  GARBAGE_TIME  score_diff=%d  game=%s\n",
 		ts(), scoreDiff, gameID)
+}
+
+// EmitMarketSwap prints a notice when the engine switches to a new Kalshi market.
+//
+// Example:
+//
+//	2026-04-29T20:15:30Z  [MARKET SWAP] KXNBASPREAD-26MAY06MINSAS -> KXNBASPREAD-26MAY06SASMIN (@ 55¢)
+func (l *Logger) EmitMarketSwap(gameID, oldTicker, newTicker string, bid int) {
+	fmt.Fprintf(os.Stdout, "%s  [MARKET SWAP] %s -> %s (@ %d¢)  game=%s\n",
+		ts(), oldTicker, newTicker, bid, gameID)
 }
 
 // EmitStale prints a warning when the Kalshi market feed has gone quiet.

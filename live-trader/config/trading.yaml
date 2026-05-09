@@ -17,7 +17,7 @@ risk:
 agent:
   min_yes_bid: 30
   max_yes_bid: 70
-  min_run_prob_entry: 0.15  # ~2x base rate
+  min_run_prob_entry: 0.10  # ~1.5x base rate
   take_profit_cents: 8
   stop_loss_cents: 5
   max_hold_possessions: 6

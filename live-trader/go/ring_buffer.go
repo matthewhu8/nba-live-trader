@@ -31,9 +31,10 @@ const ringWindowSecs = 120
 
 // MarketSnapshot holds the 14 computed market features ready to send to Python.
 type MarketSnapshot struct {
-	Features   [14]float32
-	HasData    bool
-	SnapshotTS time.Time
+	Features      [14]float32
+	HasData       bool
+	SnapshotTS    time.Time
+	CurrentTicker string
 }
 
 type RingBuffer struct {
@@ -134,9 +135,10 @@ func (rb *RingBuffer) Snapshot() MarketSnapshot {
 	features[13] = 1.0
 
 	snap := MarketSnapshot{
-		Features:   features,
-		HasData:    true,
-		SnapshotTS: now,
+		Features:      features,
+		HasData:       true,
+		SnapshotTS:    now,
+		CurrentTicker: latest.MarketTicker,
 	}
 
 	rb.prevVelocity = velocity
