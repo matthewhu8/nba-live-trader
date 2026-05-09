@@ -14,19 +14,21 @@ Routes:
 """
 
 import logging
+import sys
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+from inference import jsonlog
 from inference.features import FeatureComputer
 from inference.game_state import GameState, PredictionRecord
 from inference.possession import PossessionBuilder
 from inference.pregame import load_pregame
-from models.mmoe.predictor import MMoEPredictor
+from models.mmoe.predictor import MMoEPredictor, MODEL_PATH, SCALER_PATH
 from inference.dashboard import router as dashboard_router, broadcast_prediction
 
 logging.basicConfig(
@@ -37,16 +39,25 @@ logging.basicConfig(
 _predictor: Optional[MMoEPredictor] = None
 _games: dict[str, GameState] = {}
 
+# Service-level metadata captured at lifespan startup. Re-emitted as a
+# service_info record into each new run's inference.jsonl so every run's
+# log file is self-contained for post-mortems.
+_service_started_at: Optional[str] = None
+_service_info_emitted_for_runs: set[str] = set()
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _predictor
+    global _predictor, _service_started_at
+    _service_started_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
     try:
         _predictor = MMoEPredictor.load()
         logging.info("[STARTUP] MMoE model loaded successfully")
     except FileNotFoundError as exc:
         logging.warning("[STARTUP] MMoE model not found — running without inference: %s", exc)
     yield
+    # Shutdown: close any active JSONL logger so buffered writes flush.
+    jsonlog.shutdown()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -59,6 +70,10 @@ class GameStartRequest(BaseModel):
     market_ticker: str
     home_team_id:  int
     away_team_id:  int
+    # Optional during transition: a Go binary that doesn't yet send these
+    # still works — Python falls back to no JSONL logging on this run.
+    run_id:        Optional[str] = None
+    log_dir:       Optional[str] = None
 
 
 class PossessionRequest(BaseModel):
@@ -84,6 +99,13 @@ class PossessionResponse(BaseModel):
 
 @app.post("/game/{game_id}/start")
 async def game_start(game_id: str, request: GameStartRequest):
+    # Activate the run-scoped JSONLogger if Go provided run_id + log_dir.
+    # First /start for a given run_id also emits service_info so the run's
+    # inference.jsonl is self-describing.
+    if request.run_id and request.log_dir:
+        jsonlog.set_run(request.run_id, request.log_dir)
+        _maybe_emit_service_info(request.run_id)
+
     pregame = await load_pregame(
         game_id,
         fallback_home_team_id=request.home_team_id,
@@ -125,6 +147,21 @@ async def game_start(game_id: str, request: GameStartRequest):
         state.pace_baseline,
     )
 
+    jl = jsonlog.get_logger()
+    if jl is not None:
+        jl.emit(
+            "pregame_loaded",
+            game_id,
+            market_ticker = request.market_ticker,
+            home_team_id  = state.home_team_id,
+            away_team_id  = state.away_team_id,
+            home_b2b      = state.home_b2b,
+            away_b2b      = state.away_b2b,
+            pace_baseline = state.pace_baseline,
+            star_players  = state.star_players,
+            pregame       = state.pregame,
+        )
+
     return {"status": "ok", "game_id": game_id}
 
 
@@ -135,12 +172,28 @@ async def game_possession(game_id: str, request: PossessionRequest):
         raise HTTPException(status_code=404, detail=f"Game {game_id} not started")
 
     t0 = time.time()
+    jl = jsonlog.get_logger()
 
     row = PossessionBuilder.parse(request.raw_event, state)
 
     if row is None:
         state.update_from_event(request.raw_event)
         pipeline_ms = int((time.time() - t0) * 1000)
+        # parser_skip records events the possession parser deemed mid-
+        # possession (e.g. offensive rebound, mid-possession foul, non-final
+        # free throw). Useful for diffing the live parser against the
+        # historical nba_api parser to spot boundary divergences.
+        if jl is not None:
+            jl.emit(
+                "parser_skip",
+                game_id,
+                action_type   = request.raw_event.get("actionType", ""),
+                sub_type      = request.raw_event.get("subType", ""),
+                period        = request.raw_event.get("period", 0),
+                clock         = request.raw_event.get("clock", ""),
+                team_id       = request.raw_event.get("teamId", 0),
+                pipeline_ms   = pipeline_ms,
+            )
         return PossessionResponse(
             action          = "WAIT",
             run_prob        = 0.0,
@@ -211,6 +264,32 @@ async def game_possession(game_id: str, request: PossessionRequest):
         pipeline_ms     = pipeline_ms,
     )
 
+    if jl is not None:
+        jl.emit(
+            "possession",
+            game_id,
+            possession_id    = row.possession_id,
+            period           = row.period,
+            game_clock_secs  = row.game_clock_secs,
+            team_scored      = row.team_scored,
+            points           = row.points,
+            shot_value       = row.shot_value,
+            shot_distance    = row.shot_distance,
+            home_score       = row.home_score,
+            away_score       = row.away_score,
+            yes_bid          = yes_bid,
+            yes_ask          = yes_ask,
+            has_market_data  = bool(features.get("has_market_data", 0.0)),
+            run_prob         = output.run_prob,
+            trajectory       = output.trajectory,
+            hazard           = output.hazard,
+            traj_final       = traj_final,
+            is_garbage_time  = is_garbage_time,
+            is_blowout       = is_blowout,
+            pipeline_ms      = pipeline_ms,
+            features         = features,
+        )
+
     # Broadcast to live dashboard SSE subscribers
     broadcast_prediction(game_id, {
         "possession_id": row.possession_id,
@@ -242,6 +321,16 @@ async def game_end(game_id: str):
         state.possession_count,
         len(state.prediction_history),
     )
+
+    jl = jsonlog.get_logger()
+    if jl is not None:
+        jl.emit(
+            "game_end",
+            game_id,
+            total_possessions  = state.possession_count,
+            predictions_cached = len(state.prediction_history),
+        )
+
     return {"status": "ok", "game_id": game_id, "total_possessions": state.possession_count}
 
 
@@ -281,3 +370,30 @@ async def health():
         "games_active": len(_games),
         "model_loaded": _predictor is not None,
     }
+
+
+# ── JSONL helpers ──────────────────────────────────────────────────────────────
+
+def _maybe_emit_service_info(run_id: str) -> None:
+    """
+    Emit service_info exactly once per run_id, the first time we see that run.
+    Captures service-level metadata (startup time, model paths, Python version)
+    so each run's inference.jsonl is self-describing for post-mortems.
+    """
+    if run_id in _service_info_emitted_for_runs:
+        return
+    _service_info_emitted_for_runs.add(run_id)
+
+    jl = jsonlog.get_logger()
+    if jl is None:
+        return
+
+    jl.emit(
+        "service_info",
+        None,
+        service_started_at = _service_started_at,
+        model_loaded       = _predictor is not None,
+        model_path         = str(MODEL_PATH),
+        scaler_path        = str(SCALER_PATH),
+        python_version     = sys.version.split()[0],
+    )

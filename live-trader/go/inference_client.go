@@ -68,15 +68,24 @@ func NewInferenceClient(baseURL string) *InferenceClient {
 // StartGame initializes a game on the Python inference service.
 // Must be called before any ProcessPossession calls for this game.
 // Uses a 30s timeout — Python loads pregame context from MotherDuck on this call.
-func (c *InferenceClient) StartGame(ctx context.Context, gameID, ticker string, homeID, awayID int64) error {
+//
+// runID and logDir activate Python-side JSONL logging for this run. Both
+// are optional during the rolling upgrade: a Go binary that doesn't yet
+// send them works against an old Python service, and a new Python service
+// that doesn't receive them simply skips structured logging for that run.
+func (c *InferenceClient) StartGame(ctx context.Context, gameID, ticker string, homeID, awayID int64, runID, logDir string) error {
 	body, err := json.Marshal(struct {
 		MarketTicker string `json:"market_ticker"`
 		HomeTeamID   int64  `json:"home_team_id"`
 		AwayTeamID   int64  `json:"away_team_id"`
+		RunID        string `json:"run_id,omitempty"`
+		LogDir       string `json:"log_dir,omitempty"`
 	}{
 		MarketTicker: ticker,
 		HomeTeamID:   homeID,
 		AwayTeamID:   awayID,
+		RunID:        runID,
+		LogDir:       logDir,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal start game request: %w", err)

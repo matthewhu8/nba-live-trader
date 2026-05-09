@@ -35,9 +35,11 @@ type Run struct {
 	manifestPath string
 }
 
-// NewRun creates the run directory and returns a Run handle. Does not yet
-// write the manifest — call WriteManifest after the full Config is in hand
-// so we don't need to import the Config type into this file's signature.
+// NewRun creates the run directory and returns a Run handle. LogDir is
+// stored as an absolute path so the Python inference service (which runs
+// from a different working directory) can find the same directory when we
+// pass log_dir on /game/start. Does not yet write the manifest — call
+// WriteManifest after the full Config is in hand.
 func NewRun(paperMode bool) (*Run, error) {
 	id := generateRunID()
 	startedAt := time.Now().UTC()
@@ -48,12 +50,19 @@ func NewRun(paperMode bool) (*Run, error) {
 		return nil, fmt.Errorf("create run log dir %s: %w", logDir, err)
 	}
 
+	absLogDir, err := filepath.Abs(logDir)
+	if err != nil {
+		// Fallback to relative — manifest still works, only Python plumbing
+		// might fail to resolve (in which case Python falls back to no JSONL).
+		absLogDir = logDir
+	}
+
 	return &Run{
 		ID:           id,
 		StartedAt:    startedAt,
-		LogDir:       logDir,
+		LogDir:       absLogDir,
 		PaperMode:    paperMode,
-		manifestPath: filepath.Join(logDir, "manifest.json"),
+		manifestPath: filepath.Join(absLogDir, "manifest.json"),
 	}, nil
 }
 

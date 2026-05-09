@@ -53,7 +53,13 @@ func (g *GameEngine) Run(ctx context.Context) {
 	inference := NewInferenceClient(inferenceURL)
 
 	log.Printf("[INIT] calling Python /game/%s/start ...", g.gameID)
-	if err := inference.StartGame(ctx, g.gameID, g.eventTicker, homeID, awayID); err != nil {
+	runIDForPy := ""
+	logDirForPy := ""
+	if g.run != nil {
+		runIDForPy = g.run.ID
+		logDirForPy = g.run.LogDir
+	}
+	if err := inference.StartGame(ctx, g.gameID, g.eventTicker, homeID, awayID, runIDForPy, logDirForPy); err != nil {
 		log.Printf("[WARN] StartGame failed: %v — inference will return zeros", err)
 	} else {
 		log.Printf("[INIT] Python game session started")
