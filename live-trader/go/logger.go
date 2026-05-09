@@ -51,7 +51,12 @@ func NewLogger(paperMode bool, redisStream string) *Logger {
 // OpenTradeLog creates (or appends to) logs/paper_trades/{gameID}_{date}.log.
 // Call once at game start. On failure, logs a warning and continues — the
 // process never crashes because of a missing log directory.
-func (l *Logger) OpenTradeLog(gameID string) {
+//
+// runID may be empty; if set, a session banner line is written to mark this
+// session boundary. Banners make it possible to tell apart multiple runs that
+// share a single date-anchored .log file (the issue we saw last night where
+// one file contained 4 GAME SUMMARY blocks glued together).
+func (l *Logger) OpenTradeLog(gameID, runID string) {
 	dir := "logs/paper_trades"
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		zlog.Warn().Str("dir", dir).Err(err).Msg("could not create paper_trades directory — file logging disabled")
@@ -69,6 +74,13 @@ func (l *Logger) OpenTradeLog(gameID string) {
 
 	l.logFile = f
 	zlog.Info().Str("path", path).Msg("trade log opened")
+
+	if runID != "" {
+		fmt.Fprintf(l.logFile,
+			"─── SESSION START %s  game=%s  run_id=%s  paper_mode=%v ───\n",
+			ts(), gameID, runID, l.paperMode,
+		)
+	}
 }
 
 // writeLine writes msg to stdout and, if a log file is open, to the file too.

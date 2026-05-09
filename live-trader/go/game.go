@@ -63,7 +63,11 @@ func (g *GameEngine) Run(ctx context.Context) {
 	bandit := NewBandit(&g.cfg)
 	router := NewRouter(os.Getenv("KALSHI_KEY_ID"), g.cfg.Trading.PaperMode)
 	logger := NewLogger(g.cfg.Trading.PaperMode, g.cfg.Observability.RedisStream)
-	logger.OpenTradeLog(g.gameID)
+	runID := ""
+	if g.run != nil {
+		runID = g.run.ID
+	}
+	logger.OpenTradeLog(g.gameID, runID)
 
 	possessionCh := make(chan NBAEvent, 500)
 	tickCh := make(chan KalshiTick, 50000)
@@ -116,6 +120,17 @@ func (g *GameEngine) Run(ctx context.Context) {
 	log.Printf("  PAPER TRADING ENGINE STARTED FOR %s", g.gameID)
 	log.Println("──────────────────────────────────────────────────────")
 
+	// game_start records the engine going live for this game. Captures the
+	// initial market context and team IDs (which may be 0 if the CDN fetch
+	// failed pre-tip). One record per game per Run.
+	g.jsonLog.Emit("game_start", g.gameID, map[string]interface{}{
+		"event_ticker":          g.eventTicker,
+		"home_team_id":          homeID,
+		"away_team_id":          awayID,
+		"initial_market_ticker": initialTicker,
+		"paper_mode":            g.cfg.Trading.PaperMode,
+	})
+
 	for {
 		if g.killSwitch.IsSet() {
 			return // Panic shut down
@@ -131,6 +146,12 @@ func (g *GameEngine) Run(ctx context.Context) {
 			resp, err := inference.ProcessPossession(ctx, g.gameID, event, snap)
 			if err != nil {
 				log.Printf("[ERR] inference failed poss=%d: %v", possCount, err)
+				g.jsonLog.Emit("error", g.gameID, map[string]interface{}{
+					"where":         "inference",
+					"message":       err.Error(),
+					"possession_id": possCount,
+					"is_backfill":   event.IsBackfill,
+				})
 				continue
 			}
 
@@ -139,12 +160,43 @@ func (g *GameEngine) Run(ctx context.Context) {
 			riskOK := true
 			logger.EmitPossession(g.gameID, event, resp, riskOK, start)
 
+			// possessionFields is the structured per-possession record.
+			// action_chosen is filled in below — set to BACKFILL for replay
+			// events, otherwise to the bandit's decision once known. Built
+			// once so we emit exactly one possession record per possession.
+			possessionFields := map[string]interface{}{
+				"possession_id":      possCount,
+				"is_backfill":        event.IsBackfill,
+				"has_position":       openPosition != nil,
+				"period":             event.Period,
+				"clock":              event.Clock,
+				"score_home":         event.ScoreHome,
+				"score_away":         event.ScoreAway,
+				"action_type":        event.ActionType,
+				"yes_bid":            resp.YesBid,
+				"yes_ask":            resp.YesAsk,
+				"run_prob":           resp.RunProb,
+				"trajectory":         resp.Trajectory,
+				"traj_final":         resp.Trajectory[9],
+				"hazard":             resp.Hazard,
+				"hazard5":            resp.Hazard[4],
+				"is_garbage_time":    resp.IsGarbageTime,
+				"is_blowout":         resp.IsBlowout,
+				"server_pipeline_ms": resp.PipelineMS,
+				"client_total_ms":    time.Since(start).Milliseconds(),
+				"features":           resp.Features,
+			}
+
 			if event.IsBackfill {
+				possessionFields["action_chosen"] = "BACKFILL"
+				g.jsonLog.Emit("possession", g.gameID, possessionFields)
 				continue
 			}
 
 			hasPosition := openPosition != nil
 			action := bandit.Decide(resp, hasPosition)
+			possessionFields["action_chosen"] = string(action)
+			g.jsonLog.Emit("possession", g.gameID, possessionFields)
 
 			if openPosition != nil {
 				shouldExit, reason, pnl := router.CheckExit(openPosition, resp, possCount, &g.cfg)
@@ -166,6 +218,19 @@ func (g *GameEngine) Run(ctx context.Context) {
 				if shouldExit {
 					possHeld := possCount - openPosition.EntryPossID
 					logger.EmitExit(g.gameID, reason, openPosition, currentPrice, pnl, possHeld)
+					g.jsonLog.Emit("exit", g.gameID, map[string]interface{}{
+						"possession_id":    possCount,
+						"reason":           reason,
+						"direction":        openPosition.Direction,
+						"entry_price":      openPosition.EntryPrice,
+						"exit_price":       currentPrice,
+						"size":             openPosition.Size,
+						"net_pnl_dollars":  pnl,
+						"possessions_held": possHeld,
+						"run_prob":         resp.RunProb,
+						"traj_final":       resp.Trajectory[9],
+						"hazard5":          resp.Hazard[4],
+					})
 					go inference.ReportTrade(g.gameID, TradePayload{
 						Action:    "EXIT",
 						Direction: openPosition.Direction,
@@ -183,6 +248,20 @@ func (g *GameEngine) Run(ctx context.Context) {
 				} else {
 					possHeld := possCount - openPosition.EntryPossID
 					logger.EmitHold(g.gameID, openPosition, resp, possHeld)
+					priceDelta := currentPrice - openPosition.EntryPrice
+					unrealized := float64(priceDelta) * float64(openPosition.Size) / 100.0
+					g.jsonLog.Emit("hold", g.gameID, map[string]interface{}{
+						"possession_id":      possCount,
+						"direction":          openPosition.Direction,
+						"entry_price":        openPosition.EntryPrice,
+						"current_price":      currentPrice,
+						"price_delta_cents":  priceDelta,
+						"unrealized_dollars": unrealized,
+						"possessions_held":   possHeld,
+						"hazard5":            resp.Hazard[4],
+						"run_prob":           resp.RunProb,
+						"traj_final":         resp.Trajectory[9],
+					})
 				}
 			} else if action == BuyYes || action == BuyNo {
 				direction := "YES"
@@ -195,6 +274,18 @@ func (g *GameEngine) Run(ctx context.Context) {
 					signalCount++
 					positionsOpened++
 					logger.EmitEntry(g.gameID, pos, resp)
+					g.jsonLog.Emit("entry", g.gameID, map[string]interface{}{
+						"possession_id": possCount,
+						"direction":     pos.Direction,
+						"entry_price":   pos.EntryPrice,
+						"size":          pos.Size,
+						"fee_dollars":   makerFee(pos.Size, pos.EntryPrice),
+						"yes_bid":       resp.YesBid,
+						"yes_ask":       resp.YesAsk,
+						"run_prob":      resp.RunProb,
+						"traj_final":    resp.Trajectory[9],
+						"hazard5":       resp.Hazard[4],
+					})
 					go inference.ReportTrade(g.gameID, TradePayload{
 						Action:    "ENTRY",
 						Direction: pos.Direction,
@@ -208,6 +299,13 @@ func (g *GameEngine) Run(ctx context.Context) {
 
 			if resp.IsGarbageTime {
 				logger.EmitGarbageTime(g.gameID, resp)
+				gtFields := map[string]interface{}{
+					"possession_id": possCount,
+				}
+				if scoreDiff, ok := resp.Features["score_diff"]; ok {
+					gtFields["score_diff"] = scoreDiff
+				}
+				g.jsonLog.Emit("garbage_time", g.gameID, gtFields)
 			}
 
 		case <-ctx.Done():
@@ -233,6 +331,18 @@ func (g *GameEngine) Run(ctx context.Context) {
 				PositionsClosed: positionsClosed,
 				NetPnLDollars:   netPnL,
 				WinRate:         winRate,
+			})
+
+			g.jsonLog.Emit("game_end", g.gameID, map[string]interface{}{
+				"possession_count":  possCount,
+				"signal_count":      signalCount,
+				"positions_opened":  positionsOpened,
+				"positions_closed":  positionsClosed,
+				"wins":              wins,
+				"net_pnl_dollars":   netPnL,
+				"win_rate":          winRate,
+				"avg_pipeline_ms":   avgPipeline,
+				"total_pipeline_ms": totalPipelineMS,
 			})
 
 			endCtx, endCancel := context.WithTimeout(context.Background(), 5*time.Second)
