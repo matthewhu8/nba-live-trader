@@ -194,8 +194,9 @@ func (g *GameEngine) Run(ctx context.Context) {
 			}
 
 			hasPosition := openPosition != nil
-			action := bandit.Decide(resp, hasPosition)
+			action, gates := bandit.Decide(resp, hasPosition)
 			possessionFields["action_chosen"] = string(action)
+			possessionFields["gates"] = gates
 			g.jsonLog.Emit("possession", g.gameID, possessionFields)
 
 			if openPosition != nil {

@@ -51,32 +51,98 @@ func NewBandit(cfg *Config) *Bandit {
 	}
 }
 
-// Decide returns the recommended action given the MMoE output and current game state.
-// Checks hard filters first, then uses threshold rules to enter or exit.
-func (b *Bandit) Decide(resp *PossessionResponse, hasPosition bool) Action {
-	if resp.IsGarbageTime || resp.IsBlowout {
-		return Wait
+// GateResult records the outcome of every gate evaluated during Decide.
+// Emitted alongside each possession so post-mortems can answer
+// "which gate blocked entry on possession N?" without re-running anything.
+//
+// Conditional gates use *bool so JSON null distinguishes "not reached" from
+// "reached and false":
+//   - HazardExitPass: nil unless HasPosition is true
+//   - RunProbPass:    nil unless HasPosition is false
+type GateResult struct {
+	IsGarbageTime  bool    `json:"is_garbage_time"`
+	IsBlowout      bool    `json:"is_blowout"`
+	InPriceBand    bool    `json:"in_price_band"`
+	YesBid         int     `json:"yes_bid"`
+	HasPosition    bool    `json:"has_position"`
+	RunProbPass    *bool   `json:"run_prob_pass"`
+	TrajectorySign string  `json:"trajectory_sign"` // "pos" | "neg" | "zero"
+	HazardExitPass *bool   `json:"hazard_exit_pass"`
+	FirstBlocking  string  `json:"first_blocking,omitempty"`
+}
+
+// Decide returns the recommended action AND a structured record of every gate
+// that was evaluated. Decision logic is unchanged from the pre-refactor
+// implementation — see TestDecideEquivalence for the proof.
+//
+// Gate ordering (must remain identical to legacy Decide):
+//  1. is_garbage_time → Wait
+//  2. is_blowout      → Wait
+//  3. in_price_band   → Wait if outside
+//  4. has_position branch:
+//       hazard_exit_pass → Exit if true, else Wait
+//  5. no-position branch:
+//       run_prob_pass    → Wait if false
+//       trajectory_sign  → BuyYes if pos, BuyNo if neg, Wait if zero
+func (b *Bandit) Decide(resp *PossessionResponse, hasPosition bool) (Action, GateResult) {
+	trajFinal := resp.Trajectory[9]
+	trajSign := "zero"
+	if trajFinal > 0 {
+		trajSign = "pos"
+	} else if trajFinal < 0 {
+		trajSign = "neg"
 	}
-	if resp.YesBid < b.minYesBid || resp.YesBid > b.maxYesBid {
-		return Wait
+
+	inBand := resp.YesBid >= b.minYesBid && resp.YesBid <= b.maxYesBid
+
+	g := GateResult{
+		IsGarbageTime:  resp.IsGarbageTime,
+		IsBlowout:      resp.IsBlowout,
+		InPriceBand:    inBand,
+		YesBid:         resp.YesBid,
+		HasPosition:    hasPosition,
+		TrajectorySign: trajSign,
+	}
+
+	// Match legacy short-circuit ordering exactly: garbage_time before blowout.
+	if resp.IsGarbageTime {
+		g.FirstBlocking = "is_garbage_time"
+		return Wait, g
+	}
+	if resp.IsBlowout {
+		g.FirstBlocking = "is_blowout"
+		return Wait, g
+	}
+	if !inBand {
+		g.FirstBlocking = "in_price_band"
+		return Wait, g
 	}
 
 	if hasPosition {
-		// Head C: survival hazard at horizon 4 (mid-hold check)
-		if resp.Hazard[4] > b.maxHazardForHold {
-			return Exit
+		hazardExit := resp.Hazard[4] > b.maxHazardForHold
+		g.HazardExitPass = &hazardExit
+		if hazardExit {
+			return Exit, g
 		}
-		return Wait
+		g.FirstBlocking = "hazard_exit_pass"
+		return Wait, g
 	}
 
-	if resp.RunProb >= b.minRunProbEntry {
-		if resp.Trajectory[9] > 0 {
-			return BuyYes
-		} else if resp.Trajectory[9] < 0 {
-			return BuyNo
-		}
+	runProbPass := resp.RunProb >= b.minRunProbEntry
+	g.RunProbPass = &runProbPass
+	if !runProbPass {
+		g.FirstBlocking = "run_prob_pass"
+		return Wait, g
 	}
-	return Wait
+
+	if trajFinal > 0 {
+		return BuyYes, g
+	}
+	if trajFinal < 0 {
+		return BuyNo, g
+	}
+	g.FirstBlocking = "trajectory_sign"
+	return Wait, g
 }
 
 // Update adjusts Beta parameters after a trade closes.
