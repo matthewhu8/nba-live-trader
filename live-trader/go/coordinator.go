@@ -15,15 +15,19 @@ type Coordinator struct {
 	cfg        Config
 	ledger     *Ledger
 	killSwitch *KillSwitch
+	run        *Run        // shared across all engines spawned by this coordinator
+	jsonLog    *JSONLogger // shared writer; goroutine-safe
 	engines    map[string]context.CancelFunc
 	mu         sync.Mutex
 }
 
-func NewCoordinator(cfg Config, ledger *Ledger, ks *KillSwitch) *Coordinator {
+func NewCoordinator(cfg Config, ledger *Ledger, ks *KillSwitch, run *Run, jsonLog *JSONLogger) *Coordinator {
 	return &Coordinator{
 		cfg:        cfg,
 		ledger:     ledger,
 		killSwitch: ks,
+		run:        run,
+		jsonLog:    jsonLog,
 		engines:    make(map[string]context.CancelFunc),
 	}
 }
@@ -155,6 +159,6 @@ func buildKalshiEventTicker(gameTimeUTC, away, home string) string {
 }
 
 func (c *Coordinator) spawnEngine(ctx context.Context, gameID, eventTicker string) {
-	engine := NewGameEngine(gameID, eventTicker, c.cfg, c.ledger, c.killSwitch)
+	engine := NewGameEngine(gameID, eventTicker, c.cfg, c.ledger, c.killSwitch, c.run, c.jsonLog)
 	engine.Run(ctx)
 }

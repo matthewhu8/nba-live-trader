@@ -55,6 +55,44 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
+	// ── Run identity ─────────────────────────────────────────────────────
+	// Every process invocation gets a Run with its own logs/runs/{date}/{id}/
+	// directory. Manifest is written immediately; live-trader.jsonl will
+	// receive run_start / run_end here in Phase 1, and richer events in
+	// later phases. All failures here are non-fatal — the trading engine
+	// runs even if structured logging cannot start.
+	run, runErr := NewRun(cfg.Trading.PaperMode)
+	if runErr != nil {
+		log.Printf("[WARN] could not create run dir: %v — continuing without structured logging", runErr)
+	} else {
+		run.WriteManifest(cfg)
+		log.Printf("[RUN] id=%s dir=%s", run.ID, run.LogDir)
+	}
+
+	var jsonLog *JSONLogger
+	if run != nil {
+		var jlErr error
+		jsonLog, jlErr = NewJSONLogger(run)
+		if jlErr != nil {
+			log.Printf("[WARN] could not open jsonl: %v — continuing without structured logging", jlErr)
+		}
+	}
+
+	// Defers run LIFO. Order matters: emit run_end + finalize manifest
+	// FIRST (registered last so it runs first), then close the JSONL file.
+	defer jsonLog.Close()
+	defer func() {
+		const endReason = "ctx_cancel"
+		jsonLog.Emit("run_end", "", map[string]interface{}{"end_reason": endReason})
+		run.FinalizeManifest(endReason)
+	}()
+
+	jsonLog.Emit("run_start", "", map[string]interface{}{
+		"paper_mode": cfg.Trading.PaperMode,
+		"git_sha":    readGitSHA(),
+		"pid":        os.Getpid(),
+	})
+
 	ks := NewKillSwitch()
 	ledger := NewLedger(RiskConfig{
 		MaxTotalExposureCents:   cfg.Risk.MaxTotalExposureCents,
@@ -66,12 +104,12 @@ func main() {
 	if *gameID != "" && *eventTicker != "" {
 		// Single game mode
 		log.Printf("[MAIN] Starting in Single-Game mode for %s (%s)", *gameID, *eventTicker)
-		engine := NewGameEngine(*gameID, *eventTicker, cfg, ledger, ks)
+		engine := NewGameEngine(*gameID, *eventTicker, cfg, ledger, ks, run, jsonLog)
 		engine.Run(ctx)
 	} else {
 		// Coordinator mode
 		log.Printf("[MAIN] Starting Coordinator mode. Will auto-detect and manage today's games.")
-		coordinator := NewCoordinator(cfg, ledger, ks)
+		coordinator := NewCoordinator(cfg, ledger, ks, run, jsonLog)
 		if err := coordinator.Run(ctx); err != nil {
 			log.Fatalf("Coordinator error: %v", err)
 		}

@@ -13,6 +13,8 @@ type GameEngine struct {
 	cfg         Config
 	ledger      *Ledger
 	killSwitch  *KillSwitch
+	run         *Run        // process-level run identity (Phase 1+); nil-safe
+	jsonLog     *JSONLogger // shared structured-log writer (Phase 1+); nil-safe
 }
 
 func NewGameEngine(
@@ -20,6 +22,8 @@ func NewGameEngine(
 	cfg Config,
 	ledger *Ledger,
 	ks *KillSwitch,
+	run *Run,
+	jsonLog *JSONLogger,
 ) *GameEngine {
 	return &GameEngine{
 		gameID:      gameID,
@@ -27,6 +31,8 @@ func NewGameEngine(
 		cfg:         cfg,
 		ledger:      ledger,
 		killSwitch:  ks,
+		run:         run,
+		jsonLog:     jsonLog,
 	}
 }
 
