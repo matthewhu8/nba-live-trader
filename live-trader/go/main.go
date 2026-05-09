@@ -65,6 +65,11 @@ func main() {
 	if runErr != nil {
 		log.Printf("[WARN] could not create run dir: %v — continuing without structured logging", runErr)
 	} else {
+		// Capture zerolog warnings/errors into stderr.log in the run dir.
+		// MultiWriter keeps terminal output unchanged. Best-effort.
+		if stderrFile := run.CaptureStderr(); stderrFile != nil {
+			defer stderrFile.Close()
+		}
 		run.WriteManifest(cfg)
 		log.Printf("[RUN] id=%s dir=%s", run.ID, run.LogDir)
 	}

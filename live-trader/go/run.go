@@ -13,16 +13,21 @@
 package main
 
 import (
+	"bufio"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/rs/zerolog"
 )
 
 type Run struct {
@@ -102,8 +107,10 @@ func (r *Run) WriteManifest(cfg Config) {
 	}
 }
 
-// FinalizeManifest reopens the manifest, sets ended_at + end_reason, and
-// rewrites it. Best-effort. Safe to call multiple times (last call wins).
+// FinalizeManifest reopens the manifest, sets ended_at + end_reason +
+// summary stats, and rewrites it. Best-effort. Safe to call multiple times
+// (last call wins). Summary is computed from live-trader.jsonl so callers
+// don't need to thread shared counters across game engines.
 func (r *Run) FinalizeManifest(endReason string) {
 	if r == nil {
 		return
@@ -121,10 +128,122 @@ func (r *Run) FinalizeManifest(endReason string) {
 		zlog.Warn().Err(err).Msg("finalize manifest: parse failed")
 		return
 	}
-	manifest["ended_at"] = time.Now().UTC().Format(time.RFC3339)
+	endedAt := time.Now().UTC()
+	manifest["ended_at"] = endedAt.Format(time.RFC3339)
 	manifest["end_reason"] = endReason
+	manifest["summary"] = r.computeSummary(endedAt)
 	if err := writeJSONFile(r.manifestPath, manifest); err != nil {
 		zlog.Warn().Err(err).Msg("finalize manifest: write failed")
+	}
+}
+
+// CaptureStderr redirects zerolog warnings/errors to stderr.log in the run
+// directory while still printing them to the terminal (io.MultiWriter).
+// Returns the file handle so main can defer-close it. Best-effort: any
+// failure returns nil and leaves zlog targeting stderr only.
+func (r *Run) CaptureStderr() *os.File {
+	if r == nil {
+		return nil
+	}
+	path := filepath.Join(r.LogDir, "stderr.log")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		log.Printf("[WARN] could not open stderr.log: %v — zerolog stays on stderr only", err)
+		return nil
+	}
+	// Replace the package-level zlog writer. All future zlog calls land
+	// in both terminal and file. Existing call sites are unchanged.
+	zlog = zerolog.New(io.MultiWriter(os.Stderr, f)).With().Timestamp().Logger()
+	return f
+}
+
+// computeSummary scans live-trader.jsonl and aggregates per-event counters.
+// Lives here (not in jsonlog.go) because it's a manifest concern: nothing
+// in the trading loop needs this data. Returns empty stats if the JSONL
+// file is missing or unreadable — the manifest still gets ended_at.
+func (r *Run) computeSummary(endedAt time.Time) map[string]interface{} {
+	durationSecs := int(endedAt.Sub(r.StartedAt).Seconds())
+
+	jsonlPath := filepath.Join(r.LogDir, "live-trader.jsonl")
+	f, err := os.Open(jsonlPath)
+	if err != nil {
+		return map[string]interface{}{
+			"duration_secs": durationSecs,
+			"jsonl_error":   err.Error(),
+		}
+	}
+	defer f.Close()
+
+	var (
+		gamesRun         int
+		totalPossessions int
+		backfillSeen     int
+		tradesOpened     int
+		tradesClosed     int
+		wins             int
+		netPnL           float64
+		errorEvents      int
+		garbageEvents    int
+		clientMSSum      int64
+		clientMSCount    int64
+	)
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1<<20), 1<<24) // up to 16MB lines (defensive)
+	for scanner.Scan() {
+		var rec map[string]interface{}
+		if err := json.Unmarshal(scanner.Bytes(), &rec); err != nil {
+			continue // best-effort: skip malformed lines
+		}
+		event, _ := rec["event"].(string)
+		switch event {
+		case "game_start":
+			gamesRun++
+		case "possession":
+			isBackfill, _ := rec["is_backfill"].(bool)
+			if isBackfill {
+				backfillSeen++
+				continue
+			}
+			totalPossessions++
+			if v, ok := rec["client_total_ms"].(float64); ok {
+				clientMSSum += int64(v)
+				clientMSCount++
+			}
+		case "entry":
+			tradesOpened++
+		case "exit":
+			tradesClosed++
+			if v, ok := rec["net_pnl_dollars"].(float64); ok {
+				netPnL += v
+				if v > 0 {
+					wins++
+				}
+			}
+		case "error":
+			errorEvents++
+		case "garbage_time":
+			garbageEvents++
+		}
+	}
+
+	avgClientMS := float64(0)
+	if clientMSCount > 0 {
+		avgClientMS = float64(clientMSSum) / float64(clientMSCount)
+	}
+
+	return map[string]interface{}{
+		"duration_secs":     durationSecs,
+		"games_run":         gamesRun,
+		"total_possessions": totalPossessions,
+		"backfill_seen":     backfillSeen,
+		"trades_opened":     tradesOpened,
+		"trades_closed":     tradesClosed,
+		"wins":              wins,
+		"net_pnl_dollars":   netPnL,
+		"errors":            errorEvents,
+		"garbage_events":    garbageEvents,
+		"avg_client_ms":     avgClientMS,
 	}
 }
 
