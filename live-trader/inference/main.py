@@ -45,14 +45,61 @@ _games: dict[str, GameState] = {}
 _service_started_at: Optional[str] = None
 _service_info_emitted_for_runs: set[str] = set()
 
+# ── Phase 6: feature z-score stats ──────────────────────────────────────────
+#
+# A small subset of decision-relevant features get z-scores attached to every
+# possession JSONL record. Z-scores tell you at a glance whether a feature
+# value is unusual relative to the training distribution:
+#   |z| < 1   normal     |z| ≥ 2   unusual
+#   1 ≤ |z| < 2  notable  |z| ≥ 3   extreme
+#
+# Population: the StandardScaler from training already holds per-feature
+# mean+std. We just slice out the columns we care about at startup, no
+# separate stats file needed.
+
+_ZSCORE_FEATURES: list[str] = [
+    "score_diff",
+    "lineup_net_rating_delta",
+    "current_run_length",
+    "current_run_points",
+    "home_points_last_5_poss",
+    "away_points_last_5_poss",
+    "pace_last_10_possessions",
+    "home_xPPP_last_5",
+    "away_xPPP_last_5",
+    "garbage_time_risk",
+]
+
+# {feature_name: (mean, std)} — populated at lifespan startup once the
+# predictor is loaded. Empty if the predictor failed to load.
+_zscore_stats: dict[str, tuple[float, float]] = {}
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _predictor, _service_started_at
+    global _predictor, _service_started_at, _zscore_stats
     _service_started_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
     try:
         _predictor = MMoEPredictor.load()
         logging.info("[STARTUP] MMoE model loaded successfully")
+
+        # Build the z-score lookup once at startup. The scaler's mean_/scale_
+        # arrays are aligned to ALL_FEATURE_COLS; we just extract the columns
+        # for the ~10 decision-relevant features we want to z-score per
+        # possession. Skip features whose std is ≈0 (constant features) —
+        # those would divide by zero.
+        all_stats = _predictor.get_feature_stats()
+        for name in _ZSCORE_FEATURES:
+            if name not in all_stats:
+                logging.warning("[STARTUP] z-score feature %s not in scaler — skipped", name)
+                continue
+            mean, std = all_stats[name]
+            if std < 1e-10:
+                logging.warning("[STARTUP] z-score feature %s has std≈0 — skipped", name)
+                continue
+            _zscore_stats[name] = (mean, std)
+        logging.info("[STARTUP] z-score stats loaded for %d features", len(_zscore_stats))
+
     except FileNotFoundError as exc:
         logging.warning("[STARTUP] MMoE model not found — running without inference: %s", exc)
     yield
@@ -306,6 +353,7 @@ async def game_possession(game_id: str, request: PossessionRequest):
             pipeline_ms      = pipeline_ms,
             model            = model_block,
             features         = features,
+            features_zscored = _compute_zscores(features),
         )
 
     # Broadcast to live dashboard SSE subscribers
@@ -391,6 +439,27 @@ async def health():
 
 
 # ── JSONL helpers ──────────────────────────────────────────────────────────────
+
+def _compute_zscores(features: dict[str, float]) -> dict[str, dict[str, float]]:
+    """
+    Compute z-scores for the configured feature subset. Returns a dict of
+    {feature_name: {"value": v, "z": z}} for features that have stats. Each
+    entry is self-contained so a JSONL consumer doesn't have to cross-
+    reference the raw `features` block to interpret a z-score.
+
+    Features missing from the input default to 0.0 (matching the predictor's
+    own missing-feature behavior). Empty dict if z-score stats failed to
+    load (e.g. predictor unavailable).
+    """
+    if not _zscore_stats:
+        return {}
+    out: dict[str, dict[str, float]] = {}
+    for name, (mean, std) in _zscore_stats.items():
+        v = float(features.get(name, 0.0))
+        z = (v - mean) / std
+        out[name] = {"value": v, "z": z}
+    return out
+
 
 def _maybe_emit_service_info(run_id: str) -> None:
     """

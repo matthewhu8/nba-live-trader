@@ -169,6 +169,25 @@ class MMoEPredictor:
             expert_opinions_haz  = op_c.squeeze(0).tolist(),
         )
 
+    def get_feature_stats(self) -> dict[str, tuple[float, float]]:
+        """
+        Return per-feature (mean, std) from the trained scaler, keyed by
+        feature name. Used by the inference service to compute z-scores
+        against the training distribution for selected features (Phase 6
+        interpretability — answers "is this feature value unusual?").
+
+        The StandardScaler computes per-column statistics independently,
+        so pulling out the i-th mean/std for the i-th feature name in
+        ALL_FEATURE_COLS is exactly the per-feature stat that fitted on
+        the training set.
+        """
+        means  = self._scaler.mean_
+        scales = self._scaler.scale_
+        return {
+            name: (float(means[i]), float(scales[i]))
+            for i, name in enumerate(ALL_FEATURE_COLS)
+        }
+
     def predict_batch(self, feature_matrix: np.ndarray) -> list[MMoEOutput]:
         """
         Run inference on a batch of feature rows.
