@@ -543,6 +543,7 @@ data permanently lost. This is the first thing to build and the first thing to d
 - [x] Phase 1: Kalshi recorder deployed
 - [x] Phase 1: nba_api ingestion complete
 - [x] Phase 1: Raw tables normalized → `features.possession_flat` (400K rows, 86 cols)
+- [x] Phase 1: **possession_flat null backfill complete (2026-05-10)** — fixed two null groups: Group 1 (207 games, 2025-26 season, missing from all raw tables) re-fetched via nba_api and rebuilt from scratch; Group 2 (29 games, 2024-25 season, momentum features null) re-ran feature pipeline using existing raw data. Script: `python -m data.ingestion.backfill_possession_flat`
 - [x] Phase 2: Player ratings (rolling RAPM)
 - [x] Phase 2: Lineup ratings (47M rows, 1,065 games)
 - [ ] Phase 2: Rotation tendency model
