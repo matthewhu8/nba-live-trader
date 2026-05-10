@@ -1,76 +1,96 @@
-import pandas as pd
+"""
+  Team-level EWMA offensive/defensive ratings.
 
-def compute_game_team_stats(poss_df: pd.DataFrame) -> dict:
-    """
-    Computes single-game raw Offensive and Defensive ratings for both teams.
-    """
-    stats = {}
-    for team in ['home', 'away']:
-        team_poss = poss_df[poss_df['possessing_team'] == team]
-        poss_count = len(team_poss)
-        pts = team_poss['points'].sum() if 'points' in team_poss else 0
-        ortg = (pts * 100.0 / poss_count) if poss_count > 0 else 0
-        stats[team] = {'ortg': ortg}
-        
-    stats['home']['drtg'] = stats['away']['ortg']
-    stats['away']['drtg'] = stats['home']['ortg']
-    return stats
+  Called by Phase 3d of the nightly post-game pipeline to update
+  features.team_ratings after each night's games.
+  """
 
-def apply_team_ewma(state_dict: dict, ortg: float, drtg: float, league_avg: float) -> dict:
-    """
-    Updates the Exponential Weighted Moving Average for a team's ratings,
-    and applies Bayesian Shrinkage towards the league average for early season stability.
-    """
-    games_played = int(state_dict.get('games_played', 0) or 0)
-    prev_ewma_ortg = state_dict.get('ewma_off_rating')
-    prev_ewma_drtg = state_dict.get('ewma_def_rating')
-    
-    if prev_ewma_ortg is None or prev_ewma_ortg == 0:
-        prev_ewma_ortg = league_avg
-    if prev_ewma_drtg is None or prev_ewma_drtg == 0:
-        prev_ewma_drtg = league_avg
+  from typing import Any
 
-    new_games_played = games_played + 1
-    
-    # α = max(0.05, (1 / games_played))
-    # Ensures tonight's game gets at least 5% weight
-    alpha = max(0.05, 1.0 / new_games_played)
-    
-    # UPDATE EWMA
-    new_ewma_ortg = alpha * ortg + (1 - alpha) * float(prev_ewma_ortg)
-    new_ewma_drtg = alpha * drtg + (1 - alpha) * float(prev_ewma_drtg)
-    
-    # GET W (Bayesian Shrinkage Weight)
-    # K = 15 (number of games before we trust the team 50%)
-    K = 15
-    w = new_games_played / (new_games_played + K)
-    
-    # FINAL SHRINKAGE
-    shrunk_ortg = w * new_ewma_ortg + (1 - w) * league_avg
-    shrunk_drtg = w * new_ewma_drtg + (1 - w) * league_avg
-    
-    # Manage the sliding window of last 5 net ratings
-    last_5_str = state_dict.get('last_5_net_ratings', "")
-    if pd.isna(last_5_str): last_5_str = ""
-    try:
-        last_5 = [float(x) for x in str(last_5_str).split(',') if x.strip()]
-    except Exception:
-        last_5 = []
-        
-    net_rating = ortg - drtg
-    last_5.append(net_rating)
-    if len(last_5) > 5:
-        last_5 = last_5[-5:]
-        
-    last_5_out = ",".join(str(round(x, 2)) for x in last_5)
-    
-    return {
-        'games_played': new_games_played,
-        'ewma_off_rating': new_ewma_ortg, 
-        'ewma_def_rating': new_ewma_drtg,
-        'ewma_net_rating': new_ewma_ortg - new_ewma_drtg, 
-        'off_rating': shrunk_ortg, 
-        'def_rating': shrunk_drtg,
-        'net_rating': shrunk_ortg - shrunk_drtg,
-        'last_5_net_ratings': last_5_out
-    }
+  import pandas as pd
+
+  # Matches FIXED_ALPHA constant in post_game_pipeline.py
+  _FIXED_ALPHA = 0.05  # floor — half-life ~20 games
+
+
+  def compute_game_team_stats(possessions_df: pd.DataFrame) -> dict[str, dict[str, float]]:
+      """
+      Compute raw offensive and defensive ratings for both teams from one game's possessions.
+
+      Offensive rating = points scored per 100 own possessions.
+      Defensive rating = points conceded per 100 opponent possessions.
+
+      Returns {"home": {"ortg": float, "drtg": float}, "away": {"ortg": float, "drtg": float}},
+      or {} if the DataFrame is malformed or too sparse.
+      """
+      if possessions_df.empty or "possessing_team" not in possessions_df.columns:
+          return {}
+
+      home_poss_df = possessions_df[possessions_df["possessing_team"] == "home"]
+      away_poss_df = possessions_df[possessions_df["possessing_team"] == "away"]
+
+      home_poss = len(home_poss_df)
+      away_poss = len(away_poss_df)
+  
+      if home_poss < 10 or away_poss < 10:
+          return {}
+
+      home_pts = float(home_poss_df["points"].sum())
+      away_pts = float(away_poss_df["points"].sum())
+
+      home_ortg = home_pts / home_poss * 100.0
+      away_ortg = away_pts / away_poss * 100.0
+
+      return {
+          "home": {"ortg": home_ortg, "drtg": away_ortg},
+          "away": {"ortg": away_ortg, "drtg": home_ortg},
+      }
+
+
+  def apply_team_ewma(
+      state_dict: dict,
+      ortg: float,
+      drtg: float,
+      league_avg: float,
+  ) -> dict[str, Any]:
+      """
+      Apply one EWMA update step to a team's rating state.
+  
+      Uses adaptive alpha: max(_FIXED_ALPHA, 2/(n+2)).
+      Early games trust new data fully; converges to ~0.05 after ~40 games.
+      When state_dict is empty (first game for this team), initializes from league_avg.
+
+      Args:
+          state_dict: current state pulled from features.team_ratings
+                      keys: games_played, ewma_off_rating, ewma_def_rating, last_5_net_ratings
+          ortg:       this game's raw offensive rating (pts per 100 possessions)
+          drtg:       this game's raw defensive rating (pts conceded per 100 possessions)
+          league_avg: current league-wide average ortg (for warm-start on first game)
+
+      Returns dict with all columns needed for the INSERT into features.team_ratings.
+      """
+      games_played  = int(state_dict.get("games_played", 0) or 0)
+      prev_ewma_off = float(state_dict.get("ewma_off_rating") or league_avg)
+      prev_ewma_def = float(state_dict.get("ewma_def_rating") or league_avg)
+      last_5_str    = str(state_dict.get("last_5_net_ratings") or "")
+
+      alpha    = max(_FIXED_ALPHA, 2.0 / (games_played + 2))
+      ewma_off = alpha * ortg + (1.0 - alpha) * prev_ewma_off
+      ewma_def = alpha * drtg + (1.0 - alpha) * prev_ewma_def
+
+      raw_net = ortg - drtg
+      last_5  = [float(x) for x in last_5_str.split(",") if x.strip()]
+      last_5.append(raw_net)
+      last_5  = last_5[-5:]
+
+      return {
+          "games_played":       games_played + 1,
+          "ewma_off_rating":    ewma_off,
+          "ewma_def_rating":    ewma_def,
+          "ewma_net_rating":    ewma_off - ewma_def,
+          "off_rating":         ortg,
+          "def_rating":         drtg,
+          "net_rating":         raw_net,
+          "last_5_net_ratings": ",".join(f"{x:.2f}" for x in last_5),
+      }
+

@@ -754,8 +754,8 @@ def update_team_ratings_phase(parsed: dict[str, dict[str, pd.DataFrame]], as_of_
         league_avg_ortg = league_avg_res[0] if (league_avg_res and league_avg_res[0]) else 110.0
 
         for game_id, dfs in parsed.items():
-            if "possession_feed" not in dfs: continue
-            raw_stats = compute_game_team_stats(dfs["possession_feed"])
+            if "possessions" not in dfs: continue
+            raw_stats = compute_game_team_stats(dfs["possessions"])
             if not raw_stats: continue
             
             # For each team (home/away)
