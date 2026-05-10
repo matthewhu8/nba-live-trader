@@ -1,10 +1,3 @@
-// Entry point for the live trading engine.
-// For now: test mode polls a single game's NBA feed and prints events.
-//
-// Usage:
-//
-//	go run . --game 0022501234           poll a specific game ID (Ctrl+C to stop)
-//	go run . --game 0022501234 --test    run for 30s then exit
 package main
 
 import (
@@ -16,42 +9,146 @@ import (
 	"syscall"
 )
 
-// currently set to only run nba live feed to ensure we are processing
-// each possession correctly (for dev purposes)
 func main() {
-	// process inputs to determine mode
-	gameID := flag.String("game", "", "NBA game ID to poll (e.g. 0022501234)")
-	marketTicker := flag.String("market", "", "Kalshi market ticker (e.g. NBA_Game_20260423_LALHOU)") // returns address of string
+	gameID := flag.String("game", "", "Optional: Specific NBA game ID to trade (e.g. 0042500212)")
+	eventTicker := flag.String("event", "", "Optional: Kalshi base event ticker (e.g. KXNBASPREAD-26MAY06MINSAS)")
+	configPath := flag.String("config", "", "Path to trading.yaml (default: auto-detect)")
 	flag.Parse()
 
-	if *gameID == "" {
-		log.Fatal("usage: go run . --game <game_id>")
+	// ── Load .env ────────────────────────────────────────────────────────
+	if loadedEnv, err := LoadEnvCandidates(".env", "../.env", "../../.env"); err != nil {
+		log.Printf("[WARN] could not load .env from project root: %v", err)
+	} else {
+		log.Printf("[ENV] loaded %s", loadedEnv)
+	}
+
+	// ── Load config ──────────────────────────────────────────────────────
+	cfgFile := *configPath
+	if cfgFile == "" {
+		candidates := []string{
+			"../config/trading.yaml",
+			"../../live-trader/config/trading.yaml",
+		}
+		for _, c := range candidates {
+			if _, err := os.Stat(c); err == nil {
+				cfgFile = c
+				break
+			}
+		}
+	}
+
+	var cfg Config
+	if cfgFile != "" {
+		loaded, err := LoadConfig(cfgFile)
+		if err != nil {
+			log.Printf("[WARN] could not load config %s: %v — using defaults", cfgFile, err)
+			cfg = defaultConfig()
+		} else {
+			cfg = *loaded
+			log.Printf("[CONFIG] loaded from %s (paper_mode=%v)", cfgFile, cfg.Trading.PaperMode)
+		}
+	} else {
+		cfg = defaultConfig()
+		log.Printf("[CONFIG] no config file found — using defaults (paper_mode=true)")
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	// set up channels for streaming data from the NBA feed and Kalshi feed
-	events := make(chan NBAEvent, 500) // channel for NBA events (possessions)
-	nbaFeed := NewNBAFeed(*gameID)
-	go nbaFeed.Run(ctx, events) // runs NBAFeed in a goroutine and continuously polls for new events, outputting to events channel
-
-	ticks := make(chan KalshiTick, 50000) // channel for Kalshi ticks
-	kalshiFeed := NewKalshiFeed(*marketTicker, "") // marketTicker is the address of the string, so *marketTicker is the value
-	go kalshiFeed.Run(ctx, ticks)
-	
-	for {
-		select {
-		case ev := <-events:
-			log.Printf("NBA EVENT action=%d type=%-15s period=%d clock=%s home=%s away=%s desc=%q",
-				ev.ActionNumber, ev.ActionType, ev.Period, ev.Clock,
-				ev.ScoreHome, ev.ScoreAway, ev.Description)
-		case tick := <-ticks:
-			log.Printf("TICK: yes_bid=%d yes_ask=%d yes_last=%d volume=%d open_interest=%d is_stale=%t",
-				tick.YesBid, tick.YesAsk, tick.YesLast, tick.Volume, tick.OpenInterest, tick.IsStale)
-		case <-ctx.Done():
-			log.Println("shutting down")
-			return
+	// ── Run identity ─────────────────────────────────────────────────────
+	// Every process invocation gets a Run with its own logs/runs/{date}/{id}/
+	// directory. Manifest is written immediately; live-trader.jsonl will
+	// receive run_start / run_end here in Phase 1, and richer events in
+	// later phases. All failures here are non-fatal — the trading engine
+	// runs even if structured logging cannot start.
+	run, runErr := NewRun(cfg.Trading.PaperMode)
+	if runErr != nil {
+		log.Printf("[WARN] could not create run dir: %v — continuing without structured logging", runErr)
+	} else {
+		// Capture zerolog warnings/errors into stderr.log in the run dir.
+		// MultiWriter keeps terminal output unchanged. Best-effort.
+		if stderrFile := run.CaptureStderr(); stderrFile != nil {
+			defer stderrFile.Close()
 		}
+		run.WriteManifest(cfg)
+		log.Printf("[RUN] id=%s dir=%s", run.ID, run.LogDir)
+	}
+
+	var jsonLog *JSONLogger
+	if run != nil {
+		var jlErr error
+		jsonLog, jlErr = NewJSONLogger(run)
+		if jlErr != nil {
+			log.Printf("[WARN] could not open jsonl: %v — continuing without structured logging", jlErr)
+		}
+	}
+
+	// Defers run LIFO. Order matters: emit run_end + finalize manifest
+	// FIRST (registered last so it runs first), then close the JSONL file.
+	defer jsonLog.Close()
+	defer func() {
+		const endReason = "ctx_cancel"
+		jsonLog.Emit("run_end", "", map[string]interface{}{"end_reason": endReason})
+		run.FinalizeManifest(endReason)
+	}()
+
+	jsonLog.Emit("run_start", "", map[string]interface{}{
+		"paper_mode": cfg.Trading.PaperMode,
+		"git_sha":    readGitSHA(),
+		"pid":        os.Getpid(),
+	})
+
+	ks := NewKillSwitch()
+	ledger := NewLedger(RiskConfig{
+		MaxTotalExposureCents:   cfg.Risk.MaxTotalExposureCents,
+		MaxPerGameExposureCents: cfg.Risk.MaxPerGameExposureCents,
+		MaxDailyLossCents:       cfg.Risk.MaxDailyLossCents,
+		MaxContractsPerOrder:    cfg.Risk.MaxContractsPerOrder,
+	}, ks)
+
+	if *gameID != "" && *eventTicker != "" {
+		// Single game mode
+		log.Printf("[MAIN] Starting in Single-Game mode for %s (%s)", *gameID, *eventTicker)
+		engine := NewGameEngine(*gameID, *eventTicker, cfg, ledger, ks, run, jsonLog)
+		engine.Run(ctx)
+	} else {
+		// Coordinator mode
+		log.Printf("[MAIN] Starting Coordinator mode. Will auto-detect and manage today's games.")
+		coordinator := NewCoordinator(cfg, ledger, ks, run, jsonLog)
+		if err := coordinator.Run(ctx); err != nil {
+			log.Fatalf("Coordinator error: %v", err)
+		}
+	}
+}
+
+func defaultConfig() Config {
+	return Config{
+		Trading: struct {
+			PaperMode bool `yaml:"paper_mode"`
+		}{PaperMode: true},
+		Inference: struct {
+			BaseURL   string `yaml:"base_url"`
+			TimeoutMS int    `yaml:"timeout_ms"`
+		}{BaseURL: "http://localhost:8001", TimeoutMS: 500},
+		Agent: struct {
+			MinYesBid             int     `yaml:"min_yes_bid"`
+			MaxYesBid             int     `yaml:"max_yes_bid"`
+			MinRunProbEntry       float32 `yaml:"min_run_prob_entry"`
+			MinAbsTrajEntry       float32 `yaml:"min_abs_traj_entry"`
+			MinRunLengthEntry     int     `yaml:"min_run_length_entry"`
+			TakeProfitCents       int     `yaml:"take_profit_cents"`
+			StopLossCents         int     `yaml:"stop_loss_cents"`
+			MaxHoldPossessions    int     `yaml:"max_hold_possessions"`
+			PositionSizeContracts int     `yaml:"position_size_contracts"`
+		}{
+			MinYesBid: 30, MaxYesBid: 70, MinRunProbEntry: 0.10,
+			MinAbsTrajEntry: 0.08, MinRunLengthEntry: 2,
+			TakeProfitCents: 8, StopLossCents: 5, MaxHoldPossessions: 6,
+			PositionSizeContracts: 100,
+		},
+		Feeds: struct {
+			NBAPollIntervalMS      int `yaml:"nba_poll_interval_ms"`
+			KalshiStaleThresholdMS int `yaml:"kalshi_stale_threshold_ms"`
+		}{NBAPollIntervalMS: 3000, KalshiStaleThresholdMS: 30000},
 	}
 }

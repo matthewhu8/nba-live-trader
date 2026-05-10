@@ -14,19 +14,22 @@ Routes:
 """
 
 import logging
+import sys
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+from inference import jsonlog
 from inference.features import FeatureComputer
 from inference.game_state import GameState, PredictionRecord
 from inference.possession import PossessionBuilder
 from inference.pregame import load_pregame
-from models.mmoe.predictor import MMoEPredictor
+from models.mmoe.predictor import MMoEPredictor, MODEL_PATH, SCALER_PATH
+from inference.dashboard import router as dashboard_router, broadcast_prediction
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,19 +39,76 @@ logging.basicConfig(
 _predictor: Optional[MMoEPredictor] = None
 _games: dict[str, GameState] = {}
 
+# Service-level metadata captured at lifespan startup. Re-emitted as a
+# service_info record into each new run's inference.jsonl so every run's
+# log file is self-contained for post-mortems.
+_service_started_at: Optional[str] = None
+_service_info_emitted_for_runs: set[str] = set()
+
+# ── Phase 6: feature z-score stats ──────────────────────────────────────────
+#
+# A small subset of decision-relevant features get z-scores attached to every
+# possession JSONL record. Z-scores tell you at a glance whether a feature
+# value is unusual relative to the training distribution:
+#   |z| < 1   normal     |z| ≥ 2   unusual
+#   1 ≤ |z| < 2  notable  |z| ≥ 3   extreme
+#
+# Population: the StandardScaler from training already holds per-feature
+# mean+std. We just slice out the columns we care about at startup, no
+# separate stats file needed.
+
+_ZSCORE_FEATURES: list[str] = [
+    "score_diff",
+    "lineup_net_rating_delta",
+    "current_run_length",
+    "current_run_points",
+    "home_points_last_5_poss",
+    "away_points_last_5_poss",
+    "pace_last_10_possessions",
+    "home_xPPP_last_5",
+    "away_xPPP_last_5",
+    "garbage_time_risk",
+]
+
+# {feature_name: (mean, std)} — populated at lifespan startup once the
+# predictor is loaded. Empty if the predictor failed to load.
+_zscore_stats: dict[str, tuple[float, float]] = {}
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _predictor
+    global _predictor, _service_started_at, _zscore_stats
+    _service_started_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
     try:
         _predictor = MMoEPredictor.load()
         logging.info("[STARTUP] MMoE model loaded successfully")
+
+        # Build the z-score lookup once at startup. The scaler's mean_/scale_
+        # arrays are aligned to ALL_FEATURE_COLS; we just extract the columns
+        # for the ~10 decision-relevant features we want to z-score per
+        # possession. Skip features whose std is ≈0 (constant features) —
+        # those would divide by zero.
+        all_stats = _predictor.get_feature_stats()
+        for name in _ZSCORE_FEATURES:
+            if name not in all_stats:
+                logging.warning("[STARTUP] z-score feature %s not in scaler — skipped", name)
+                continue
+            mean, std = all_stats[name]
+            if std < 1e-10:
+                logging.warning("[STARTUP] z-score feature %s has std≈0 — skipped", name)
+                continue
+            _zscore_stats[name] = (mean, std)
+        logging.info("[STARTUP] z-score stats loaded for %d features", len(_zscore_stats))
+
     except FileNotFoundError as exc:
         logging.warning("[STARTUP] MMoE model not found — running without inference: %s", exc)
     yield
+    # Shutdown: close any active JSONL logger so buffered writes flush.
+    jsonlog.shutdown()
 
 
 app = FastAPI(lifespan=lifespan)
+app.include_router(dashboard_router)
 
 
 # ── Pydantic models ────────────────────────────────────────────────────────────
@@ -57,6 +117,10 @@ class GameStartRequest(BaseModel):
     market_ticker: str
     home_team_id:  int
     away_team_id:  int
+    # Optional during transition: a Go binary that doesn't yet send these
+    # still works — Python falls back to no JSONL logging on this run.
+    run_id:        Optional[str] = None
+    log_dir:       Optional[str] = None
 
 
 class PossessionRequest(BaseModel):
@@ -82,12 +146,24 @@ class PossessionResponse(BaseModel):
 
 @app.post("/game/{game_id}/start")
 async def game_start(game_id: str, request: GameStartRequest):
-    pregame = await load_pregame(game_id)
+    # Activate the run-scoped JSONLogger if Go provided run_id + log_dir.
+    # First /start for a given run_id also emits service_info so the run's
+    # inference.jsonl is self-describing.
+    if request.run_id and request.log_dir:
+        jsonlog.set_run(request.run_id, request.log_dir)
+        _maybe_emit_service_info(request.run_id)
+
+    pregame = await load_pregame(
+        game_id,
+        fallback_home_team_id=request.home_team_id,
+        fallback_away_team_id=request.away_team_id,
+    )
 
     state = GameState(
-        game_id      = game_id,
-        home_team_id = pregame["home_team_id"],
-        away_team_id = pregame["away_team_id"],
+        game_id       = game_id,
+        market_ticker = request.market_ticker,
+        home_team_id  = pregame["home_team_id"],
+        away_team_id  = pregame["away_team_id"],
     )
 
     # 11 pregame feature floats — static for the entire game
@@ -118,6 +194,21 @@ async def game_start(game_id: str, request: GameStartRequest):
         state.pace_baseline,
     )
 
+    jl = jsonlog.get_logger()
+    if jl is not None:
+        jl.emit(
+            "pregame_loaded",
+            game_id,
+            market_ticker = request.market_ticker,
+            home_team_id  = state.home_team_id,
+            away_team_id  = state.away_team_id,
+            home_b2b      = state.home_b2b,
+            away_b2b      = state.away_b2b,
+            pace_baseline = state.pace_baseline,
+            star_players  = state.star_players,
+            pregame       = state.pregame,
+        )
+
     return {"status": "ok", "game_id": game_id}
 
 
@@ -128,12 +219,28 @@ async def game_possession(game_id: str, request: PossessionRequest):
         raise HTTPException(status_code=404, detail=f"Game {game_id} not started")
 
     t0 = time.time()
+    jl = jsonlog.get_logger()
 
     row = PossessionBuilder.parse(request.raw_event, state)
 
     if row is None:
         state.update_from_event(request.raw_event)
         pipeline_ms = int((time.time() - t0) * 1000)
+        # parser_skip records events the possession parser deemed mid-
+        # possession (e.g. offensive rebound, mid-possession foul, non-final
+        # free throw). Useful for diffing the live parser against the
+        # historical nba_api parser to spot boundary divergences.
+        if jl is not None:
+            jl.emit(
+                "parser_skip",
+                game_id,
+                action_type   = request.raw_event.get("actionType", ""),
+                sub_type      = request.raw_event.get("subType", ""),
+                period        = request.raw_event.get("period", 0),
+                clock         = request.raw_event.get("clock", ""),
+                team_id       = request.raw_event.get("teamId", 0),
+                pipeline_ms   = pipeline_ms,
+            )
         return PossessionResponse(
             action          = "WAIT",
             run_prob        = 0.0,
@@ -191,7 +298,7 @@ async def game_possession(game_id: str, request: PossessionRequest):
         pipeline_ms,
     )
 
-    return PossessionResponse(
+    response = PossessionResponse(
         action          = "WAIT",
         run_prob        = output.run_prob,
         trajectory      = output.trajectory,
@@ -203,6 +310,69 @@ async def game_possession(game_id: str, request: PossessionRequest):
         features        = features,
         pipeline_ms     = pipeline_ms,
     )
+
+    if jl is not None:
+        # The "model" sub-block carries the deepest interpretability data:
+        # gated outputs, gating weights (which experts each head trusted),
+        # and per-expert opinions (what each head would predict if it
+        # trusted only one expert). Together these answer "what is the
+        # model thinking" — disagreement among experts means a borderline
+        # call; consensus means the model is confident.
+        model_block = {
+            "gated": {
+                "run_prob":   output.run_prob,
+                "trajectory": output.trajectory,
+                "hazard":     output.hazard,
+            },
+            "gating_weights":  output.gating_weights,
+            "expert_opinions": {
+                "run_prob":   output.expert_opinions_run,
+                "trajectory": output.expert_opinions_traj,
+                "hazard":     output.expert_opinions_haz,
+            },
+        }
+
+        jl.emit(
+            "possession",
+            game_id,
+            possession_id    = row.possession_id,
+            period           = row.period,
+            game_clock_secs  = row.game_clock_secs,
+            team_scored      = row.team_scored,
+            points           = row.points,
+            shot_value       = row.shot_value,
+            shot_distance    = row.shot_distance,
+            home_score       = row.home_score,
+            away_score       = row.away_score,
+            yes_bid          = yes_bid,
+            yes_ask          = yes_ask,
+            has_market_data  = bool(features.get("has_market_data", 0.0)),
+            traj_final       = traj_final,
+            is_garbage_time  = is_garbage_time,
+            is_blowout       = is_blowout,
+            pipeline_ms      = pipeline_ms,
+            model            = model_block,
+            features         = features,
+            features_zscored = _compute_zscores(features),
+        )
+
+    # Broadcast to live dashboard SSE subscribers
+    broadcast_prediction(game_id, {
+        "possession_id": row.possession_id,
+        "run_prob":      output.run_prob,
+        "trajectory":    output.trajectory,
+        "hazard":        output.hazard,
+        "yes_bid":       yes_bid,
+        "yes_ask":       yes_ask,
+        "action":        "WAIT",
+        "is_garbage_time": is_garbage_time,
+        "is_blowout":    is_blowout,
+        "pipeline_ms":   pipeline_ms,
+        "features":      features,
+        "market_ticker": state.market_ticker,
+    })
+
+    return response
 
 
 @app.post("/game/{game_id}/end")
@@ -217,6 +387,16 @@ async def game_end(game_id: str):
         state.possession_count,
         len(state.prediction_history),
     )
+
+    jl = jsonlog.get_logger()
+    if jl is not None:
+        jl.emit(
+            "game_end",
+            game_id,
+            total_possessions  = state.possession_count,
+            predictions_cached = len(state.prediction_history),
+        )
+
     return {"status": "ok", "game_id": game_id, "total_possessions": state.possession_count}
 
 
@@ -256,3 +436,51 @@ async def health():
         "games_active": len(_games),
         "model_loaded": _predictor is not None,
     }
+
+
+# ── JSONL helpers ──────────────────────────────────────────────────────────────
+
+def _compute_zscores(features: dict[str, float]) -> dict[str, dict[str, float]]:
+    """
+    Compute z-scores for the configured feature subset. Returns a dict of
+    {feature_name: {"value": v, "z": z}} for features that have stats. Each
+    entry is self-contained so a JSONL consumer doesn't have to cross-
+    reference the raw `features` block to interpret a z-score.
+
+    Features missing from the input default to 0.0 (matching the predictor's
+    own missing-feature behavior). Empty dict if z-score stats failed to
+    load (e.g. predictor unavailable).
+    """
+    if not _zscore_stats:
+        return {}
+    out: dict[str, dict[str, float]] = {}
+    for name, (mean, std) in _zscore_stats.items():
+        v = float(features.get(name, 0.0))
+        z = (v - mean) / std
+        out[name] = {"value": v, "z": z}
+    return out
+
+
+def _maybe_emit_service_info(run_id: str) -> None:
+    """
+    Emit service_info exactly once per run_id, the first time we see that run.
+    Captures service-level metadata (startup time, model paths, Python version)
+    so each run's inference.jsonl is self-describing for post-mortems.
+    """
+    if run_id in _service_info_emitted_for_runs:
+        return
+    _service_info_emitted_for_runs.add(run_id)
+
+    jl = jsonlog.get_logger()
+    if jl is None:
+        return
+
+    jl.emit(
+        "service_info",
+        None,
+        service_started_at = _service_started_at,
+        model_loaded       = _predictor is not None,
+        model_path         = str(MODEL_PATH),
+        scaler_path        = str(SCALER_PATH),
+        python_version     = sys.version.split()[0],
+    )

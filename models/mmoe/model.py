@@ -128,3 +128,62 @@ class MMoEModel(nn.Module):
         mixed_c = self._mix_experts(x, self.gate_c)
 
         return self.head_a(mixed_a), self.head_b(mixed_b), self.head_c(mixed_c)
+
+    def predict_with_diagnostics(self, x: Tensor) -> dict:
+        """
+        Inference-time path that returns the same gated outputs as forward()
+        plus interpretability diagnostics:
+
+          - "gates":    softmax weights per head — which experts each head
+                        trusted for this input. Tuple of 3 tensors, each (B, n_experts).
+          - "opinions": what each head WOULD predict if it trusted only one
+                        expert. Tuple of 3 tensors:
+                            head_a_opinions: (B, n_experts, 1)
+                            head_b_opinions: (B, n_experts, n_traj)
+                            head_c_opinions: (B, n_experts, n_hazard)
+
+        Mathematically equivalent to forward() for the gated outputs (verified
+        in tests). Faster than forward(), because experts are computed once
+        instead of three times (once per head).
+
+        Training is unaffected — forward() is unchanged. This method is only
+        called from MMoEPredictor.predict() in the inference path.
+        """
+        # Compute every expert once and reuse for both gating and per-expert
+        # opinions. (B, n_experts, expert_dim)
+        expert_outs = torch.stack([e(x) for e in self.experts], dim=1)
+
+        # Gating softmax weights (B, n_experts) per head
+        gate_a_w = self.gate_a(x)
+        gate_b_w = self.gate_b(x)
+        gate_c_w = self.gate_c(x)
+
+        # Gated outputs — same math as forward(), just sharing expert_outs.
+        mixed_a = (expert_outs * gate_a_w.unsqueeze(-1)).sum(dim=1)
+        mixed_b = (expert_outs * gate_b_w.unsqueeze(-1)).sum(dim=1)
+        mixed_c = (expert_outs * gate_c_w.unsqueeze(-1)).sum(dim=1)
+
+        head_a_gated = self.head_a(mixed_a)
+        head_b_gated = self.head_b(mixed_b)
+        head_c_gated = self.head_c(mixed_c)
+
+        # Per-expert opinions: feed each expert's hidden output through each
+        # head individually. Heads have no BatchNorm and Dropout is a no-op
+        # in eval mode, so each head is a deterministic function of its input
+        # — these "opinions" are well-defined predictions, not approximations.
+        n_experts = expert_outs.size(1)
+        head_a_opinions = torch.stack(
+            [self.head_a(expert_outs[:, i, :]) for i in range(n_experts)], dim=1
+        )
+        head_b_opinions = torch.stack(
+            [self.head_b(expert_outs[:, i, :]) for i in range(n_experts)], dim=1
+        )
+        head_c_opinions = torch.stack(
+            [self.head_c(expert_outs[:, i, :]) for i in range(n_experts)], dim=1
+        )
+
+        return {
+            "gated":    (head_a_gated, head_b_gated, head_c_gated),
+            "gates":    (gate_a_w, gate_b_w, gate_c_w),
+            "opinions": (head_a_opinions, head_b_opinions, head_c_opinions),
+        }

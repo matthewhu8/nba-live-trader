@@ -812,7 +812,7 @@ def build_pregame_features_phase(games: list, game_date: date) -> None:
         for game in games:
             features = compute_pregame_features(
                 conn=conn, game_id=game.game_id, game_date=str(game_date), 
-                home_team=game.home_team, away_team=game.away_team
+                home_team=game.home_team, away_team=game.visitor_team
             )
             df = pd.DataFrame([features])
             conn.execute("INSERT OR REPLACE INTO features.pregame SELECT * FROM df")
@@ -847,6 +847,9 @@ def run_post_game_pipeline(game_date: date, games: list[GameInfo]) -> None:
 
     # Phase 0
     upsert_dim_games(games, game_date)
+
+    # Phase 4 (Moved up to ensure pregame features are calculated before games finish)
+    build_pregame_features_phase(games, game_date)
 
     # Phase 1
     parsed = fetch_and_parse_all(games)
@@ -885,9 +888,6 @@ def run_post_game_pipeline(game_date: date, games: list[GameInfo]) -> None:
     as_of_game_id = max(parsed.keys())
     update_ratings_phase(parsed, as_of_game_id)
     update_team_ratings_phase(parsed, as_of_game_id)
-
-    # Phase 4
-    build_pregame_features_phase(games, game_date)
 
     logger.info(
         "Post-game pipeline complete for %s — as_of_game_id=%s",

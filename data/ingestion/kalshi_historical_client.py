@@ -25,6 +25,7 @@ import base64
 import logging
 import os
 import re
+import ssl
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,7 +40,7 @@ from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 
-BASE_URL        = "https://api.elections.kalshi.com/trade-api/v2"
+BASE_URL        = os.environ.get("KALSHI_REST_BASE_URL", "https://external-api.kalshi.com/trade-api/v2").rstrip("/")
 SETTLED_PATH    = Path("data/raw/kalshi_markets_settled.parquet")
 CANDLESTICK_DIR = Path("data/raw/kalshi_candlesticks")
 
@@ -149,7 +150,8 @@ class KalshiAuth:
 
     def headers(self, method: str, path: str) -> dict[str, str]:
         ts_ms = str(int(time.time() * 1000))
-        message = f"{ts_ms}{method.upper()}{path}".encode()
+        sign_path = _kalshi_sign_path(path)
+        message = f"{ts_ms}{method.upper()}{sign_path}".encode()
         signature = self._private_key.sign(
             message,
             padding.PSS(
@@ -163,6 +165,42 @@ class KalshiAuth:
             "KALSHI-ACCESS-TIMESTAMP": ts_ms,
             "KALSHI-ACCESS-SIGNATURE": base64.b64encode(signature).decode(),
         }
+
+
+def _kalshi_sign_path(path: str) -> str:
+    """Return the exact URL path Kalshi expects in the RSA-PSS payload."""
+    clean_path = "/" + path.lstrip("/")
+    clean_path = clean_path.split("?", 1)[0]
+    if clean_path.startswith("/trade-api/"):
+        return clean_path
+    return f"/trade-api/v2{clean_path}"
+
+
+def kalshi_auth_from_env() -> KalshiAuth:
+    key_id = os.environ.get("KALSHI_KEY_ID") or os.environ.get("API_KEY_ID")
+    pem_content = os.environ.get("PRIVATE_RSA_KEY_PEM")
+    pem_path = os.environ.get("KALSHI_PEM_PATH") or os.environ.get("PRIVATE_RSA_KEY")
+
+    if not key_id or (not pem_content and not pem_path):
+        raise RuntimeError(
+            "KALSHI_KEY_ID/API_KEY_ID and either PRIVATE_RSA_KEY_PEM, "
+            "KALSHI_PEM_PATH, or PRIVATE_RSA_KEY must be set"
+        )
+    return KalshiAuth(key_id=key_id, private_key_pem=pem_content, private_key_path=pem_path)
+
+
+def kalshi_ssl_context() -> ssl.SSLContext:
+    """
+    Build an SSL context for aiohttp.
+
+    macOS framework Python installs can have an empty or stale system CA store.
+    certifi gives the recorder a consistent CA bundle locally and on Fly.
+    """
+    try:
+        import certifi
+    except ImportError:
+        return ssl.create_default_context()
+    return ssl.create_default_context(cafile=certifi.where())
 
 
 class KalshiHistoricalClient:
@@ -316,7 +354,8 @@ class KalshiHistoricalClient:
 
     async def backfill_settled_metadata(self, series_ticker: str = "KXNBASPREAD") -> None:
         SETTLED_PATH.parent.mkdir(parents=True, exist_ok=True)
-        async with aiohttp.ClientSession() as session:
+        connector = aiohttp.TCPConnector(ssl=kalshi_ssl_context())
+        async with aiohttp.ClientSession(connector=connector) as session:
             cutoff = await self.get_historical_cutoff(session)
             logger.info("Historical cutoff: %s", cutoff.isoformat())
             logger.info("Paginating settled %s events...", series_ticker)
@@ -368,11 +407,7 @@ async def main() -> None:
         datefmt="%Y-%m-%dT%H:%M:%S",
     )
     load_dotenv()
-    key_id   = os.environ.get("API_KEY_ID")
-    pem_path = os.environ.get("PRIVATE_RSA_KEY")
-    if not key_id or not pem_path:
-        raise RuntimeError("API_KEY_ID and PRIVATE_RSA_KEY must be set in environment")
-    auth   = KalshiAuth(key_id=key_id, private_key_path=pem_path)
+    auth   = kalshi_auth_from_env()
     client = KalshiHistoricalClient(auth)
     await client.backfill_settled_metadata("KXNBASPREAD")
 

@@ -565,10 +565,12 @@ data permanently lost. This is the first thing to build and the first thing to d
   - Architecture: 83 input features (58 physics + 10 pregame + 14 market + 1 market flag), 3 experts (64-dim MLP), 3 gating networks, 3 heads. ~37K params.
   - Data: 433K basketball rows (Heads A/C) + 24K joint rows with Kalshi ticks (Head B), 148 games
   - Model artifacts: `models/saved/mmoe_delay20.pt`, `models/saved/mmoe_scaler_delay20.pkl`
-- [ ] Phase 4: RL agent ← **CURRENT FOCUS**
-- [ ] Phase 5: Execution layer (paper mode)
-- [ ] Phase 5: Risk module + kill switch
-- [ ] Phase 6: Paper trading (4+ weeks)
+- [ ] Phase 4: RL agent (deferred — see live entry config below)
+- [x] Phase 5: **Execution layer (paper mode)** — Go engine + Python inference service running end-to-end
+- [x] Phase 5: **Comprehensive logging system (2026-05-09)** — structured JSONL across Go and Python, see section below
+- [x] Phase 5: **Live entry config aligned to backtest (2026-05-10)** — see section below
+- [ ] Phase 5: Risk module + kill switch (skeleton exists, limit checks are TODO in `risk.go`)
+- [ ] Phase 6: **Paper trading (in progress)** ← **CURRENT FOCUS** — first live run 2026-05-09 OKC@LAL
 - [ ] Phase 6: Live trading
 
 ---
@@ -629,6 +631,152 @@ python -m data.ingestion.post_game_pipeline 2026-03-31
 
 ---
 
+## Comprehensive Logging System (completed 2026-05-09)
+
+### What it does
+Captures every event in the live trading pipeline as structured JSONL,
+correlatable across Go and Python via a shared `run_id`. Replaces a
+text-only logging system which couldn't answer post-game questions
+("why did the model not fire here?") without re-running the game.
+
+### Per-run directory layout
+A "run" = one Go process invocation. The Coordinator may serve multiple
+games inside one run; they share the run_id.
+
+```
+logs/runs/{date}/{run_id}/             ← created relative to Go binary cwd
+    manifest.json       config snapshot + git_sha + env_present (names only)
+                        + paper_mode + started_at + ended_at + end_reason
+                        + summary block (counts + P&L, written at exit)
+    live-trader.jsonl   Go-side events, one JSON object per line
+    inference.jsonl     Python-side events
+    stderr.log          captured zerolog warnings/errors
+```
+
+### Event types (Go side — `live-trader.jsonl`)
+- `run_start` / `run_end`     process lifecycle (one per run)
+- `game_start` / `game_end`   per-game lifecycle with summary stats
+- `possession`                every processed NBA event — model output
+                              summary, Kalshi snapshot, action chosen,
+                              `gates` block with per-gate pass/fail and
+                              `first_blocking` name, full features dict
+- `entry` / `hold` / `exit`   position lifecycle with prices, sizes, fees, P&L
+- `garbage_time` / `error`    diagnostic events
+
+### Event types (Python side — `inference.jsonl`)
+- `service_info`              once per run, captures model paths + start time
+- `pregame_loaded`            `/game/start` data
+- `possession`                full parsed-row metadata, full features dict,
+                              `features_zscored` block, `model` block
+                              (gated outputs + gating_weights + per-expert
+                              opinions for all 3 heads)
+- `parser_skip`               event the possession parser deemed mid-possession
+- `game_end`
+
+### Cross-stream correlation
+Both files carry `run_id`. Possession records carry `possession_id` and
+`game_id`. Note: Go possession_id counts every NBA event; Python's counts
+completed possessions. The relationship is `go_possessions == python_(possession + parser_skip)`.
+
+### Model interpretability (Phase 5 of the logging build)
+Every Python `possession` record carries:
+- `model.gating_weights`              3×3 matrix [head][expert] of softmax weights
+- `model.expert_opinions.*`           per-expert predictions (what each head would
+                                      say if it trusted only one expert) —
+                                      reveals consensus vs disagreement
+- `features_zscored`                  z-scores for 10 decision-relevant features
+                                      against the training distribution. `|z| ≥ 2`
+                                      = unusual; `|z| ≥ 3` = extreme
+
+### Implementation files
+- Go: `live-trader/go/run.go`, `jsonlog.go`, plumbing in `main.go` / `coordinator.go` / `game.go`
+- Python: `live-trader/inference/jsonlog.py`, hooks in `inference/main.py`
+- Model diagnostics: `models/mmoe/model.py` (`predict_with_diagnostics` method
+  — math-equivalent to `forward()` but also returns gating weights + per-expert
+  opinions). `forward()` itself is byte-for-byte unchanged so training and
+  backtests are unaffected.
+- Helper: `tools/inspect_run.py`
+
+### Inspecting a run
+```bash
+./venv/bin/python tools/inspect_run.py <run_id>
+```
+Prints header, top-line summary, per-game breakdown, gate blocker
+distribution, anomaly counts, and Go ↔ Python possession-count sanity check.
+
+### Invariants preserved
+- MMoE forward() byte-for-byte unchanged; training / backtest paths untouched
+- `paper_trades/*.log` text format unchanged (adds a session banner line on open)
+- All trading decisions covered by behavior tests (`agent_test.go`)
+
+---
+
+## Live Entry Config — Aligned to Backtest (2026-05-10)
+
+### Background
+First live paper run (2026-05-09 OKC@LAL, game 0042500223) made 1 trade for
+-$4.93. The new logging revealed why we made so few signals: **Head A's gating
+network has collapsed in production.** Across 167 completed possessions, the
+gate routed 99.4% to a single conservative expert that keeps run_prob near
+zero. Head B (trajectory) was correctly predicting price moves on 37% of
+possessions, but the live bandit's `run_prob ≥ 0.10` gate filtered those
+signals out before they reached the entry decision.
+
+### Diagnosis
+The live bandit was running an entry config that was **stricter than the
+validated backtest**. The backtest used:
+
+    --use-traj-for-side --min-abs-traj 0.08 --min-run-length 2
+
+…and never gated on run_prob. Live did. The mismatch meant we filtered live
+signals through a broken Head A while the validated working strategy
+(Head B trajectory + run_length) was never being tested in production.
+
+### Change
+Entry gates aligned to backtest:
+
+| Gate                       | OLD              | NEW                              |
+|---                         |---               |---                               |
+| `run_prob ≥ 0.10`          | required         | **removed** (gate is broken)     |
+| `trajectory_sign ≠ 0`      | required         | implicit in magnitude gate       |
+| `|traj_final| ≥ 0.08`      | not checked      | **required**                     |
+| `current_run_length ≥ 2`   | not checked      | **required**                     |
+
+Direction (BuyYes vs BuyNo) still derived from `traj_final` sign. **Hazard
+exit logic, price-band (30-70¢) gate, garbage/blowout gates, and the entire
+has_position branch are unchanged.**
+
+### New config keys (`live-trader/config/trading.yaml`)
+```yaml
+agent:
+  min_abs_traj_entry: 0.08         # |traj_final| threshold
+  min_run_length_entry: 2          # current_run_length threshold
+  min_run_prob_entry: 0.10         # retained for compat — NO LONGER A GATE
+```
+
+Thresholds are live-tunable: edit `trading.yaml` and restart Go (no
+recompile, no Python restart needed).
+
+### Regression test fixtures
+Two named cases in `live-trader/go/agent_test.go` encode the lesson:
+- `yesterdays_losing_trade_now_blocked` — 5/9 losing trade (traj=-0.021,
+  run_len=0) is now rejected at `traj_magnitude_pass`
+- `yesterdays_missed_jump_now_traded`   — 65¢→72¢ Q3 run we missed (traj=-1.19,
+  run_len=4) now fires BuyNo
+
+### Future considerations
+- Head A's gate collapse is a model issue, not a config issue. Proper fix is
+  retraining with entropy regularization on the gating network. For now we
+  route around it via Head B.
+- If live trajectory-driven trades show calibration drift vs the Mar–Apr 2026
+  backtest validation period, tune thresholds in `trading.yaml`. Up = stricter
+  (fewer trades); down = looser (more trades).
+- The `Bandit.params` map (Beta-distribution arms for a future Thompson
+  Sampling bandit) is currently unused but kept in place — when we revisit
+  the RL agent (Phase 4), it can layer on top of the current entry gates.
+
+---
+
 ## Common Commands
 
 All commands run from the project root with `source venv/bin/activate` first.
@@ -671,6 +819,43 @@ python data/ingestion/kalshi_recorder.py
 # Check today's game schedule + recommended recorder start time
 python data/ingestion/game_schedule.py
 python data/ingestion/game_schedule.py --date 2026-03-25
+```
+
+### Live paper trading (two-process setup)
+
+Python inference service must be running before the Go trader connects.
+
+```bash
+# Terminal 1 — Python inference service (start first)
+cd /path/to/nba-live-trader
+PYTHONPATH=.:live-trader ./venv/bin/python -m uvicorn inference.main:app \
+  --host 127.0.0.1 --port 8001
+# Wait for "Application startup complete." before launching Go.
+
+# Terminal 2 — Go trader (Coordinator mode auto-detects today's games)
+cd /path/to/nba-live-trader/live-trader/go
+go build .
+./go
+
+# Single-game mode (for testing a specific game):
+./go --game 0042500223 --event KXNBASPREAD-26MAY09OKCLAL
+
+# Dashboard (in browser):
+# http://127.0.0.1:8001/dashboard
+```
+
+### Run inspection (post-game)
+
+```bash
+# Print a structured summary of any run by run_id
+./venv/bin/python tools/inspect_run.py <run_id>
+
+# Run dirs are at:
+#   live-trader/go/logs/runs/{date}/{run_id}/   (if Go launched from live-trader/go/)
+#   logs/runs/{date}/{run_id}/                  (if Go launched from project root)
+
+# Quick mid-game tail of the structured log:
+tail -f live-trader/go/logs/runs/{date}/{run_id}/live-trader.jsonl
 ```
 
 ---

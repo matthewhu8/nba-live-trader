@@ -68,15 +68,24 @@ func NewInferenceClient(baseURL string) *InferenceClient {
 // StartGame initializes a game on the Python inference service.
 // Must be called before any ProcessPossession calls for this game.
 // Uses a 30s timeout — Python loads pregame context from MotherDuck on this call.
-func (c *InferenceClient) StartGame(ctx context.Context, gameID, ticker string, homeID, awayID int64) error {
+//
+// runID and logDir activate Python-side JSONL logging for this run. Both
+// are optional during the rolling upgrade: a Go binary that doesn't yet
+// send them works against an old Python service, and a new Python service
+// that doesn't receive them simply skips structured logging for that run.
+func (c *InferenceClient) StartGame(ctx context.Context, gameID, ticker string, homeID, awayID int64, runID, logDir string) error {
 	body, err := json.Marshal(struct {
 		MarketTicker string `json:"market_ticker"`
 		HomeTeamID   int64  `json:"home_team_id"`
 		AwayTeamID   int64  `json:"away_team_id"`
+		RunID        string `json:"run_id,omitempty"`
+		LogDir       string `json:"log_dir,omitempty"`
 	}{
 		MarketTicker: ticker,
 		HomeTeamID:   homeID,
 		AwayTeamID:   awayID,
+		RunID:        runID,
+		LogDir:       logDir,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal start game request: %w", err)
@@ -163,4 +172,38 @@ func (c *InferenceClient) ProcessPossession(
 		return nil, fmt.Errorf("decode inference response: %w", err)
 	}
 	return &resp, nil
+}
+
+// TradePayload is sent back to Python when the Go engine executes a paper trade.
+type TradePayload struct {
+	Action    string  `json:"action"`
+	Direction string  `json:"direction"`
+	Price     int     `json:"price"`
+	Size      int     `json:"size"`
+	PnL       float64 `json:"pnl"`
+	Reason    string  `json:"reason"`
+}
+
+// ReportTrade sends a fire-and-forget HTTP request to the Python dashboard endpoint.
+func (c *InferenceClient) ReportTrade(gameID string, payload TradePayload) {
+	url := fmt.Sprintf("%s/game/%s/trade", c.baseURL, gameID)
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	
+	// Create a new context with a short timeout so we don't block
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(data))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	
+	resp, err := c.slowClient.Do(req)
+	if err == nil {
+		resp.Body.Close()
+	}
 }

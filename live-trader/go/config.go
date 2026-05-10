@@ -24,7 +24,14 @@ type Config struct {
 	Agent struct {
 		MinYesBid             int     `yaml:"min_yes_bid"`
 		MaxYesBid             int     `yaml:"max_yes_bid"`
+		// MinRunProbEntry is retained for backwards compatibility with older
+		// YAML files but is no longer consulted by the bandit — the live
+		// entry config was aligned to the validated backtest, which gates on
+		// trajectory magnitude + run length instead of run probability (see
+		// MMoEPredictor gate-collapse finding, 2026-05-09 post-mortem).
 		MinRunProbEntry       float32 `yaml:"min_run_prob_entry"`
+		MinAbsTrajEntry       float32 `yaml:"min_abs_traj_entry"`   // |traj_final| ≥ this  (backtest: 0.08)
+		MinRunLengthEntry     int     `yaml:"min_run_length_entry"` // current_run_length ≥ this  (backtest: 2)
 		TakeProfitCents       int     `yaml:"take_profit_cents"`
 		StopLossCents         int     `yaml:"stop_loss_cents"`
 		MaxHoldPossessions    int     `yaml:"max_hold_possessions"`

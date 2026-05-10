@@ -1,11 +1,19 @@
 logs/
 .env
+*.key
+*.pem
+live-basketball.txt
 kalshi_trading.duckdb
-venv
+venv/
 data/feature_store/
 data/raw/
-data/ingestion/__pycache__/
-models/mmoe/__pycache__/
-models/__pycache__/
-models/targets/__pycache__/
 
+# Python bytecode — never commit these
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Go compiled binaries
+live-trader/go/live-trader
+live-trader/go/go

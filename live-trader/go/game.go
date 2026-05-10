@@ -1,107 +1,362 @@
-// GameEngine orchestrates a single live game.
-// Runs 3 concurrent goroutines and a main decision loop:
-//
-//   goroutine 1 (NBAFeed):     polls CDN every 3s, emits NBAEvent to possessionCh
-//   goroutine 2 (KalshiFeed):  WebSocket, emits KalshiTick to tickCh
-//   goroutine 3 (RingBuffer):  consumes tickCh, maintains rolling market windows
-//
-//   main select loop:
-//     on NBAEvent → call Python inference service → agent decision → risk check → order
-//
-// The Python inference service receives (raw_event + market_snapshot) and returns
-// (action, run_prob, trajectory[10], hazard[10], features[83]).
-// Go never computes physics features — that is entirely Python's responsibility.
 package main
 
 import (
 	"context"
-
+	"log"
+	"os"
+	"time"
 )
 
 type GameEngine struct {
-	gameID          string
-	marketTicker    string
-	inferenceClient *InferenceClient
-	ringBuffer      *RingBuffer
-	orderRouter     *Router
-	riskLedger      *Ledger
-	killSwitch      *KillSwitch
+	gameID      string
+	eventTicker string
+	cfg         Config
+	ledger      *Ledger
+	killSwitch  *KillSwitch
+	run         *Run        // process-level run identity (Phase 1+); nil-safe
+	jsonLog     *JSONLogger // shared structured-log writer (Phase 1+); nil-safe
 }
 
 func NewGameEngine(
-	gameID, marketTicker string,
-	inferenceClient *InferenceClient,
-	orderRouter *Router,
+	gameID, eventTicker string,
+	cfg Config,
 	ledger *Ledger,
 	ks *KillSwitch,
+	run *Run,
+	jsonLog *JSONLogger,
 ) *GameEngine {
 	return &GameEngine{
-		gameID:          gameID,
-		marketTicker:    marketTicker,
-		inferenceClient: inferenceClient,
-		ringBuffer:      NewRingBuffer(),
-		orderRouter:     orderRouter,
-		riskLedger:      ledger,
-		killSwitch:      ks,
+		gameID:      gameID,
+		eventTicker: eventTicker,
+		cfg:         cfg,
+		ledger:      ledger,
+		killSwitch:  ks,
+		run:         run,
+		jsonLog:     jsonLog,
 	}
 }
 
 // Run blocks until ctx is cancelled.
 func (g *GameEngine) Run(ctx context.Context) {
-	possessionCh := make(chan NBAEvent, 10)
-	tickCh := make(chan KalshiTick, 100)
+	log.Printf("[INIT] fetching team IDs for game %s from NBA CDN...", g.gameID)
+	homeID, awayID, err := fetchTeamIDs(ctx, g.gameID)
+	if err != nil {
+		log.Printf("[WARN] could not fetch team IDs (game may not have started): %v", err)
+	} else {
+		log.Printf("[INIT] homeTeamID=%d  awayTeamID=%d", homeID, awayID)
+	}
+
+	inferenceURL := g.cfg.Inference.BaseURL
+	if inferenceURL == "" {
+		inferenceURL = "http://localhost:8001"
+	}
+	inference := NewInferenceClient(inferenceURL)
+
+	log.Printf("[INIT] calling Python /game/%s/start ...", g.gameID)
+	runIDForPy := ""
+	logDirForPy := ""
+	if g.run != nil {
+		runIDForPy = g.run.ID
+		logDirForPy = g.run.LogDir
+	}
+	if err := inference.StartGame(ctx, g.gameID, g.eventTicker, homeID, awayID, runIDForPy, logDirForPy); err != nil {
+		log.Printf("[WARN] StartGame failed: %v — inference will return zeros", err)
+	} else {
+		log.Printf("[INIT] Python game session started")
+	}
+
+	ringBuffer := NewRingBuffer()
+	bandit := NewBandit(&g.cfg)
+	router := NewRouter(os.Getenv("KALSHI_KEY_ID"), g.cfg.Trading.PaperMode)
+	logger := NewLogger(g.cfg.Trading.PaperMode, g.cfg.Observability.RedisStream)
+	runID := ""
+	if g.run != nil {
+		runID = g.run.ID
+	}
+	logger.OpenTradeLog(g.gameID, runID)
+
+	possessionCh := make(chan NBAEvent, 500)
+	tickCh := make(chan KalshiTick, 50000)
+	marketCh := make(chan string, 10)
 
 	nbaFeed := NewNBAFeed(g.gameID)
-	kalshiFeed := NewKalshiFeed(g.marketTicker, "")
-
 	go nbaFeed.Run(ctx, possessionCh)
-	go kalshiFeed.Run(ctx, tickCh)
-	go g.runRingBuffer(ctx, tickCh)
+
+	var initialTicker string
+
+	if g.eventTicker != "" {
+		scanner := NewMarketScanner(g.eventTicker, g.cfg.Agent.MinYesBid, g.cfg.Agent.MaxYesBid)
+		best, _, err := scanner.scan(ctx)
+		if err == nil && best != "" {
+			initialTicker = best
+		} else {
+			initialTicker = g.eventTicker
+		}
+
+		go scanner.Run(ctx, initialTicker, marketCh)
+
+		kalshiFeed := NewKalshiFeed(initialTicker)
+		go kalshiFeed.Run(ctx, marketCh, tickCh)
+		go func() {
+			for {
+				select {
+				case tick := <-tickCh:
+					ringBuffer.Update(tick)
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+		log.Printf("[FEED] Kalshi WebSocket started with initial market %s", initialTicker)
+	} else {
+		log.Printf("[FEED] No event ticker — running without Kalshi data")
+	}
+	log.Printf("[FEED] NBA CDN poller started for game %s (3s interval)", g.gameID)
+
+	var openPosition *PaperPosition
+	var possCount int
+	var signalCount int
+	var positionsOpened int
+	var positionsClosed int
+	var netPnL float64
+	var wins int
+	var totalPipelineMS int64
+
+	log.Println("──────────────────────────────────────────────────────")
+	log.Printf("  PAPER TRADING ENGINE STARTED FOR %s", g.gameID)
+	log.Println("──────────────────────────────────────────────────────")
+
+	// game_start records the engine going live for this game. Captures the
+	// initial market context and team IDs (which may be 0 if the CDN fetch
+	// failed pre-tip). One record per game per Run.
+	g.jsonLog.Emit("game_start", g.gameID, map[string]interface{}{
+		"event_ticker":          g.eventTicker,
+		"home_team_id":          homeID,
+		"away_team_id":          awayID,
+		"initial_market_ticker": initialTicker,
+		"paper_mode":            g.cfg.Trading.PaperMode,
+	})
 
 	for {
+		if g.killSwitch.IsSet() {
+			return // Panic shut down
+		}
+
 		select {
 		case event := <-possessionCh:
-			g.onEvent(ctx, event)
+			start := time.Now()
+			possCount++
+
+			snap := ringBuffer.Snapshot()
+
+			resp, err := inference.ProcessPossession(ctx, g.gameID, event, snap)
+			if err != nil {
+				log.Printf("[ERR] inference failed poss=%d: %v", possCount, err)
+				g.jsonLog.Emit("error", g.gameID, map[string]interface{}{
+					"where":         "inference",
+					"message":       err.Error(),
+					"possession_id": possCount,
+					"is_backfill":   event.IsBackfill,
+				})
+				continue
+			}
+
+			totalPipelineMS += resp.PipelineMS
+
+			riskOK := true
+			logger.EmitPossession(g.gameID, event, resp, riskOK, start)
+
+			// possessionFields is the structured per-possession record.
+			// action_chosen is filled in below — set to BACKFILL for replay
+			// events, otherwise to the bandit's decision once known. Built
+			// once so we emit exactly one possession record per possession.
+			possessionFields := map[string]interface{}{
+				"possession_id":      possCount,
+				"is_backfill":        event.IsBackfill,
+				"has_position":       openPosition != nil,
+				"period":             event.Period,
+				"clock":              event.Clock,
+				"score_home":         event.ScoreHome,
+				"score_away":         event.ScoreAway,
+				"action_type":        event.ActionType,
+				"yes_bid":            resp.YesBid,
+				"yes_ask":            resp.YesAsk,
+				"run_prob":           resp.RunProb,
+				"trajectory":         resp.Trajectory,
+				"traj_final":         resp.Trajectory[9],
+				"hazard":             resp.Hazard,
+				"hazard5":            resp.Hazard[4],
+				"is_garbage_time":    resp.IsGarbageTime,
+				"is_blowout":         resp.IsBlowout,
+				"server_pipeline_ms": resp.PipelineMS,
+				"client_total_ms":    time.Since(start).Milliseconds(),
+				"features":           resp.Features,
+			}
+
+			if event.IsBackfill {
+				possessionFields["action_chosen"] = "BACKFILL"
+				g.jsonLog.Emit("possession", g.gameID, possessionFields)
+				continue
+			}
+
+			hasPosition := openPosition != nil
+			action, gates := bandit.Decide(resp, hasPosition)
+			possessionFields["action_chosen"] = string(action)
+			possessionFields["gates"] = gates
+			g.jsonLog.Emit("possession", g.gameID, possessionFields)
+
+			if openPosition != nil {
+				shouldExit, reason, pnl := router.CheckExit(openPosition, resp, possCount, &g.cfg)
+
+				currentPrice := resp.YesBid
+				if openPosition.Direction == "NO" {
+					currentPrice = 100 - resp.YesAsk
+					if resp.YesAsk == 0 {
+						currentPrice = 100 - resp.YesBid
+					}
+				}
+
+				if action == Exit {
+					shouldExit = true
+					reason = "HAZARD_EXIT"
+					pnl = calcNetPnL(openPosition.Size, openPosition.EntryPrice, currentPrice)
+				}
+
+				if shouldExit {
+					possHeld := possCount - openPosition.EntryPossID
+					logger.EmitExit(g.gameID, reason, openPosition, currentPrice, pnl, possHeld)
+					g.jsonLog.Emit("exit", g.gameID, map[string]interface{}{
+						"possession_id":    possCount,
+						"reason":           reason,
+						"direction":        openPosition.Direction,
+						"entry_price":      openPosition.EntryPrice,
+						"exit_price":       currentPrice,
+						"size":             openPosition.Size,
+						"net_pnl_dollars":  pnl,
+						"possessions_held": possHeld,
+						"run_prob":         resp.RunProb,
+						"traj_final":       resp.Trajectory[9],
+						"hazard5":          resp.Hazard[4],
+					})
+					go inference.ReportTrade(g.gameID, TradePayload{
+						Action:    "EXIT",
+						Direction: openPosition.Direction,
+						Price:     currentPrice,
+						Size:      openPosition.Size,
+						PnL:       pnl,
+						Reason:    reason,
+					})
+					netPnL += pnl
+					positionsClosed++
+					if pnl > 0 {
+						wins++
+					}
+					openPosition = nil
+				} else {
+					possHeld := possCount - openPosition.EntryPossID
+					logger.EmitHold(g.gameID, openPosition, resp, possHeld)
+					priceDelta := currentPrice - openPosition.EntryPrice
+					unrealized := float64(priceDelta) * float64(openPosition.Size) / 100.0
+					g.jsonLog.Emit("hold", g.gameID, map[string]interface{}{
+						"possession_id":      possCount,
+						"direction":          openPosition.Direction,
+						"entry_price":        openPosition.EntryPrice,
+						"current_price":      currentPrice,
+						"price_delta_cents":  priceDelta,
+						"unrealized_dollars": unrealized,
+						"possessions_held":   possHeld,
+						"hazard5":            resp.Hazard[4],
+						"run_prob":           resp.RunProb,
+						"traj_final":         resp.Trajectory[9],
+					})
+				}
+			} else if action == BuyYes || action == BuyNo {
+				direction := "YES"
+				if action == BuyNo {
+					direction = "NO"
+				}
+				pos := router.Place(g.gameID, resp, possCount, &g.cfg, direction)
+				if pos != nil {
+					openPosition = pos
+					signalCount++
+					positionsOpened++
+					logger.EmitEntry(g.gameID, pos, resp)
+					g.jsonLog.Emit("entry", g.gameID, map[string]interface{}{
+						"possession_id": possCount,
+						"direction":     pos.Direction,
+						"entry_price":   pos.EntryPrice,
+						"size":          pos.Size,
+						"fee_dollars":   makerFee(pos.Size, pos.EntryPrice),
+						"yes_bid":       resp.YesBid,
+						"yes_ask":       resp.YesAsk,
+						"run_prob":      resp.RunProb,
+						"traj_final":    resp.Trajectory[9],
+						"hazard5":       resp.Hazard[4],
+					})
+					go inference.ReportTrade(g.gameID, TradePayload{
+						Action:    "ENTRY",
+						Direction: pos.Direction,
+						Price:     pos.EntryPrice,
+						Size:      pos.Size,
+						PnL:       0,
+						Reason:    "SIGNAL",
+					})
+				}
+			}
+
+			if resp.IsGarbageTime {
+				logger.EmitGarbageTime(g.gameID, resp)
+				gtFields := map[string]interface{}{
+					"possession_id": possCount,
+				}
+				if scoreDiff, ok := resp.Features["score_diff"]; ok {
+					gtFields["score_diff"] = scoreDiff
+				}
+				g.jsonLog.Emit("garbage_time", g.gameID, gtFields)
+			}
+
 		case <-ctx.Done():
+			if openPosition != nil {
+				positionsClosed++
+			}
+
+			avgPipeline := float64(0)
+			if possCount > 0 {
+				avgPipeline = float64(totalPipelineMS) / float64(possCount)
+			}
+			winRate := float64(0)
+			if positionsClosed > 0 {
+				winRate = float64(wins) / float64(positionsClosed)
+			}
+
+			logger.EmitGameSummary(GameSummary{
+				GameID:          g.gameID,
+				PossCount:       possCount,
+				AvgPipelineMS:   avgPipeline,
+				SignalCount:     signalCount,
+				PositionsOpened: positionsOpened,
+				PositionsClosed: positionsClosed,
+				NetPnLDollars:   netPnL,
+				WinRate:         winRate,
+			})
+
+			g.jsonLog.Emit("game_end", g.gameID, map[string]interface{}{
+				"possession_count":  possCount,
+				"signal_count":      signalCount,
+				"positions_opened":  positionsOpened,
+				"positions_closed":  positionsClosed,
+				"wins":              wins,
+				"net_pnl_dollars":   netPnL,
+				"win_rate":          winRate,
+				"avg_pipeline_ms":   avgPipeline,
+				"total_pipeline_ms": totalPipelineMS,
+			})
+
+			endCtx, endCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = inference.EndGame(endCtx, g.gameID)
+			endCancel()
+
 			return
 		}
 	}
-}
-
-func (g *GameEngine) runRingBuffer(ctx context.Context, tickCh <-chan KalshiTick) {
-	for {
-		select {
-		case tick := <-tickCh:
-			g.ringBuffer.Update(tick)
-		case <-ctx.Done():
-			return
-		}
-	}
-}
-
-func (g *GameEngine) onEvent(ctx context.Context, event NBAEvent) {
-	if g.killSwitch.IsSet() {
-		return
-	}
-
-	marketSnap := g.ringBuffer.Snapshot()
-
-	// Python service receives raw event + market snapshot.
-	// Returns action + full MMoE output + assembled feature dict (for logging).
-	resp, err := g.inferenceClient.ProcessPossession(ctx, g.gameID, event, marketSnap)
-	if err != nil {
-		// Log and skip this possession — don't crash the engine
-		return
-	}
-
-	if resp.IsGarbageTime || resp.IsBlowout {
-		return
-	}
-
-	approved, _ := g.riskLedger.Check(resp.Action, g.gameID, resp.YesBid)
-	if !approved {
-		return
-	}
-
-	g.orderRouter.Place(ctx, g.gameID, resp)
 }
