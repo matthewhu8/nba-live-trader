@@ -141,7 +141,7 @@ func defaultConfig() Config {
 			MaxHoldPossessions    int     `yaml:"max_hold_possessions"`
 			PositionSizeContracts int     `yaml:"position_size_contracts"`
 		}{
-			MinYesBid: 30, MaxYesBid: 70, MinRunProbEntry: 0.10,
+			MinYesBid: 30, MaxYesBid: 70, MinRunProbEntry: 0.15,
 			MinAbsTrajEntry: 0.08, MinRunLengthEntry: 2,
 			TakeProfitCents: 8, StopLossCents: 5, MaxHoldPossessions: 6,
 			PositionSizeContracts: 100,

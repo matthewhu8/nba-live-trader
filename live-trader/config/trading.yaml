@@ -17,14 +17,12 @@ risk:
 agent:
   min_yes_bid: 30
   max_yes_bid: 70
-  # min_run_prob_entry retained for compatibility but UNUSED in the bandit —
-  # Head A's gate collapse (see 2026-05-09 post-mortem) made it unreliable.
-  min_run_prob_entry: 0.10
-  # Active entry gates, matched to the validated backtest config:
-  #   python -m backtesting.mmoe_backtest --use-traj-for-side --min-abs-traj 0.08 --min-run-length 2 ...
-  # (48-game val set: 19 trades, 42.1% win rate, +$2,463 net)
-  min_abs_traj_entry: 0.08
-  min_run_length_entry: 2
+  # All entry gates below match the validated backtest config exactly:
+  #   python -m backtesting.mmoe_backtest --use-traj-for-side --min-abs-traj 0.08 --min-run-length 2 --hold-seconds 240
+  # Apr 7 → May 10 val set: 112 trades, 41.1% win rate, +$9,977 net (per 100 contracts).
+  min_run_prob_entry: 0.15      # Head A gate — restored 2026-05-11 after post-mortem
+  min_abs_traj_entry: 0.08      # Head B confidence
+  min_run_length_entry: 2       # momentum filter
   take_profit_cents: 8
   stop_loss_cents: 5
   max_hold_possessions: 6

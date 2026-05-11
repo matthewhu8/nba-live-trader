@@ -1,16 +1,32 @@
-// Thompson Sampling contextual bandit.
-// Sits on top of the MMoE outputs and decides: BUY_YES / BUY_NO / EXIT / WAIT.
+// Bandit — sits on top of the MMoE outputs and decides BUY_YES / BUY_NO / WAIT.
 //
-// The agent is NOT responsible for feature computation or model inference —
-// that is the Python service's job. The agent receives already-computed
-// MMoE outputs and uses them to make a binary enter/wait/exit decision.
+// On 2026-05-11 the entry path and exit path were both realigned to exactly
+// match the validated backtest config (CLAUDE.md: 112 trades, 41% win rate,
+// +$9,977 net on Apr 7 → May 10 val set). The realignment reverses two
+// divergences that had been silently hurting live performance:
 //
-// Context buckets: (quarter, score_diff_bucket, run_length_bucket)
-// Each (context, arm) pair has Beta distribution parameters (α, β).
-// Sample from Beta → choose highest sample → that's the action.
+//   1. The run_prob entry gate was removed yesterday (Phase 8). Today's
+//      backtest re-confirmed that gate is what makes the strategy profitable —
+//      Head A's "rare but real" elevated outputs ARE the trades that win.
+//      Restored: `run_prob >= min_run_prob_entry` (default 0.15).
 //
-// Reward: realized PnL after maker fees, updated by OrderRouter on position close.
-// Start simple: fixed threshold rules first, bandit layer on top once validated.
+//   2. The hazard-based exit was present in live but NOT in the validated
+//      backtest. Every backtest exit is TP / SL / momentum_flip / time_gate
+//      — no hazard exit anywhere. Live hazard exit was firing on 38% of
+//      all possessions (hazard5 > 0.75) and forcing premature exits at
+//      a net loss across 3 paper-trade games. Removed: bandit no longer
+//      returns Exit. The router's CheckExit (TP/SL/TIME_STOP) is now the
+//      sole exit mechanism, exactly like the backtest.
+//
+// Entry gates (matched to backtest, in order of evaluation):
+//   1. is_garbage_time / is_blowout  → Wait
+//   2. in_price_band  [30..70]       → Wait if outside
+//   3. run_prob ≥ min_run_prob_entry → Wait if below
+//   4. |traj_final| ≥ min_abs_traj   → Wait if below
+//   5. current_run_length ≥ min     → Wait if below
+//   6. trajectory sign               → BuyYes (>0) or BuyNo (<0)
+//
+// Has-position branch: always Wait. Exit logic is owned by router.CheckExit.
 package main
 
 type Action string
@@ -19,7 +35,7 @@ const (
 	Wait   Action = "WAIT"
 	BuyYes Action = "BUY_YES"
 	BuyNo  Action = "BUY_NO"
-	Exit   Action = "EXIT"
+	Exit   Action = "EXIT" // retained for future use; bandit no longer returns this
 )
 
 type ContextKey struct {
@@ -36,9 +52,9 @@ type BetaParams struct {
 type Bandit struct {
 	minYesBid         int
 	maxYesBid         int
-	minAbsTrajEntry   float32 // |traj_final| ≥ this to enter (backtest: 0.08)
-	minRunLengthEntry float32 // current_run_length ≥ this to enter (backtest: 2)
-	maxHazardForHold  float32 // hazard5 > this triggers exit while holding
+	minRunProbEntry   float32 // Head A gate — restored 2026-05-11
+	minAbsTrajEntry   float32 // Head B confidence (backtest: 0.08)
+	minRunLengthEntry float32 // momentum filter (backtest: 2)
 	params            map[ContextKey][4]BetaParams // reserved for future bandit
 }
 
@@ -46,57 +62,38 @@ func NewBandit(cfg *Config) *Bandit {
 	return &Bandit{
 		minYesBid:         cfg.Agent.MinYesBid,
 		maxYesBid:         cfg.Agent.MaxYesBid,
+		minRunProbEntry:   cfg.Agent.MinRunProbEntry,
 		minAbsTrajEntry:   cfg.Agent.MinAbsTrajEntry,
 		minRunLengthEntry: float32(cfg.Agent.MinRunLengthEntry),
-		maxHazardForHold:  0.75,
 		params:            make(map[ContextKey][4]BetaParams),
 	}
 }
 
 // GateResult records the outcome of every gate evaluated during Decide.
-// Emitted alongside each possession so post-mortems can answer
+// Emitted alongside each possession JSONL record so post-mortems can answer
 // "which gate blocked entry on possession N?" without re-running anything.
 //
 // Conditional gates use *bool so JSON null distinguishes "not reached" from
 // "reached and false":
-//   - HazardExitPass:     nil unless HasPosition is true
-//   - TrajMagnitudePass:  nil unless HasPosition is false
-//   - RunLengthPass:      nil unless HasPosition is false AND TrajMagnitudePass is true
-//
-// Entry gates were aligned to the validated backtest config on 2026-05-10
-// (post-mortem of 2026-05-09 OKC@LAL game) — Head A's gate collapsed in
-// production so we route entry decisions through Head B (trajectory) + the
-// raw `current_run_length` feature instead of the broken run-prob signal.
+//   - RunProbPass / TrajMagnitudePass / RunLengthPass — only set in the
+//     no-position branch, in evaluation order. First failing gate is named
+//     in FirstBlocking.
 type GateResult struct {
 	IsGarbageTime     bool    `json:"is_garbage_time"`
 	IsBlowout         bool    `json:"is_blowout"`
 	InPriceBand       bool    `json:"in_price_band"`
 	YesBid            int     `json:"yes_bid"`
 	HasPosition       bool    `json:"has_position"`
-	TrajMagnitudePass *bool   `json:"traj_magnitude_pass"`
+	RunProb           float32 `json:"run_prob"`
+	RunProbPass       *bool   `json:"run_prob_pass"`
 	TrajFinal         float32 `json:"traj_final"`
-	RunLengthPass     *bool   `json:"run_length_pass"`
+	TrajMagnitudePass *bool   `json:"traj_magnitude_pass"`
 	CurrentRunLength  float32 `json:"current_run_length"`
+	RunLengthPass     *bool   `json:"run_length_pass"`
 	TrajectorySign    string  `json:"trajectory_sign"` // "pos" | "neg" | "zero"
-	HazardExitPass    *bool   `json:"hazard_exit_pass"`
 	FirstBlocking     string  `json:"first_blocking,omitempty"`
 }
 
-// Decide returns the recommended action AND a structured record of every gate
-// that was evaluated.
-//
-// Gate ordering:
-//  1. is_garbage_time   → Wait
-//  2. is_blowout        → Wait
-//  3. in_price_band     → Wait if outside 30-70¢
-//  4. has_position branch (EXIT path — unchanged):
-//       hazard_exit_pass → Exit if hazard5 > maxHazardForHold, else Wait
-//  5. no-position branch (ENTRY path — backtest-aligned):
-//       traj_magnitude_pass → Wait if |traj_final| < min_abs_traj_entry
-//       run_length_pass     → Wait if current_run_length < min_run_length_entry
-//       trajectory_sign     → BuyYes if pos, BuyNo if neg
-//                             (sign cannot be zero here because magnitude gate
-//                              already required |traj_final| ≥ 0.08)
 func (b *Bandit) Decide(resp *PossessionResponse, hasPosition bool) (Action, GateResult) {
 	trajFinal := resp.Trajectory[9]
 	trajSign := "zero"
@@ -106,10 +103,7 @@ func (b *Bandit) Decide(resp *PossessionResponse, hasPosition bool) (Action, Gat
 		trajSign = "neg"
 	}
 
-	// current_run_length comes from the Python feature pipeline. Missing
-	// from the map → defaults to 0, which fails the run_length gate (safe).
 	currentRunLength := resp.Features["current_run_length"]
-
 	inBand := resp.YesBid >= b.minYesBid && resp.YesBid <= b.maxYesBid
 
 	g := GateResult{
@@ -118,11 +112,13 @@ func (b *Bandit) Decide(resp *PossessionResponse, hasPosition bool) (Action, Gat
 		InPriceBand:      inBand,
 		YesBid:           resp.YesBid,
 		HasPosition:      hasPosition,
+		RunProb:          resp.RunProb,
 		TrajFinal:        trajFinal,
 		CurrentRunLength: currentRunLength,
 		TrajectorySign:   trajSign,
 	}
 
+	// Highest-precedence gates apply equally to entry and to held positions.
 	if resp.IsGarbageTime {
 		g.FirstBlocking = "is_garbage_time"
 		return Wait, g
@@ -136,17 +132,22 @@ func (b *Bandit) Decide(resp *PossessionResponse, hasPosition bool) (Action, Gat
 		return Wait, g
 	}
 
+	// Has-position branch: bandit does nothing. The router (TP/SL/TIME_STOP)
+	// is solely responsible for exits — this matches the validated backtest.
 	if hasPosition {
-		hazardExit := resp.Hazard[4] > b.maxHazardForHold
-		g.HazardExitPass = &hazardExit
-		if hazardExit {
-			return Exit, g
-		}
-		g.FirstBlocking = "hazard_exit_pass"
+		g.FirstBlocking = "holding_position"
 		return Wait, g
 	}
 
-	// Entry path (backtest-aligned): trajectory magnitude → run length → sign.
+	// Entry path — backtest-aligned gate order:
+	//   run_prob → |traj| → run_length → sign
+	runProbPass := resp.RunProb >= b.minRunProbEntry
+	g.RunProbPass = &runProbPass
+	if !runProbPass {
+		g.FirstBlocking = "run_prob_pass"
+		return Wait, g
+	}
+
 	trajMagPass := absF32(trajFinal) >= b.minAbsTrajEntry
 	g.TrajMagnitudePass = &trajMagPass
 	if !trajMagPass {
@@ -161,8 +162,7 @@ func (b *Bandit) Decide(resp *PossessionResponse, hasPosition bool) (Action, Gat
 		return Wait, g
 	}
 
-	// Both magnitude and length passed — sign of traj_final picks direction.
-	// (Magnitude ≥ 0.08 guarantees non-zero, so we always have a direction.)
+	// Magnitude ≥ 0.08 guarantees non-zero, so sign always picks a direction.
 	if trajFinal > 0 {
 		return BuyYes, g
 	}
@@ -176,7 +176,6 @@ func absF32(x float32) float32 {
 	return x
 }
 
-// Update adjusts Beta parameters after a trade closes.
-// reward > 0: win (increment alpha), reward <= 0: loss (increment beta).
-// No-op until bandit training is enabled.
+// Update is a no-op stub for the future Thompson Sampling bandit. Kept so
+// existing call sites compile; remove when the RL agent ships.
 func (b *Bandit) Update(ctx ContextKey, armIdx int, reward float64) {}
