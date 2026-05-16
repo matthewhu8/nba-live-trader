@@ -129,6 +129,32 @@ class MMoEModel(nn.Module):
 
         return self.head_a(mixed_a), self.head_b(mixed_b), self.head_c(mixed_c)
 
+    def forward_with_gates(
+        self, x: Tensor
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+        """
+        Training path: same gated outputs as forward() plus the softmax gate
+        weights for all three tasks.
+
+        Used by the training loop to compute entropy regularization without a
+        second full expert-computation pass. Experts are computed once and reused
+        across all three gates, making this marginally faster than forward() too.
+
+        Returns: (head_a, head_b, head_c, gate_a_weights, gate_b_weights, gate_c_weights)
+        Gate weight tensors are shape (B, n_experts) — already softmaxed.
+        """
+        expert_outs = torch.stack([e(x) for e in self.experts], dim=1)
+        gate_a_w = self.gate_a(x)
+        gate_b_w = self.gate_b(x)
+        gate_c_w = self.gate_c(x)
+        mixed_a = (expert_outs * gate_a_w.unsqueeze(-1)).sum(dim=1)
+        mixed_b = (expert_outs * gate_b_w.unsqueeze(-1)).sum(dim=1)
+        mixed_c = (expert_outs * gate_c_w.unsqueeze(-1)).sum(dim=1)
+        return (
+            self.head_a(mixed_a), self.head_b(mixed_b), self.head_c(mixed_c),
+            gate_a_w, gate_b_w, gate_c_w,
+        )
+
     def predict_with_diagnostics(self, x: Tensor) -> dict:
         """
         Inference-time path that returns the same gated outputs as forward()

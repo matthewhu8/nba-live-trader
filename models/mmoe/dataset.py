@@ -470,6 +470,48 @@ def _build_tensor_dataset(
     if fit_scaler:
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(X.values)
+
+        # Re-fit market feature statistics using only joint rows (has_market_data == 1).
+        #
+        # The global fit is distorted: 94% of training rows have market features
+        # zero-filled (no Kalshi data). This pulls yes_bid's mean to ~3¢ and std to
+        # ~12, so at inference (always has_market_data=1) a typical yes_bid of 50¢
+        # produces a z-score of +3.9 — consistently out-of-distribution for the model.
+        #
+        # Fix: recompute mean/std for the 13 price/liquidity market features from
+        # joint rows only, so that live inference values are centered near z=0.
+        # has_market_data itself (index 82, last column) is intentionally excluded:
+        # its global stats (mean≈0.06, std≈0.24) let the model distinguish live rows
+        # (z≈+4) from basketball-only rows (z≈-0.25), which is a useful signal.
+        market_start = len(PHYSICS_COLS) + len(PREGAME_COLS)          # 69
+        market_end   = market_start + len(MARKET_COLS) - 1            # 81 (excl. has_market_data)
+
+        joint_mask = X["has_market_data"].values > 0
+        n_joint = int(joint_mask.sum())
+        if n_joint >= 100:
+            old_bid_mean  = float(scaler.mean_[market_start])
+            old_bid_scale = float(scaler.scale_[market_start])
+
+            aux = StandardScaler().fit(X.values[joint_mask, market_start:market_end])
+            scaler.mean_[market_start:market_end]  = aux.mean_
+            scaler.scale_[market_start:market_end] = aux.scale_
+
+            # Re-transform the already-scaled market columns with corrected stats.
+            X_scaled[:, market_start:market_end] = (
+                (X.values[:, market_start:market_end] - aux.mean_) / aux.scale_
+            )
+            logger.info(
+                "Market scaler refitted on %d joint rows. "
+                "yes_bid: mean %.1f→%.1f¢, std %.1f→%.1f",
+                n_joint,
+                old_bid_mean, float(aux.mean_[0]),
+                old_bid_scale, float(aux.scale_[0]),
+            )
+        else:
+            logger.warning(
+                "Too few joint rows (%d) to refit market scaler — using global stats",
+                n_joint,
+            )
     else:
         if scaler is None:
             raise ValueError("scaler must be provided when fit_scaler=False")

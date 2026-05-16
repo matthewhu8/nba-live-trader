@@ -41,7 +41,9 @@ func NewLedger(cfg RiskConfig, ks *KillSwitch) *Ledger {
 
 // Check returns (approved, reason). Reason is non-empty only when rejected.
 // Must be called synchronously before every order.
-func (l *Ledger) Check(action, gameID string, yesBid int) (bool, string) {
+// contracts is the intended order size; yesBid is used as a conservative
+// price estimate for both YES and NO orders (NO entry price ≤ yesBid).
+func (l *Ledger) Check(action, gameID string, yesBid, contracts int) (bool, string) {
 	if l.killSwitch.IsSet() {
 		return false, "kill switch active"
 	}
@@ -53,25 +55,62 @@ func (l *Ledger) Check(action, gameID string, yesBid int) (bool, string) {
 		return true, ""
 	}
 
-	// TODO: estimate exposure for this order (contracts × price)
-	// TODO: check daily loss limit
-	// TODO: check per-game exposure
-	// TODO: check total exposure
+	// Single-order size cap.
+	if contracts > l.cfg.MaxContractsPerOrder {
+		return false, fmt.Sprintf("order size %d exceeds max %d contracts", contracts, l.cfg.MaxContractsPerOrder)
+	}
+
+	// Daily loss halt — trip kill switch so all engines stop immediately.
+	if l.dailyPnL < -l.cfg.MaxDailyLossCents {
+		l.killSwitch.Set()
+		return false, fmt.Sprintf("daily loss limit: pnl=%dc limit=%dc — kill switch activated", l.dailyPnL, l.cfg.MaxDailyLossCents)
+	}
+
+	// Exposure estimate: contracts × entry price in cents.
+	// yesBid is a conservative upper bound (NO orders cost 100 - ask ≤ bid).
+	newExposure := contracts * yesBid
+
+	if l.perGameExposure[gameID]+newExposure > l.cfg.MaxPerGameExposureCents {
+		return false, fmt.Sprintf("per-game exposure %dc + %dc would exceed limit %dc",
+			l.perGameExposure[gameID], newExposure, l.cfg.MaxPerGameExposureCents)
+	}
+
+	if l.totalExposure+newExposure > l.cfg.MaxTotalExposureCents {
+		return false, fmt.Sprintf("total exposure %dc + %dc would exceed limit %dc",
+			l.totalExposure, newExposure, l.cfg.MaxTotalExposureCents)
+	}
+
 	return true, ""
 }
 
-// RecordFill updates exposure and PnL after a confirmed order fill.
+// RecordFill updates open exposure after a confirmed paper fill.
 func (l *Ledger) RecordFill(gameID string, contracts, entryPrice int) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	// TODO
+	exposure := contracts * entryPrice
+	l.totalExposure += exposure
+	l.perGameExposure[gameID] += exposure
 }
 
-// RecordExit updates PnL and reduces open exposure on position close.
-func (l *Ledger) RecordExit(gameID string, contracts, exitPrice, entryPrice int) {
+// RecordExit reduces open exposure and updates daily P&L on position close.
+// Trips the kill switch if the daily loss limit is breached post-exit.
+func (l *Ledger) RecordExit(gameID string, contracts, entryPrice, exitPrice int) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	// TODO: pnl = (exitPrice - entryPrice) * contracts - fees
+	exposure := contracts * entryPrice
+	l.totalExposure -= exposure
+	if l.totalExposure < 0 {
+		l.totalExposure = 0
+	}
+	l.perGameExposure[gameID] -= exposure
+	if l.perGameExposure[gameID] < 0 {
+		l.perGameExposure[gameID] = 0
+	}
+	// Gross P&L in cents (fee deduction is logged separately by OrderRouter).
+	l.dailyPnL += (exitPrice - entryPrice) * contracts
+	if l.dailyPnL < -l.cfg.MaxDailyLossCents {
+		l.killSwitch.Set()
+	}
 }
 
 func (l *Ledger) Summary() string {
