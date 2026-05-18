@@ -79,6 +79,7 @@ func NewBandit(cfg *Config) *Bandit {
 //     no-position branch, in evaluation order. First failing gate is named
 //     in FirstBlocking.
 type GateResult struct {
+	IsOvertime        bool    `json:"is_overtime"`
 	IsGarbageTime     bool    `json:"is_garbage_time"`
 	IsBlowout         bool    `json:"is_blowout"`
 	InPriceBand       bool    `json:"in_price_band"`
@@ -106,7 +107,15 @@ func (b *Bandit) Decide(resp *PossessionResponse, hasPosition bool) (Action, Gat
 	currentRunLength := resp.Features["current_run_length"]
 	inBand := resp.YesBid >= b.minYesBid && resp.YesBid <= b.maxYesBid
 
+	// Overtime detection (period >= 5): the model has zero training rows in
+	// the OT regime, and on 2026-05-13 OT triggered scanner thrash (6 market
+	// swaps in 6 minutes) and a 50¢ scanner-vs-WebSocket price disagreement.
+	// Treat OT as a hard skip — same effect as garbage time, distinct
+	// telemetry label so post-game inspection can attribute correctly.
+	isOvertime := resp.Features["period"] >= 5
+
 	g := GateResult{
+		IsOvertime:       isOvertime,
 		IsGarbageTime:    resp.IsGarbageTime,
 		IsBlowout:        resp.IsBlowout,
 		InPriceBand:      inBand,
@@ -119,6 +128,10 @@ func (b *Bandit) Decide(resp *PossessionResponse, hasPosition bool) (Action, Gat
 	}
 
 	// Highest-precedence gates apply equally to entry and to held positions.
+	if isOvertime {
+		g.FirstBlocking = "is_overtime"
+		return Wait, g
+	}
 	if resp.IsGarbageTime {
 		g.FirstBlocking = "is_garbage_time"
 		return Wait, g

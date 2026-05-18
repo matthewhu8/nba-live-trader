@@ -48,6 +48,14 @@ func withRunLen(v float32) func(*PossessionResponse) {
 		r.Features["current_run_length"] = v
 	}
 }
+func withPeriod(v float32) func(*PossessionResponse) {
+	return func(r *PossessionResponse) {
+		if r.Features == nil {
+			r.Features = map[string]float32{}
+		}
+		r.Features["period"] = v
+	}
+}
 
 // strongEntrySignal is a "should fire BUY_YES" combo, used as a template
 // to flip one knob at a time in the test cases below.
@@ -70,6 +78,16 @@ func TestDecideBacktestConfig(t *testing.T) {
 		{"garbage_time_blocks_held_position", resp(withGarbage(), withHaz4(0.9)), true, Wait, "is_garbage_time"},
 		{"blowout_blocks_entry", resp(withBlowout(), withRunProb(0.5), withTraj9(0.5), withRunLen(5)), false, Wait, "is_blowout"},
 		{"garbage_and_blowout_attributes_to_garbage", resp(withGarbage(), withBlowout()), false, Wait, "is_garbage_time"},
+
+		// ── Overtime skip rule (added 2026-05-18) ────────────────────────
+		// period == 4 OK (regulation); period == 5 OT1, period == 6 OT2 = block.
+		// Model has zero training rows in the OT regime and the market scanner
+		// thrashes in OT — see notes in agent.go.
+		{"regulation_q4_not_overtime", resp(withPeriod(4), withRunProb(0.5), withTraj9(0.5), withRunLen(5)), false, BuyYes, ""},
+		{"ot1_blocks_entry", resp(withPeriod(5), withRunProb(0.5), withTraj9(0.5), withRunLen(5)), false, Wait, "is_overtime"},
+		{"ot2_blocks_entry", resp(withPeriod(6), withRunProb(0.5), withTraj9(0.5), withRunLen(5)), false, Wait, "is_overtime"},
+		{"ot_blocks_held_position_too", resp(withPeriod(5), withHaz4(0.99)), true, Wait, "is_overtime"},
+		{"ot_takes_precedence_over_garbage_time", resp(withPeriod(5), withGarbage()), false, Wait, "is_overtime"},
 
 		// ── Price band ───────────────────────────────────────────────────
 		{"below_band", resp(withBid(29), withRunProb(0.5), withTraj9(0.5), withRunLen(5)), false, Wait, "in_price_band"},
