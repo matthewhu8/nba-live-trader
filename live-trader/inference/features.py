@@ -83,12 +83,14 @@ class FeatureComputer:
         )
 
         # Shot quality — last 5 scored possessions per team
-        home_xppp    = _mean_xppp(state.home_scored_poss)
-        away_xppp    = _mean_xppp(state.away_scored_poss)
-        home_sustain = _is_sustainable(state.home_scored_poss)
-        away_sustain = _is_sustainable(state.away_scored_poss)
+        home_xppp        = _mean_xppp(state.home_scored_poss)
+        away_xppp        = _mean_xppp(state.away_scored_poss)
+        home_actual_ppp  = _mean_actual_ppp(state.home_scored_poss)
+        away_actual_ppp  = _mean_actual_ppp(state.away_scored_poss)
+        home_sustain     = _is_sustainable(state.home_scored_poss)
+        away_sustain     = _is_sustainable(state.away_scored_poss)
 
-        # TODO: home_actual_vs_expected_PPP, shot_quality_trend (need prev window)
+        # TODO: shot_quality_trend (needs prev-window xPPP — deque maxlen=5 doesn't keep it)
 
         return {
             "home_points_last_5_poss":   float(home_last_5),
@@ -106,8 +108,8 @@ class FeatureComputer:
             "away_scoring_sustainable":  float(away_sustain),
             "home_xPPP_last_5":          home_xppp,
             "away_xPPP_last_5":          away_xppp,
-            "home_actual_vs_expected_PPP": 0.0,  # TODO
-            "away_actual_vs_expected_PPP": 0.0,  # TODO
+            "home_actual_vs_expected_PPP": home_actual_ppp - home_xppp,
+            "away_actual_vs_expected_PPP": away_actual_ppp - away_xppp,
             "home_shot_quality_trend":   0.0,    # TODO
             "away_shot_quality_trend":   0.0,    # TODO
             "shot_value":                float(possession.shot_value),
@@ -233,6 +235,21 @@ def _mean_xppp(scored_poss: "deque") -> float:
     if not scored_poss:
         return 0.0
     return sum(p.xppp for p in scored_poss) / len(scored_poss)
+
+
+def _mean_actual_ppp(scored_poss: "deque") -> float:
+    """Mean points-per-scoring-possession over the last 5 scored possessions.
+
+    Matches offline momentum_features.add_momentum_features() — there, actual_vs_expected_PPP
+    is `pd.Series(home_pts).where(home_scored_mask).shift(1).rolling(5).mean() - home_xppp_last5`
+    where the masked + rolled value is the mean points-per-scoring-possession over the last 5
+    home-scored possessions. The deque (maxlen=5, only scoring possessions ever appended) gives
+    us the same window. Returns 0.0 to match the offline NaN→fillna(1.0) at game start, since
+    pairing 1.0 here with xppp=0.0 would emit actual_vs_expected = 1.0 spuriously.
+    """
+    if not scored_poss:
+        return 0.0
+    return sum(p.points for p in scored_poss) / len(scored_poss)
 
 
 def _is_sustainable(scored_poss: "deque") -> bool:
