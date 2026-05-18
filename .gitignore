@@ -17,3 +17,6 @@ __pycache__/
 # Go compiled binaries
 live-trader/go/live-trader
 live-trader/go/go
+
+# feature_distribution_diff.py reference cache (rebuildable from MotherDuck)
+tools/.reference_distribution.json
