@@ -20,7 +20,7 @@ agent:
   # All entry gates below match the validated backtest config exactly:
   #   python -m backtesting.mmoe_backtest --use-traj-for-side --min-abs-traj 0.08 --min-run-length 2 --hold-seconds 240
   # Apr 7 → May 10 val set: 112 trades, 41.1% win rate, +$9,977 net (per 100 contracts).
-  min_run_prob_entry: 0.15      # Restored 2026-05-13. Head A's apparent gate collapse was caused by sub_count feature drift (+73σ outlier from cumulative counter bug). With sub_count fixed in game_state.py, Head A should produce backtest-distribution run_prob values again.
+  min_run_prob_entry: 0.0       # 2026-05-18: dropped to 0.0 per Matt's retrain backtest (110 val games on new entropy-regularized model). Tightening this threshold reduces P&L monotonically — Head A run_prob filter is worse than Head B trajectory filter at separating winners from losers. Backtest at 0.0: 207 trades, 47.8% win, +$37,409 vs 71 trades / +$9,865 at 0.15. Effective gating is now |traj_final|≥0.08, run_length≥2, 30–70¢ band.
   min_abs_traj_entry: 0.08      # Head B confidence
   min_run_length_entry: 2       # momentum filter
   take_profit_cents: 5       # 2026-05-13: aligned to backtest (was 8). Backtest used 5¢ TP across 112 trades, 40 of which hit TP at exactly 5-7¢.
