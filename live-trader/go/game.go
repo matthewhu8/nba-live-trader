@@ -163,7 +163,7 @@ func (g *GameEngine) Run(ctx context.Context) {
 
 			totalPipelineMS += resp.PipelineMS
 
-			riskOK := true
+			riskOK := !g.killSwitch.IsSet()
 			logger.EmitPossession(g.gameID, event, resp, riskOK, start)
 
 			// possessionFields is the structured per-possession record.
@@ -223,6 +223,7 @@ func (g *GameEngine) Run(ctx context.Context) {
 				}
 
 				if shouldExit {
+					g.ledger.RecordExit(g.gameID, openPosition.Size, openPosition.EntryPrice, currentPrice)
 					possHeld := possCount - openPosition.EntryPossID
 					logger.EmitExit(g.gameID, reason, openPosition, currentPrice, pnl, possHeld)
 					g.jsonLog.Emit("exit", g.gameID, map[string]interface{}{
@@ -275,32 +276,45 @@ func (g *GameEngine) Run(ctx context.Context) {
 				if action == BuyNo {
 					direction = "NO"
 				}
-				pos := router.Place(g.gameID, resp, possCount, &g.cfg, direction)
-				if pos != nil {
-					openPosition = pos
-					signalCount++
-					positionsOpened++
-					logger.EmitEntry(g.gameID, pos, resp)
-					g.jsonLog.Emit("entry", g.gameID, map[string]interface{}{
+				approved, blockReason := g.ledger.Check(
+					string(action), g.gameID, resp.YesBid, g.cfg.Agent.PositionSizeContracts,
+				)
+				if !approved {
+					log.Printf("[RISK] order blocked: %s", blockReason)
+					g.jsonLog.Emit("risk_block", g.gameID, map[string]interface{}{
 						"possession_id": possCount,
-						"direction":     pos.Direction,
-						"entry_price":   pos.EntryPrice,
-						"size":          pos.Size,
-						"fee_dollars":   makerFee(pos.Size, pos.EntryPrice),
-						"yes_bid":       resp.YesBid,
-						"yes_ask":       resp.YesAsk,
-						"run_prob":      resp.RunProb,
-						"traj_final":    resp.Trajectory[9],
-						"hazard5":       resp.Hazard[4],
+						"action":        string(action),
+						"reason":        blockReason,
 					})
-					go inference.ReportTrade(g.gameID, TradePayload{
-						Action:    "ENTRY",
-						Direction: pos.Direction,
-						Price:     pos.EntryPrice,
-						Size:      pos.Size,
-						PnL:       0,
-						Reason:    "SIGNAL",
-					})
+				} else {
+					pos := router.Place(g.gameID, resp, possCount, &g.cfg, direction)
+					if pos != nil {
+						g.ledger.RecordFill(g.gameID, pos.Size, pos.EntryPrice)
+						openPosition = pos
+						signalCount++
+						positionsOpened++
+						logger.EmitEntry(g.gameID, pos, resp)
+						g.jsonLog.Emit("entry", g.gameID, map[string]interface{}{
+							"possession_id": possCount,
+							"direction":     pos.Direction,
+							"entry_price":   pos.EntryPrice,
+							"size":          pos.Size,
+							"fee_dollars":   makerFee(pos.Size, pos.EntryPrice),
+							"yes_bid":       resp.YesBid,
+							"yes_ask":       resp.YesAsk,
+							"run_prob":      resp.RunProb,
+							"traj_final":    resp.Trajectory[9],
+							"hazard5":       resp.Hazard[4],
+						})
+						go inference.ReportTrade(g.gameID, TradePayload{
+							Action:    "ENTRY",
+							Direction: pos.Direction,
+							Price:     pos.EntryPrice,
+							Size:      pos.Size,
+							PnL:       0,
+							Reason:    "SIGNAL",
+						})
+					}
 				}
 			}
 

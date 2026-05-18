@@ -30,7 +30,55 @@ Target arrays are mapped:
 
 ---
 
-## 3. The Core ML Architecture: Multi-gate Mixture-of-Experts (MMoE)
+## 3. Feature Normalization (Split Scaler)
+
+All 83 features are normalized with a `StandardScaler` before being fed into the model. However, a single scaler fit on all training rows produces distorted statistics for the 14 market features, because **94% of training rows have no Kalshi data** — their market features are zero-filled. This is the "split scaler problem."
+
+### The Problem
+
+The training set is a mix of two datasets:
+
+| Dataset | Rows | Market features |
+|---|---|---|
+| Basketball-only | ~409K (94%) | All zeros (`has_market_data=0`) |
+| Joint (basketball + Kalshi) | ~24K (6%) | Real prices (`has_market_data=1`) |
+
+A naive `StandardScaler.fit()` on all rows learns heavily distorted statistics. For `yes_bid`:
+- **Global fit:** mean ≈ 3¢, std ≈ 12 (dominated by the 94% zeros)
+- **At inference** (always `has_market_data=1`): a typical bid of 50¢ → z-score = (50−3)/12 = **+3.9**
+
+Every single live possession is evaluated with market features at +2 to +6 standard deviations. The model only ever saw those z-scores on 6% of training data, meaning it makes price-related decisions from a consistently out-of-distribution input region.
+
+### The Fix (Implemented in `dataset.py`)
+
+After fitting the scaler on all rows (which correctly calibrates the 69 physics + pregame features), the scaler's `mean_` and `scale_` for the 13 price/liquidity market features (indices 69–81) are **replaced** with statistics computed from joint rows only:
+
+```
+market_start = 69   # PHYSICS_COLS(58) + PREGAME_COLS(11)
+market_end   = 81   # excludes has_market_data at index 82
+
+aux_scaler.fit(X[joint_rows_only, 69:81])
+scaler.mean_[69:81]  = aux_scaler.mean_
+scaler.scale_[69:81] = aux_scaler.scale_
+```
+
+After this correction, `yes_bid=50` → z ≈ 0.0 at inference. The model sees market prices in the same distribution it trained on.
+
+### Why `has_market_data` (index 82) Is Not Corrected
+
+`has_market_data` is intentionally kept at global scaling (mean≈0.06, std≈0.24). This means:
+- Live inference (value=1.0) → z ≈ +3.9
+- Basketball-only training rows (value=0.0) → z ≈ −0.25
+
+This large contrast is a useful signal: the model can learn to recognize "I am in a live trading situation and should weight market features" vs. "no price data is present." Correcting this column to joint-row stats would collapse it to a constant (std=0), destroying that signal.
+
+### Retraining Required
+
+This fix changes the scaler artifact (`mmoe_scaler_delay20.pkl`) and the scaled input distribution. The model must be retrained from scratch to be consistent with the corrected statistics. Do not apply the new scaler to the existing `mmoe_delay20.pt` checkpoint.
+
+---
+
+## 4. The Core ML Architecture: Multi-gate Mixture-of-Experts (MMoE)
 
 Instead of passing predictions between models, the raw master vector `X` is fed into a single, unified deep learning architecture (typically PyTorch).
 
@@ -51,7 +99,7 @@ We construct three independent Task Managers. For each input row, the Manager as
 
 ---
 
-## 4. The Joint Loss Function (The Mathematical Regularizer)
+## 5. The Joint Loss Function (The Mathematical Regularizer)
 
 We train the entire network end-to-end to minimize a unified loss function.
 
@@ -64,7 +112,7 @@ Therefore, the Experts are mathematically forced to only identify Kalshi market 
 
 ---
 
-## 5. Execution Layer & Downside Protection
+## 6. Execution Layer & Downside Protection
 
 Once the Neural Network evaluates the master array `X` and passes the resulting arrays to the Execution Agent, the Agent triggers rigid EV-calculated logic.
 
