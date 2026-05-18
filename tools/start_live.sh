@@ -71,11 +71,14 @@ log "rebuilding Go binary"
 )
 
 # ── 3. launch Python inference service ─────────────────────────────────────────
+# -u forces unbuffered Python stdout so logs appear in real-time. Without it,
+# stdout is block-buffered when redirected to a file and we lose context if
+# the service is killed before its buffer flushes.
 log "starting Python inference service → ${INFERENCE_LOG}"
 (
   cd "${PROJECT_ROOT}"
   PYTHONPATH=.:live-trader \
-  exec ./venv/bin/python -m uvicorn inference.main:app \
+  exec ./venv/bin/python -u -m uvicorn inference.main:app \
     --host 127.0.0.1 --port 8001 \
     >> "${INFERENCE_LOG}" 2>&1
 ) &
@@ -83,9 +86,12 @@ INFERENCE_PID=$!
 log "  inference pid=${INFERENCE_PID}"
 
 # ── 4. wait for /health to report model_loaded=true ────────────────────────────
-log "waiting for inference service to be ready (max 15s)"
+# 60s budget: torch + MMoE model load + scaler unpickle + (cold) sklearn import
+# can each cost several seconds. Cold sklearn after macOS Sequoia code-signature
+# revalidation has been observed at 30s. Keep this generous.
+log "waiting for inference service to be ready (max 60s)"
 READY=false
-for _ in $(seq 1 15); do
+for _ in $(seq 1 60); do
   if ! kill -0 "${INFERENCE_PID}" 2>/dev/null; then
     err "inference service died during startup — last log:"
     tail -30 "${INFERENCE_LOG}" >&2 || true
@@ -101,27 +107,58 @@ for _ in $(seq 1 15); do
 done
 
 if [[ "${READY}" != "true" ]]; then
-  err "inference service did not become ready within 15s"
+  err "inference service did not become ready within 60s"
   err "  last log:"
   tail -30 "${INFERENCE_LOG}" >&2 || true
   kill -TERM "${INFERENCE_PID}" 2>/dev/null || true
+  # Give SIGTERM 3s before SIGKILL to avoid orphaning the process.
+  for _ in 1 2 3; do
+    kill -0 "${INFERENCE_PID}" 2>/dev/null || break
+    sleep 1
+  done
+  kill -0 "${INFERENCE_PID}" 2>/dev/null && kill -9 "${INFERENCE_PID}" 2>/dev/null || true
   exit 1
 fi
 
-# ── 5. launch Go trader (foreground) ───────────────────────────────────────────
-# Clean shutdown handler: on script exit (Ctrl+C or natural), stop inference too.
+# ── 5. launch Go trader (foreground-ish, via background + wait) ────────────────
+# We don't `exec ./go` because that would replace bash and discard the trap.
+# Instead we background Go and `wait` on it, so bash stays alive to run the
+# cleanup trap on any termination path.
+
+GO_PID=""
+
+# Clean shutdown handler — runs on EXIT, INT (Ctrl+C in terminal), and TERM
+# (kill from another process). Stops both Go and inference, in that order,
+# with SIGTERM grace before SIGKILL.
 cleanup() {
+  # Disable further trap firing so we don't recurse if the cleanup itself
+  # gets interrupted.
+  trap - EXIT INT TERM
+
   log "cleaning up"
-  if kill -0 "${INFERENCE_PID}" 2>/dev/null; then
+
+  # Stop Go first — it's the trade-decision loop, no point sending more events.
+  if [[ -n "${GO_PID}" ]] && kill -0 "${GO_PID}" 2>/dev/null; then
+    log "  stopping go pid=${GO_PID}"
+    kill -TERM "${GO_PID}" 2>/dev/null || true
+    for _ in 1 2 3; do
+      kill -0 "${GO_PID}" 2>/dev/null || break
+      sleep 1
+    done
+    kill -0 "${GO_PID}" 2>/dev/null && kill -9 "${GO_PID}" 2>/dev/null || true
+  fi
+
+  # Then inference.
+  if [[ -n "${INFERENCE_PID:-}" ]] && kill -0 "${INFERENCE_PID}" 2>/dev/null; then
     log "  stopping inference pid=${INFERENCE_PID}"
     kill -TERM "${INFERENCE_PID}" 2>/dev/null || true
-    # Give it 3s, then SIGKILL.
     for _ in 1 2 3; do
       kill -0 "${INFERENCE_PID}" 2>/dev/null || break
       sleep 1
     done
     kill -0 "${INFERENCE_PID}" 2>/dev/null && kill -9 "${INFERENCE_PID}" 2>/dev/null || true
   fi
+
   log "done. inference log: ${INFERENCE_LOG}"
 }
 trap cleanup EXIT INT TERM
@@ -131,4 +168,14 @@ log "  args: $*"
 log "  run logs will appear in live-trader/go/logs/runs/$(date +%Y-%m-%d)/<run_id>/"
 
 cd "${PROJECT_ROOT}/live-trader/go"
-exec ./go "$@"
+./go "$@" &
+GO_PID=$!
+log "  go pid=${GO_PID}"
+
+# `wait` returns on either Go's natural exit or a trapped signal. Without the
+# `|| true`, a non-zero exit from `wait` (signal-interrupted) would propagate
+# and skip the final exit line.
+wait "${GO_PID}" || true
+GO_EXIT=$?
+log "go exited with code ${GO_EXIT}"
+exit "${GO_EXIT}"
