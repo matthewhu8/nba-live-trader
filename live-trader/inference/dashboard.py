@@ -28,6 +28,12 @@ class TradeUpdate(BaseModel):
     size: int
     pnl: float = 0.0
     reason: str = ""
+    # market_ticker is the Kalshi market subscribed at order time. Carried so
+    # the dashboard can render the team actually backed ("BUY SAS") instead of
+    # generic "BUY YES", and so a scanner swap arriving between order and
+    # broadcast can't relabel an already-placed trade. Empty when Go didn't
+    # send it (no event ticker / older Go binary).
+    market_ticker: str = ""
 
 # SSE subscribers: game_id → list of asyncio.Queue
 _subscribers: dict[str, list[asyncio.Queue]] = {}
@@ -147,6 +153,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t);min-height:100vh;padding:16px}
 .hdr{display:flex;justify-content:space-between;align-items:center;padding:14px 20px;background:var(--s1);border:1px solid var(--bd);border-radius:12px;margin-bottom:14px}
 .hdr h1{font-size:18px;font-weight:700;display:flex;align-items:center;gap:10px}
+.matchup{font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:700;letter-spacing:.05em;color:var(--td)}
+.matchup .vs{color:var(--td);font-weight:400;margin:0 8px}
+.matchup .away{color:var(--c)}
+.matchup .home{color:var(--nyk)}
 .dot{width:10px;height:10px;border-radius:50%;background:var(--r);animation:p 2s infinite}
 .dot.on{background:var(--g)}
 @keyframes p{0%,100%{opacity:1}50%{opacity:.4}}
@@ -211,6 +221,7 @@ canvas{width:100%!important;height:100%!important}
 <body>
 <div class="hdr">
   <h1><span class="dot" id="dot"></span> Live Paper Trader</h1>
+  <div class="matchup" id="matchup">— @ —</div>
   <div class="badges">
     <span class="bdg" id="bPoss">POSS: 0</span>
     <span class="bdg" id="bPipe">--ms</span>
@@ -314,6 +325,25 @@ function teamsFromMarketTicker(ticker) {
   return { away, home, yes, no };
 }
 
+// applyTicker updates the in-memory team state from a freshly-arrived market
+// ticker AND refreshes the visible matchup header. Called from both possession
+// messages (sets up the game labels) and trade messages (race-proof: the
+// trade-line label always reflects the market actually subscribed at order
+// time, even if the scanner swapped between order and broadcast).
+function applyTicker(ticker) {
+  if (!ticker || ticker === currentMarketTicker) return false;
+  const t = teamsFromMarketTicker(ticker);
+  if (!t) return false;
+  currentMarketTicker = ticker;
+  homeTeam = t.home; awayTeam = t.away;
+  yesTeam  = t.yes;  noTeam   = t.no;
+  // Matchup header (visible across the top)
+  const m = document.getElementById('matchup');
+  if (m) m.innerHTML = `<span class="away">${t.away}</span><span class="vs">@</span><span class="home">${t.home}</span>`;
+  document.getElementById('mktTitle').textContent = 'Market Orderbook (' + ticker + ')';
+  return true;
+}
+
 function go(){
   const id=document.getElementById('gid').value.trim();
   if(!id)return;
@@ -324,6 +354,8 @@ function go(){
   yesTeam = ''; noTeam = '';
   currentMarketTicker = '';
   document.getElementById('mktTitle').textContent = 'Market Orderbook (connecting…)';
+  const mh = document.getElementById('matchup');
+  if (mh) mh.innerHTML = '— @ —';
 
   if(es)es.close();
   document.getElementById('glab').textContent='Connecting...';
@@ -337,43 +369,42 @@ function go(){
 
 function upd(d){
   // Auto-derive team labels on the first message that carries a market ticker,
-  // and again whenever the scanner swaps to a different market. Falls back to
-  // generic HOME/AWAY if the ticker format isn't recognized.
-  if (d.market_ticker && d.market_ticker !== currentMarketTicker) {
-    currentMarketTicker = d.market_ticker;
-    const t = teamsFromMarketTicker(d.market_ticker);
-    if (t) {
-      homeTeam = t.home;
-      awayTeam = t.away;
-      yesTeam  = t.yes;
-      noTeam   = t.no;
-    }
-    document.getElementById('mktTitle').textContent = 'Market Orderbook (' + d.market_ticker + ')';
-  }
+  // and again whenever the scanner swaps to a different market.
+  applyTicker(d.market_ticker);
 
   // Handle trade events
   if (d.type === 'trade') {
     const t = d.trade;
     if(trds===0) document.getElementById('tradeLog').innerHTML=''; // clear placeholder
-    
+
+    // Resolve the team from the TRADE's own ticker so a late-arriving scanner
+    // swap can't relabel an already-placed trade. Falls back to current
+    // game-state labels for older Go binaries that don't send market_ticker.
+    let tradeYesTeam = yesTeam, tradeNoTeam = noTeam;
+    if (t.market_ticker) {
+      const tt = teamsFromMarketTicker(t.market_ticker);
+      if (tt) { tradeYesTeam = tt.yes; tradeNoTeam = tt.no; }
+    }
+
     const ll = document.createElement('div');
     ll.className = 'll';
     const ts = new Date().toLocaleTimeString();
-    
+
     if (t.action === 'ENTRY') {
       trds++; document.getElementById('tTrd').textContent = trds;
       const dColor = t.direction === 'YES' ? '#22c55e' : '#ef4444';
-      // Show "BUY SAS (YES)" instead of just "BUY YES" — makes it obvious
-      // which actual team we're backing.
-      const backing = t.direction === 'YES' ? (yesTeam || 'YES') : (noTeam || 'NO');
-      ll.innerHTML = `<span style="color:#6b7280">${ts}</span> <span style="color:${dColor};font-weight:600">BUY ${backing}</span> <span style="color:#6b7280">(${t.direction})</span> · ${t.size} contracts @ ${t.price}¢`;
+      const backing = t.direction === 'YES' ? (tradeYesTeam || 'YES') : (tradeNoTeam || 'NO');
+      // Team is the dominant info; (YES/NO) is secondary. Ticker appended in
+      // muted text so you can audit which exact contract was bought.
+      ll.innerHTML = `<span style="color:#6b7280">${ts}</span> <span style="color:${dColor};font-weight:700;font-size:13px">BUY ${backing}</span> <span style="color:#6b7280">(${t.direction})</span> · ${t.size} @ ${t.price}¢ <span style="color:#6b7280">· ${t.market_ticker || ''}</span>`;
     } else {
       pnl += t.pnl;
       if (t.pnl > 0) wins++;
       const pnlColor = t.pnl > 0 ? '#22c55e' : '#ef4444';
       const pnlSign = t.pnl > 0 ? '+' : '';
-      ll.innerHTML = `<span style="color:#6b7280">${ts}</span> <span style="color:#eab308;font-weight:600">EXIT (${t.reason})</span> · Sold @ ${t.price}¢ · P&L: <span style="color:${pnlColor}">${pnlSign}$${t.pnl.toFixed(2)}</span>`;
-      
+      const wasBacking = t.direction === 'YES' ? (tradeYesTeam || 'YES') : (tradeNoTeam || 'NO');
+      ll.innerHTML = `<span style="color:#6b7280">${ts}</span> <span style="color:#eab308;font-weight:700;font-size:13px">EXIT ${wasBacking}</span> <span style="color:#6b7280">(${t.reason})</span> · @ ${t.price}¢ · P&L: <span style="color:${pnlColor}">${pnlSign}$${t.pnl.toFixed(2)}</span>`;
+
       document.getElementById('tPnl').textContent = (pnl>0?'+':'')+'$'+pnl.toFixed(2);
       document.getElementById('tPnl').style.color = pnl>0?'#22c55e':'#ef4444';
       document.getElementById('tWR').textContent = ((wins/trds)*100).toFixed(0)+'%';

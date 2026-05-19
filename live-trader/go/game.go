@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"os"
+	"sync/atomic"
 	"time"
 )
 
@@ -84,6 +85,14 @@ func (g *GameEngine) Run(ctx context.Context) {
 
 	var initialTicker string
 
+	// activeMarketTicker tracks the currently-subscribed Kalshi market. Stamped
+	// onto every TradePayload so the dashboard can label trades with the team
+	// actually backed, race-free against in-flight scanner swaps. Declared at
+	// the outer scope so the main event loop (below) can read it; only the
+	// has-event-ticker branch actually populates it via the fanout goroutine.
+	var activeMarketTicker atomic.Value
+	activeMarketTicker.Store("")
+
 	if g.eventTicker != "" {
 		scanner := NewMarketScanner(g.eventTicker, g.cfg.Agent.MarketDriftLowBid, g.cfg.Agent.MarketDriftHighBid, g.jsonLog, g.gameID)
 		best, _, err := scanner.scan(ctx)
@@ -92,11 +101,36 @@ func (g *GameEngine) Run(ctx context.Context) {
 		} else {
 			initialTicker = g.eventTicker
 		}
+		activeMarketTicker.Store(initialTicker)
 
 		go scanner.Run(ctx, initialTicker, marketCh)
 
+		// Fanout: the scanner emits ticker swaps on marketCh; kalshi_feed needs
+		// them to re-subscribe, and trade reporting needs them so it can tag
+		// each ENTRY/EXIT payload with the market actually subscribed at order
+		// time. A single broadcast goroutine forwards both, with a per-consumer
+		// non-blocking send so a slow reader can't stall the scanner.
+		kalshiMarketCh := make(chan string, 10)
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case t, ok := <-marketCh:
+					if !ok {
+						return
+					}
+					activeMarketTicker.Store(t)
+					select {
+					case kalshiMarketCh <- t:
+					default:
+					}
+				}
+			}
+		}()
+
 		kalshiFeed := NewKalshiFeed(initialTicker)
-		go kalshiFeed.Run(ctx, marketCh, tickCh)
+		go kalshiFeed.Run(ctx, kalshiMarketCh, tickCh)
 		go func() {
 			for {
 				select {
@@ -239,13 +273,15 @@ func (g *GameEngine) Run(ctx context.Context) {
 						"traj_final":       resp.Trajectory[9],
 						"hazard5":          resp.Hazard[4],
 					})
+					exitTicker, _ := activeMarketTicker.Load().(string)
 					go inference.ReportTrade(g.gameID, TradePayload{
-						Action:    "EXIT",
-						Direction: openPosition.Direction,
-						Price:     currentPrice,
-						Size:      openPosition.Size,
-						PnL:       pnl,
-						Reason:    reason,
+						Action:       "EXIT",
+						Direction:    openPosition.Direction,
+						Price:        currentPrice,
+						Size:         openPosition.Size,
+						PnL:          pnl,
+						Reason:       reason,
+						MarketTicker: exitTicker,
 					})
 					netPnL += pnl
 					positionsClosed++
@@ -306,13 +342,15 @@ func (g *GameEngine) Run(ctx context.Context) {
 							"traj_final":    resp.Trajectory[9],
 							"hazard5":       resp.Hazard[4],
 						})
+						entryTicker, _ := activeMarketTicker.Load().(string)
 						go inference.ReportTrade(g.gameID, TradePayload{
-							Action:    "ENTRY",
-							Direction: pos.Direction,
-							Price:     pos.EntryPrice,
-							Size:      pos.Size,
-							PnL:       0,
-							Reason:    "SIGNAL",
+							Action:       "ENTRY",
+							Direction:    pos.Direction,
+							Price:        pos.EntryPrice,
+							Size:         pos.Size,
+							PnL:          0,
+							Reason:       "SIGNAL",
+							MarketTicker: entryTicker,
 						})
 					}
 				}

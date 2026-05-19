@@ -175,13 +175,19 @@ func (c *InferenceClient) ProcessPossession(
 }
 
 // TradePayload is sent back to Python when the Go engine executes a paper trade.
+// MarketTicker records the Kalshi market actually subscribed at order time —
+// the dashboard parses it to label trades with the real team being backed
+// (e.g., "BUY SAS" instead of "BUY YES"). Set this from a snapshot taken at
+// the moment of order placement, never from a possession message, so a
+// late-arriving market swap can't relabel a trade in flight.
 type TradePayload struct {
-	Action    string  `json:"action"`
-	Direction string  `json:"direction"`
-	Price     int     `json:"price"`
-	Size      int     `json:"size"`
-	PnL       float64 `json:"pnl"`
-	Reason    string  `json:"reason"`
+	Action       string  `json:"action"`
+	Direction    string  `json:"direction"`
+	Price        int     `json:"price"`
+	Size         int     `json:"size"`
+	PnL          float64 `json:"pnl"`
+	Reason       string  `json:"reason"`
+	MarketTicker string  `json:"market_ticker,omitempty"`
 }
 
 // ReportTrade sends a fire-and-forget HTTP request to the Python dashboard endpoint.
