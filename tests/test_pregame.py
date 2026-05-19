@@ -1,10 +1,9 @@
 import asyncio
 import logging
 import sys
-import os
+from pathlib import Path
 
-# Add project root to path
-sys.path.append(os.getcwd())
+sys.path.insert(0, str(Path(__file__).parent.parent / "live-trader"))
 
 from inference.pregame import load_pregame
 
