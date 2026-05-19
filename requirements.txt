@@ -6,3 +6,6 @@ nba_api>=1.4
 pandas>=2.0
 duckdb>=1.1
 scipy>=1.11
+scikit-learn>=1.0
+numpy>=1.24
+pytz>=2023.3
