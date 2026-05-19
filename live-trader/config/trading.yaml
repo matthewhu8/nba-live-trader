@@ -9,8 +9,13 @@ inference:
   timeout_ms: 500
 
 risk:
-  max_total_exposure_cents: 5000      # $50 max open across all games
-  max_per_game_exposure_cents: 2000   # $20 max open per game
+  # 2026-05-18 mid-OKC-game: the original limits were sized for ~30-contract
+  # trades but we run at 100 contracts (matching the +$37,409 backtest).
+  # 100 × ~55¢ = $55 per trade, so per-game $20 blocked every trade.
+  # Sized now to comfortably hold one 100-contract position at any price
+  # in the 30-70¢ band, plus headroom for one held-position-while-signal.
+  max_total_exposure_cents: 20000     # $200 max open across all games
+  max_per_game_exposure_cents: 10000  # $100 max open per game
   max_daily_loss_cents: 10000         # $100 daily loss limit — halt all trading
   max_contracts_per_order: 100
 
@@ -27,6 +32,13 @@ agent:
   stop_loss_cents: 3         # 2026-05-13: aligned to backtest (was 5). Backtest SL was -3¢.
   max_hold_possessions: 6
   position_size_contracts: 100
+  # 2026-05-19 pin-the-market: scanner locks on to the initial closest-to-50¢
+  # market and only swaps when the LOCKED market drifts outside this band.
+  # Wider than [min_yes_bid, max_yes_bid] on purpose — we'd rather sit idle on
+  # the same logical bet than swap to a sibling contract (which inverts the
+  # meaning of traj_final and corrupts the model's assumptions).
+  market_drift_low_bid: 20
+  market_drift_high_bid: 80
 
 feeds:
   nba_poll_interval_ms: 3000

@@ -85,7 +85,7 @@ func (g *GameEngine) Run(ctx context.Context) {
 	var initialTicker string
 
 	if g.eventTicker != "" {
-		scanner := NewMarketScanner(g.eventTicker, g.cfg.Agent.MinYesBid, g.cfg.Agent.MaxYesBid, g.jsonLog, g.gameID)
+		scanner := NewMarketScanner(g.eventTicker, g.cfg.Agent.MarketDriftLowBid, g.cfg.Agent.MarketDriftHighBid, g.jsonLog, g.gameID)
 		best, _, err := scanner.scan(ctx)
 		if err == nil && best != "" {
 			initialTicker = best

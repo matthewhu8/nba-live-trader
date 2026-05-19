@@ -1,8 +1,14 @@
 // MarketScanner polls the Kalshi REST API for the markets tied to one event
-// (e.g., all spreads under KXNBASPREAD-26MAY10NYKPHI) and hot-swaps the active
-// WebSocket subscription to whichever market has a yes_bid closest to 50¢ —
-// but ONLY when the currently-subscribed market drifts outside [minYesBid,
-// maxYesBid].
+// (e.g., all spreads under KXNBASPREAD-26MAY10NYKPHI) and picks the initial
+// active WebSocket subscription — the market whose yes_bid is closest to 50¢.
+// After that initial pick the scanner PINS to that market for the rest of the
+// game and only swaps if its bid drifts outside [driftLowBid, driftHighBid].
+//
+// Why pin: SAS1 and OKC1 (or SAS3 and OKC3) are logically opposite bets — when
+// the scanner used to hop between them on small bid-noise it silently flipped
+// the meaning of the model's traj_final sign (it predicts the home-team-yes
+// market's move). The 88 swaps in the 2026-05-18 SAS@OKC double-OT exposed
+// this. Pinning matches how the MMoE was trained: one stable market per game.
 //
 // Phase 1 (observability) additions, 2026-05-10:
 //   - `market_scan` JSONL event emitted on every poll (every 10s) so we can
@@ -25,20 +31,29 @@ import (
 )
 
 type MarketScanner struct {
-	eventTicker string
-	minYesBid   int
-	maxYesBid   int
-	jsonLog     *JSONLogger // nil-safe — passed in from the game engine
-	gameID      string      // for JSONL game_id field
+	eventTicker  string
+	driftLowBid  int         // swap if the locked market's bid drops below this
+	driftHighBid int         // swap if the locked market's bid rises above this
+	jsonLog      *JSONLogger // nil-safe — passed in from the game engine
+	gameID       string      // for JSONL game_id field
 }
 
-func NewMarketScanner(eventTicker string, minYesBid, maxYesBid int, jsonLog *JSONLogger, gameID string) *MarketScanner {
+func NewMarketScanner(eventTicker string, driftLowBid, driftHighBid int, jsonLog *JSONLogger, gameID string) *MarketScanner {
+	// Defensive defaults — if a caller forgets to set these (or YAML omits
+	// them), fall back to a permissive [20, 80]. Tighter than that risks
+	// thrash; looser would defeat the point of the drift trigger.
+	if driftLowBid <= 0 {
+		driftLowBid = 20
+	}
+	if driftHighBid <= 0 || driftHighBid > 99 {
+		driftHighBid = 80
+	}
 	return &MarketScanner{
-		eventTicker: eventTicker,
-		minYesBid:   minYesBid,
-		maxYesBid:   maxYesBid,
-		jsonLog:     jsonLog,
-		gameID:      gameID,
+		eventTicker:  eventTicker,
+		driftLowBid:  driftLowBid,
+		driftHighBid: driftHighBid,
+		jsonLog:      jsonLog,
+		gameID:       gameID,
 	}
 }
 
@@ -86,31 +101,38 @@ func (s *MarketScanner) Run(ctx context.Context, initialTicker string, outCh cha
 			}
 
 			currentBid = currentActiveBid
-			inBand := currentBid >= s.minYesBid && currentBid <= s.maxYesBid
+			// "In band" here means "the locked market hasn't drifted far enough
+			// to abandon it." Using the wider [driftLowBid, driftHighBid] band
+			// (default [20, 80]) is intentional — we'd rather hold the same
+			// logical bet at a lopsided price than swap to a sibling contract
+			// and silently flip what the model's trajectory sign means.
+			inBand := currentBid >= s.driftLowBid && currentBid <= s.driftHighBid
 
-			// Decision tree — used for both the JSONL record and the swap.
+			// Pin-the-market: the ONLY swap trigger is drift outside the band.
+			// The old `closer_to_mid` swap was removed 2026-05-19 — it fired on
+			// 1-3¢ noise (88 swaps in one game) and crossed teams mid-position.
 			decision := "stay"
-			if !inBand {
-				switch {
-				case best == "":
-					decision = "no_candidates"
-				case best == currentTicker:
-					decision = "best_is_current"
-				default:
-					decision = "swap"
-				}
+			reason := ""
+			switch {
+			case !inBand && best == "":
+				decision = "no_candidates"
+			case !inBand && best == currentTicker:
+				decision = "best_is_current"
+			case !inBand:
+				decision = "swap"
+				reason = "out_of_band"
 			}
 
 			s.emitScan(currentTicker, currentBid, best, bestBid, nCandidates, inBand, decision)
 
 			if decision == "swap" {
-				s.emitSwap(currentTicker, best, currentBid, bestBid, "out_of_band")
+				s.emitSwap(currentTicker, best, currentBid, bestBid, reason)
 				zlog.Info().
 					Str("old_market", currentTicker).
 					Int("old_bid_cents", currentBid).
 					Str("new_market", best).
 					Int("new_bid_cents", bestBid).
-					Msg("market scanner: swapping")
+					Msg("market scanner: swapping (drift outside band)")
 				currentTicker = best
 				currentBid = bestBid
 
@@ -141,7 +163,9 @@ func (s *MarketScanner) emitScan(curT string, curBid int, bestT string, bestBid 
 }
 
 // emitSwap writes one market_swap JSONL line. Fires when the scanner actually
-// pushes a new ticker onto outCh (or on the initial selection).
+// pushes a new ticker onto outCh (or on the initial selection). Reasons since
+// 2026-05-19: "initial" | "out_of_band". The "closer_to_mid" reason was
+// retired with the pin-the-market change.
 func (s *MarketScanner) emitSwap(oldT, newT string, oldBid, newBid int, reason string) {
 	if s.jsonLog == nil {
 		return
@@ -151,7 +175,7 @@ func (s *MarketScanner) emitSwap(oldT, newT string, oldBid, newBid int, reason s
 		"new_ticker": newT,
 		"old_bid":    oldBid,
 		"new_bid":    newBid,
-		"reason":     reason, // "initial" | "out_of_band"
+		"reason":     reason,
 	})
 }
 
