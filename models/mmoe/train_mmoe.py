@@ -39,9 +39,10 @@ def main() -> None:
     parser.add_argument("--max-epochs",   type=int,   default=200)
     parser.add_argument("--batch-size",   type=int,   default=512)
     parser.add_argument("--lr",           type=float, default=1e-3)
-    parser.add_argument("--w-a",          type=float, default=1.0,  help="Head A loss weight")
-    parser.add_argument("--w-b",          type=float, default=0.5,  help="Head B loss weight")
-    parser.add_argument("--w-c",          type=float, default=0.3,  help="Head C loss weight")
+    parser.add_argument("--w-a",           type=float, default=1.0,  help="Head A loss weight")
+    parser.add_argument("--w-b",           type=float, default=1.0,  help="Head B loss weight (raised from 0.5 — Head B is the live entry signal)")
+    parser.add_argument("--w-c",           type=float, default=0.3,  help="Head C loss weight")
+    parser.add_argument("--lambda-entropy", type=float, default=0.02, help="Gate entropy regularization strength (0 = disabled)")
     parser.add_argument("--patience",     type=int,   default=15)
     parser.add_argument("--tp",           type=float, default=5.0,  help="Take-profit threshold (cents)")
     parser.add_argument("--sl",           type=float, default=3.0,  help="Stop-loss threshold (cents)")
@@ -83,16 +84,17 @@ def main() -> None:
     logger.info("Model created: %d trainable parameters", n_params)
 
     result = train(
-        model        = model,
-        train_loader = train_loader,
-        val_loader   = val_loader,
-        max_epochs   = args.max_epochs,
-        lr           = args.lr,
-        w_a          = args.w_a,
-        w_b          = args.w_b,
-        w_c          = args.w_c,
-        patience     = args.patience,
-        save_path    = model_path,
+        model          = model,
+        train_loader   = train_loader,
+        val_loader     = val_loader,
+        max_epochs     = args.max_epochs,
+        lr             = args.lr,
+        w_a            = args.w_a,
+        w_b            = args.w_b,
+        w_c            = args.w_c,
+        lambda_entropy = args.lambda_entropy,
+        patience       = args.patience,
+        save_path      = model_path,
     )
 
     # Save scaler alongside the model

@@ -77,6 +77,18 @@ def _masked_huber(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) 
     return nn.functional.huber_loss(pred[mask > 0], target[mask > 0])
 
 
+def _gate_entropy(weights: torch.Tensor) -> torch.Tensor:
+    """Mean Shannon entropy of gate softmax weights across the batch.
+
+    weights: (B, n_experts) — already softmaxed, values in (0, 1].
+    Returns a scalar >= 0. Higher = more diverse routing across experts.
+
+    Used to build the entropy regularization term: subtracting lambda * entropy
+    from the total loss makes the optimizer prefer high-entropy (diverse) gates.
+    """
+    return -(weights * (weights + 1e-8).log()).sum(dim=-1).mean()
+
+
 def _compute_loss(
     head_a: torch.Tensor,
     head_b: torch.Tensor,
@@ -85,6 +97,10 @@ def _compute_loss(
     w_a: float,
     w_b: float,
     w_c: float,
+    gate_a: Optional[torch.Tensor] = None,
+    gate_b: Optional[torch.Tensor] = None,
+    gate_c: Optional[torch.Tensor] = None,
+    lambda_entropy: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Compute joint masked loss. Returns (total, loss_a, loss_b, loss_c).
@@ -111,6 +127,15 @@ def _compute_loss(
     loss_c = _masked_bce(head_c.view(-1), target_haz.view(-1), has_run.unsqueeze(1).expand_as(head_c).reshape(-1))
 
     total = w_a * loss_a + w_b * loss_b + w_c * loss_c
+
+    # Entropy regularization: subtract lambda * mean gate entropy from total loss.
+    # Subtracting entropy (a positive number) means higher entropy → lower loss →
+    # the optimizer actively seeks diverse gate routing, preventing collapse where
+    # one expert dominates and the others stop receiving gradients.
+    if lambda_entropy > 0.0 and gate_a is not None and gate_b is not None and gate_c is not None:
+        H = _gate_entropy(gate_a) + _gate_entropy(gate_b) + _gate_entropy(gate_c)
+        total = total - lambda_entropy * H
+
     return total, loss_a, loss_b, loss_c
 
 
@@ -217,8 +242,9 @@ def train(
     lr: float = 1e-3,
     weight_decay: float = 1e-4,
     w_a: float = 1.0,
-    w_b: float = 0.5,
+    w_b: float = 1.0,
     w_c: float = 0.3,
+    lambda_entropy: float = 0.02,
     patience: int = 15,
     grad_clip: float = 1.0,
     save_path: Optional[Path] = None,
@@ -257,7 +283,11 @@ def train(
     epochs_no_improve = 0
     result = TrainResult(best_val_loss=best_val_loss, best_epoch=0)
 
-    logger.info("Starting MMoE training on %s | max_epochs=%d patience=%d", device, max_epochs, patience)
+    logger.info(
+        "Starting MMoE training on %s | max_epochs=%d patience=%d | "
+        "w_a=%.1f w_b=%.1f w_c=%.1f lambda_entropy=%.3f",
+        device, max_epochs, patience, w_a, w_b, w_c, lambda_entropy,
+    )
 
     for epoch in range(1, max_epochs + 1):
         model.train()
@@ -270,8 +300,11 @@ def train(
             X = batch[IDX_X]
 
             optimizer.zero_grad()
-            head_a, head_b, head_c = model(X)
-            total, la, lb, lc = _compute_loss(head_a, head_b, head_c, batch, w_a, w_b, w_c)
+            head_a, head_b, head_c, gate_a, gate_b, gate_c = model.forward_with_gates(X)
+            total, la, lb, lc = _compute_loss(
+                head_a, head_b, head_c, batch, w_a, w_b, w_c,
+                gate_a, gate_b, gate_c, lambda_entropy,
+            )
 
             total.backward()
             nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
