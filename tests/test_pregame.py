@@ -1,25 +1,27 @@
+import sys
+import os
+from pathlib import Path
+ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "live-trader"))
+
+from dotenv import load_dotenv
+load_dotenv(ROOT / ".env")
+
 import asyncio
 import logging
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "live-trader"))
-
+logging.basicConfig(level=logging.DEBUG)
 from inference.pregame import load_pregame
 
-async def test():
-    logging.basicConfig(level=logging.INFO)
-    game_id = "0042500202" # CLE @ DET
-    print(f"--- Testing pregame load for game {game_id} ---")
-    data = await load_pregame(game_id)
-    print(f"Has data: {data.get('has_pregame_data')}")
-    print(f"Lineup ratings count: {len(data.get('lineup_ratings', {}))}")
-    print(f"Player APM count: {len(data.get('player_apm', {}))}")
-    
-    game_id_2 = "0042500222" # LAL @ OKC
-    print(f"\n--- Testing pregame load for game {game_id_2} ---")
-    data2 = await load_pregame(game_id_2)
-    print(f"Has data: {data2.get('has_pregame_data')}")
+async def go():
+    for gid in ['0042500234', '0022501150']:
+        print('=' * 50)
+        print('Testing', gid)
+        res = await load_pregame(gid, fallback_home_team_id=1610612750, fallback_away_team_id=1610612759)
+        keys = ['team_net_rating_delta','home_off_rating','away_off_rating','home_def_rating','away_def_rating','expected_pace','form_delta','has_pregame_data','pace_baseline','home_b2b','away_b2b']
+        for k in keys:
+            print(f'  {k:30s} = {res.get(k)}')
+        print('  lineup_ratings size:', len(res.get('lineup_ratings', {})))
+        print('  player_apm size:', len(res.get('player_apm', {})))
 
-if __name__ == "__main__":
-    asyncio.run(test())
+asyncio.run(go())
