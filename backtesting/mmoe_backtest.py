@@ -349,6 +349,7 @@ def run_backtest(
     min_abs_traj: float = 0.0,
     min_run_length: int = 1,
     hold_seconds: int = 120,
+    only_game: str | None = None,
 ) -> BacktestSummary:
     logger.info("Connecting to MotherDuck...")
     conn = _connect_motherduck()
@@ -374,6 +375,16 @@ def run_backtest(
     # Only keep val games that have tick data
     tick_games   = set(all_ticks["game_id"].unique())
     tradeable    = val_games & tick_games
+    # Single-game filter: lets us replay one specific game (e.g. last night's
+    # paper-trade run) under the validated single-stable-market assumption,
+    # to estimate "what would pin-the-market have looked like for this game?"
+    if only_game is not None:
+        if only_game not in tradeable:
+            logger.error(
+                "Game %s not in tradeable set (in val window: %s, has ticks: %s)",
+                only_game, only_game in val_games, only_game in tick_games,
+            )
+        tradeable = tradeable & {only_game}
     logger.info(
         "Val games: %d | games with ticks: %d | tradeable: %d",
         len(val_games), len(tick_games), len(tradeable),
@@ -503,6 +514,8 @@ if __name__ == "__main__":
         help="path to scaler pickle",
     )
     parser.add_argument("--save-csv", action="store_true", help="save positions to CSV")
+    parser.add_argument("--game",     type=str, default=None,
+                        help="run backtest on a single game_id only (e.g. 0042500311)")
     args = parser.parse_args()
 
     summary = run_backtest(
@@ -517,6 +530,7 @@ if __name__ == "__main__":
         min_abs_traj       = args.min_abs_traj,
         min_run_length     = args.min_run_length,
         hold_seconds       = args.hold_seconds,
+        only_game          = args.game,
     )
 
     label = (
