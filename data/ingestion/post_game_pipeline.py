@@ -116,33 +116,58 @@ def upsert_dim_games(games: list[GameInfo], game_date: date) -> None:
 def _fetch_pbp_stateless(
     game_id: str,
     max_retries: int = 3,
+    empty_retries: int = 8,
+    empty_sleep_seconds: float = 900.0,
 ) -> pd.DataFrame | None:
     """
     Fetch play-by-play directly from nba_api with progressive backoff.
     No disk cache — ephemeral Fly.io filesystem makes caching pointless.
-    Returns None if all retries fail (game not yet logged by nba_api).
+
+    Two retry tiers:
+      - Inner loop (max_retries): handles transient network/API exceptions, fast backoff.
+      - Outer loop (empty_retries): handles empty DataFrames — nba_api hasn't logged
+        the game yet. Waits 15 min between attempts (up to ~2h total). No urgency:
+        the next hard deadline is the following day's pregame features.
     """
     from nba_api.stats.endpoints import playbyplayv3
 
     backoff_seconds = [0.6, 2.6, 4.6]
-    for attempt in range(max_retries):
-        try:
-            pbp = playbyplayv3.PlayByPlayV3(game_id=game_id)
-            df = pbp.get_data_frames()[0]
-            if df.empty:
-                logger.warning("game %s: PBP returned empty DataFrame", game_id)
-                return None
-            return df
-        except Exception as exc:
-            wait = backoff_seconds[attempt] if attempt < len(backoff_seconds) else 4.6
-            logger.warning(
-                "game %s: PBP fetch attempt %d/%d failed (%s) — retrying in %.1fs",
-                game_id, attempt + 1, max_retries, exc, wait,
-            )
-            if attempt < max_retries - 1:
-                time.sleep(wait)
 
-    logger.warning("game %s: all %d PBP fetch attempts failed — skipping", game_id, max_retries)
+    for empty_attempt in range(empty_retries):
+        df: pd.DataFrame | None = None
+        for attempt in range(max_retries):
+            try:
+                df = playbyplayv3.PlayByPlayV3(game_id=game_id).get_data_frames()[0]
+                break  # fetched — may still be empty
+            except Exception as exc:
+                wait = backoff_seconds[attempt] if attempt < len(backoff_seconds) else 4.6
+                logger.warning(
+                    "game %s: PBP fetch attempt %d/%d failed (%s) — retrying in %.1fs",
+                    game_id, attempt + 1, max_retries, exc, wait,
+                )
+                if attempt < max_retries - 1:
+                    time.sleep(wait)
+
+        if df is None:
+            logger.warning("game %s: all %d PBP fetch attempts failed — skipping", game_id, max_retries)
+            return None
+
+        if not df.empty:
+            return df
+
+        # nba_api responded but hasn't logged the game yet — wait and retry
+        if empty_attempt < empty_retries - 1:
+            logger.warning(
+                "game %s: PBP empty (attempt %d/%d) — nba_api not ready, retrying in %.0fs",
+                game_id, empty_attempt + 1, empty_retries, empty_sleep_seconds,
+            )
+            time.sleep(empty_sleep_seconds)
+        else:
+            logger.warning(
+                "game %s: PBP returned empty DataFrame after %d attempts — skipping",
+                game_id, empty_retries,
+            )
+
     return None
 
 
