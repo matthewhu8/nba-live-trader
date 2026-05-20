@@ -20,3 +20,4 @@ live-trader/go/go
 
 # feature_distribution_diff.py reference cache (rebuildable from MotherDuck)
 tools/.reference_distribution.json
+.DS_Store

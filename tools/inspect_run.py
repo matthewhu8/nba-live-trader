@@ -212,13 +212,20 @@ def print_anomalies(records: list[dict[str, Any]],
     print(f"  Inference-side errors          {inf_errs}")
     print(f"  Inference parser_skip events   {parser_skip}")
     print()
+    # Go emits one `possession` per inbound NBA event; Python splits the same
+    # stream into `possession` (events that closed a possession) + `parser_skip`
+    # (mid-possession events like offensive rebounds, non-final FTs). The
+    # correct cross-stream invariant is therefore Go.possession == Python.(
+    # possession + parser_skip), not Go.possession == Python.possession.
     print(f"  Go possession events           {poss_count}")
-    print(f"  Inference possession events    {inf_poss}")
-    if poss_count and inf_poss and poss_count != inf_poss:
-        print(f"  ⚠ MISMATCH: Go and Python disagree on possession count "
-              f"(diff = {poss_count - inf_poss})")
-    elif poss_count and inf_poss:
-        print(f"  ✓ Go ↔ Python possession counts match")
+    print(f"  Inference possession events    {inf_poss}  (+{parser_skip} parser_skip = {inf_poss + parser_skip} total)")
+    if poss_count and (inf_poss or parser_skip):
+        total_py = inf_poss + parser_skip
+        if poss_count == total_py:
+            print(f"  ✓ Go ↔ Python event counts match (possession + parser_skip)")
+        else:
+            print(f"  ⚠ MISMATCH: Go={poss_count}, Python possession+parser_skip={total_py} "
+                  f"(diff = {poss_count - total_py})")
 
 
 # ── Entrypoint ─────────────────────────────────────────────────────────────────
