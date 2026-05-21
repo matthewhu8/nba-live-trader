@@ -43,6 +43,12 @@ type Config struct {
 		// trajectory-sign meaning) even when the price drifts to lopsided.
 		MarketDriftLowBid  int `yaml:"market_drift_low_bid"`
 		MarketDriftHighBid int `yaml:"market_drift_high_bid"`
+		// MaxHazardForHold restored 2026-05-21 after the 110-game val sweep
+		// (CLAUDE.md, mmoe_backtest --hazard-exit-threshold 0.85) showed
+		// hazard exit adds +$3.3k net vs no-hazard baseline. Loosened from
+		// the original 0.75 to 0.85 — slightly fewer fires, marginally better
+		// net P&L, addresses the friend's "fires 38% of possessions" concern.
+		MaxHazardForHold float32 `yaml:"max_hazard_for_hold"`
 	} `yaml:"agent"`
 	Feeds struct {
 		NBAPollIntervalMS      int `yaml:"nba_poll_interval_ms"`
