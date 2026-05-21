@@ -9,26 +9,36 @@ inference:
   timeout_ms: 500
 
 risk:
-  max_total_exposure_cents: 5000      # $50 max open across all games
-  max_per_game_exposure_cents: 2000   # $20 max open per game
+  # 2026-05-18 mid-OKC-game: the original limits were sized for ~30-contract
+  # trades but we run at 100 contracts (matching the +$37,409 backtest).
+  # 100 × ~55¢ = $55 per trade, so per-game $20 blocked every trade.
+  # Sized now to comfortably hold one 100-contract position at any price
+  # in the 30-70¢ band, plus headroom for one held-position-while-signal.
+  max_total_exposure_cents: 20000     # $200 max open across all games
+  max_per_game_exposure_cents: 10000  # $100 max open per game
   max_daily_loss_cents: 10000         # $100 daily loss limit — halt all trading
   max_contracts_per_order: 100
 
 agent:
   min_yes_bid: 30
   max_yes_bid: 70
-  # min_run_prob_entry retained for compatibility but UNUSED in the bandit —
-  # Head A's gate collapse (see 2026-05-09 post-mortem) made it unreliable.
-  min_run_prob_entry: 0.10
-  # Active entry gates, matched to the validated backtest config:
-  #   python -m backtesting.mmoe_backtest --use-traj-for-side --min-abs-traj 0.08 --min-run-length 2 ...
-  # (48-game val set: 19 trades, 42.1% win rate, +$2,463 net)
-  min_abs_traj_entry: 0.08
-  min_run_length_entry: 2
-  take_profit_cents: 8
-  stop_loss_cents: 5
+  # All entry gates below match the validated backtest config exactly:
+  #   python -m backtesting.mmoe_backtest --use-traj-for-side --min-abs-traj 0.08 --min-run-length 2 --hold-seconds 240
+  # Apr 7 → May 10 val set: 112 trades, 41.1% win rate, +$9,977 net (per 100 contracts).
+  min_run_prob_entry: 0.0       # 2026-05-18: dropped to 0.0 per Matt's retrain backtest (110 val games on new entropy-regularized model). Tightening this threshold reduces P&L monotonically — Head A run_prob filter is worse than Head B trajectory filter at separating winners from losers. Backtest at 0.0: 207 trades, 47.8% win, +$37,409 vs 71 trades / +$9,865 at 0.15. Effective gating is now |traj_final|≥0.08, run_length≥2, 30–70¢ band.
+  min_abs_traj_entry: 0.08      # Head B confidence
+  min_run_length_entry: 2       # momentum filter
+  take_profit_cents: 5       # 2026-05-13: aligned to backtest (was 8). Backtest used 5¢ TP across 112 trades, 40 of which hit TP at exactly 5-7¢.
+  stop_loss_cents: 3         # 2026-05-13: aligned to backtest (was 5). Backtest SL was -3¢.
   max_hold_possessions: 6
   position_size_contracts: 100
+  # 2026-05-19 pin-the-market: scanner locks on to the initial closest-to-50¢
+  # market and only swaps when the LOCKED market drifts outside this band.
+  # Wider than [min_yes_bid, max_yes_bid] on purpose — we'd rather sit idle on
+  # the same logical bet than swap to a sibling contract (which inverts the
+  # meaning of traj_final and corrupts the model's assumptions).
+  market_drift_low_bid: 20
+  market_drift_high_bid: 80
 
 feeds:
   nba_poll_interval_ms: 3000

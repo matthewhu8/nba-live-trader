@@ -176,6 +176,14 @@ class GameState:
         self.prev_home_lineup = list(self.home_lineup)
         self.prev_away_lineup = list(self.away_lineup)
 
+        # Reset per-possession sub counters. Training data semantics: count of
+        # substitutions IN this possession (typically 0–3), not a game-cumulative
+        # counter. The 2026-05-12 live-vs-offline diff revealed that letting
+        # these accumulate produced +73σ outlier feature values, collapsing
+        # Head A's gating network and pinning run_prob near zero.
+        self.home_sub_count = 0
+        self.away_sub_count = 0
+
     def _team_side(self, team_id: int) -> str:
         """Map a CDN teamId integer to 'home' or 'away'. Returns '' if unknown."""
         if team_id and team_id == self.home_team_id:

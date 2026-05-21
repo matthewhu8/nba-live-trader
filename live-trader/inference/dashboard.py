@@ -28,6 +28,12 @@ class TradeUpdate(BaseModel):
     size: int
     pnl: float = 0.0
     reason: str = ""
+    # market_ticker is the Kalshi market subscribed at order time. Carried so
+    # the dashboard can render the team actually backed ("BUY SAS") instead of
+    # generic "BUY YES", and so a scanner swap arriving between order and
+    # broadcast can't relabel an already-placed trade. Empty when Go didn't
+    # send it (no event ticker / older Go binary).
+    market_ticker: str = ""
 
 # SSE subscribers: game_id → list of asyncio.Queue
 _subscribers: dict[str, list[asyncio.Queue]] = {}
@@ -147,6 +153,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t);min-height:100vh;padding:16px}
 .hdr{display:flex;justify-content:space-between;align-items:center;padding:14px 20px;background:var(--s1);border:1px solid var(--bd);border-radius:12px;margin-bottom:14px}
 .hdr h1{font-size:18px;font-weight:700;display:flex;align-items:center;gap:10px}
+.matchup{font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:700;letter-spacing:.05em;color:var(--td)}
+.matchup .vs{color:var(--td);font-weight:400;margin:0 8px}
+.matchup .away{color:var(--c)}
+.matchup .home{color:var(--nyk)}
 .dot{width:10px;height:10px;border-radius:50%;background:var(--r);animation:p 2s infinite}
 .dot.on{background:var(--g)}
 @keyframes p{0%,100%{opacity:1}50%{opacity:.4}}
@@ -211,6 +221,7 @@ canvas{width:100%!important;height:100%!important}
 <body>
 <div class="hdr">
   <h1><span class="dot" id="dot"></span> Live Paper Trader</h1>
+  <div class="matchup" id="matchup">— @ —</div>
   <div class="badges">
     <span class="bdg" id="bPoss">POSS: 0</span>
     <span class="bdg" id="bPipe">--ms</span>
@@ -293,20 +304,59 @@ canvas{width:100%!important;height:100%!important}
 
 <script>
 let es, sigs=0, trds=0, pnl=0, wins=0;
-let homeTeam = 'HOME', awayTeam = 'AWAY', market = 'Spread';
+let homeTeam = 'HOME', awayTeam = 'AWAY';
+let yesTeam = '', noTeam = '';     // who BUY_YES / BUY_NO is actually backing
+let currentMarketTicker = '';      // updated from each SSE message
+
+// teamsFromMarketTicker parses a Kalshi NBA spread market ticker into team metadata.
+//
+//   KXNBASPREAD-26MAY10SASMIN-SAS5     → {away:"SAS", home:"MIN", yes:"SAS", no:"MIN"}
+//   KXNBASPREAD-26MAY10NYKPHI-PHI3.5   → {away:"NYK", home:"PHI", yes:"PHI", no:"NYK"}
+//
+// The event segment is fixed-width: YY + MMM + DD + AWAY3 + HOME3.
+// The trailing market suffix is the team the spread is FOR, which is also the
+// YES side of the contract. Returns null on any unexpected format so callers
+// can fall back to generic HOME/AWAY labels.
+function teamsFromMarketTicker(ticker) {
+  const m = ticker && ticker.match(/^KXNBASPREAD-\d{2}[A-Z]{3}\d{2}([A-Z]{3})([A-Z]{3})-([A-Z]{3})[\d.]*$/);
+  if (!m) return null;
+  const away = m[1], home = m[2], yes = m[3];
+  const no = (yes === home) ? away : home;
+  return { away, home, yes, no };
+}
+
+// applyTicker updates the in-memory team state from a freshly-arrived market
+// ticker AND refreshes the visible matchup header. Called from both possession
+// messages (sets up the game labels) and trade messages (race-proof: the
+// trade-line label always reflects the market actually subscribed at order
+// time, even if the scanner swapped between order and broadcast).
+function applyTicker(ticker) {
+  if (!ticker || ticker === currentMarketTicker) return false;
+  const t = teamsFromMarketTicker(ticker);
+  if (!t) return false;
+  currentMarketTicker = ticker;
+  homeTeam = t.home; awayTeam = t.away;
+  yesTeam  = t.yes;  noTeam   = t.no;
+  // Matchup header (visible across the top)
+  const m = document.getElementById('matchup');
+  if (m) m.innerHTML = `<span class="away">${t.away}</span><span class="vs">@</span><span class="home">${t.home}</span>`;
+  document.getElementById('mktTitle').textContent = 'Market Orderbook (' + ticker + ')';
+  return true;
+}
 
 function go(){
   const id=document.getElementById('gid').value.trim();
   if(!id)return;
-  
-  if (id === '0042500232' || id === '0042500233') { homeTeam = 'MIN'; awayTeam = 'SAS'; market = 'SAS +22'; }
-  else if (id === '0042500212' || id === '0042500213') { homeTeam = 'PHI'; awayTeam = 'NYK'; market = 'PHI -1'; }
-  else if (id === '0042500222') { homeTeam = 'OKC'; awayTeam = 'LAL'; market = 'OKC -1'; }
-  else if (id === '0042500202') { homeTeam = 'DET'; awayTeam = 'CLE'; market = 'DET +11'; }
-  else { homeTeam = 'HOME'; awayTeam = 'AWAY'; market = 'Spread'; }
-  
-  document.getElementById('mktTitle').textContent = `Market Orderbook (${market})`;
-  
+
+  // Reset team labels — they'll auto-populate from the first market_ticker
+  // SSE message via teamsFromMarketTicker. No more hardcoded game-ID maps.
+  homeTeam = 'HOME'; awayTeam = 'AWAY';
+  yesTeam = ''; noTeam = '';
+  currentMarketTicker = '';
+  document.getElementById('mktTitle').textContent = 'Market Orderbook (connecting…)';
+  const mh = document.getElementById('matchup');
+  if (mh) mh.innerHTML = '— @ —';
+
   if(es)es.close();
   document.getElementById('glab').textContent='Connecting...';
   document.getElementById('dot').className='dot';
@@ -318,26 +368,43 @@ function go(){
 }
 
 function upd(d){
+  // Auto-derive team labels on the first message that carries a market ticker,
+  // and again whenever the scanner swaps to a different market.
+  applyTicker(d.market_ticker);
+
   // Handle trade events
   if (d.type === 'trade') {
     const t = d.trade;
     if(trds===0) document.getElementById('tradeLog').innerHTML=''; // clear placeholder
-    
+
+    // Resolve the team from the TRADE's own ticker so a late-arriving scanner
+    // swap can't relabel an already-placed trade. Falls back to current
+    // game-state labels for older Go binaries that don't send market_ticker.
+    let tradeYesTeam = yesTeam, tradeNoTeam = noTeam;
+    if (t.market_ticker) {
+      const tt = teamsFromMarketTicker(t.market_ticker);
+      if (tt) { tradeYesTeam = tt.yes; tradeNoTeam = tt.no; }
+    }
+
     const ll = document.createElement('div');
     ll.className = 'll';
     const ts = new Date().toLocaleTimeString();
-    
+
     if (t.action === 'ENTRY') {
       trds++; document.getElementById('tTrd').textContent = trds;
       const dColor = t.direction === 'YES' ? '#22c55e' : '#ef4444';
-      ll.innerHTML = `<span style="color:#6b7280">${ts}</span> <span style="color:${dColor};font-weight:600">BUY ${t.direction}</span> · ${t.size} contracts @ ${t.price}¢`;
+      const backing = t.direction === 'YES' ? (tradeYesTeam || 'YES') : (tradeNoTeam || 'NO');
+      // Team is the dominant info; (YES/NO) is secondary. Ticker appended in
+      // muted text so you can audit which exact contract was bought.
+      ll.innerHTML = `<span style="color:#6b7280">${ts}</span> <span style="color:${dColor};font-weight:700;font-size:13px">BUY ${backing}</span> <span style="color:#6b7280">(${t.direction})</span> · ${t.size} @ ${t.price}¢ <span style="color:#6b7280">· ${t.market_ticker || ''}</span>`;
     } else {
       pnl += t.pnl;
       if (t.pnl > 0) wins++;
       const pnlColor = t.pnl > 0 ? '#22c55e' : '#ef4444';
       const pnlSign = t.pnl > 0 ? '+' : '';
-      ll.innerHTML = `<span style="color:#6b7280">${ts}</span> <span style="color:#eab308;font-weight:600">EXIT (${t.reason})</span> · Sold @ ${t.price}¢ · P&L: <span style="color:${pnlColor}">${pnlSign}$${t.pnl.toFixed(2)}</span>`;
-      
+      const wasBacking = t.direction === 'YES' ? (tradeYesTeam || 'YES') : (tradeNoTeam || 'NO');
+      ll.innerHTML = `<span style="color:#6b7280">${ts}</span> <span style="color:#eab308;font-weight:700;font-size:13px">EXIT ${wasBacking}</span> <span style="color:#6b7280">(${t.reason})</span> · @ ${t.price}¢ · P&L: <span style="color:${pnlColor}">${pnlSign}$${t.pnl.toFixed(2)}</span>`;
+
       document.getElementById('tPnl').textContent = (pnl>0?'+':'')+'$'+pnl.toFixed(2);
       document.getElementById('tPnl').style.color = pnl>0?'#22c55e':'#ef4444';
       document.getElementById('tWR').textContent = ((wins/trds)*100).toFixed(0)+'%';
@@ -350,14 +417,20 @@ function upd(d){
 
   const rp=d.run_prob||0, f=d.features||{}, tr=d.trajectory||[], hz=d.hazard||[];
 
-  // Signal banner
+  // Signal banner — name the actual team being backed, not just YES/NO.
   const sig=document.getElementById('sig'), st=document.getElementById('sigTxt'), ss=document.getElementById('sigSub');
   if(rp>=0.10 && tr[9]>0){
-    sig.className='signal buy'; st.textContent='★ BUY YES'; st.style.color='#22c55e';
-    ss.textContent='Run detected + price rising → entry signal';
+    const team = yesTeam || 'YES';
+    sig.className='signal buy';
+    st.textContent='★ BUY ' + team;
+    st.style.color='#22c55e';
+    ss.textContent='Run detected + price rising → backing ' + team + ' to cover';
   } else if(rp>=0.10 && tr[9]<0){
-    sig.className='signal buy'; st.textContent='★ BUY NO'; st.style.color='#ef4444';
-    ss.textContent=`Run detected + price falling → entry signal`;
+    const team = noTeam || 'NO';
+    sig.className='signal buy';
+    st.textContent='★ BUY ' + team;
+    st.style.color='#ef4444';
+    ss.textContent='Run detected + price falling → backing ' + team;
   } else {
     sig.className='signal'; st.textContent='WAIT'; st.style.color='#9ca3af';
     ss.textContent='No scoring run detected · monitoring possessions';
@@ -379,19 +452,23 @@ function upd(d){
     rtE.innerHTML='<span style="color:'+clr+'">'+who+' on a '+rpts+'-pt run ('+rl+' poss)</span>';
   } else { rtE.textContent='No active run'; }
 
-  // Price direction (Head B)
+  // Price direction (Head B) — uses YES team, not home team. The home team
+  // isn't necessarily the YES side (e.g., SAS @ MIN where the active market
+  // is SAS+5, YES=SAS=away team). Falls back to "YES side" if we haven't
+  // parsed a ticker yet.
   const pA=document.getElementById('pArr'), pL=document.getElementById('pLbl'), pD=document.getElementById('pDet');
   if(tr.length>0){
     const last=tr[9]||0, mid=tr[4]||0;
+    const yLabel = yesTeam || 'YES side';
     if(Math.abs(last)<0.01){
       pA.textContent='→'; pA.style.color='#9ca3af';
       pL.textContent='Flat — no expected move'; pL.style.color='#9ca3af';
     } else if(last>0){
       pA.textContent='↑'; pA.style.color='#22c55e';
-      pL.textContent=`${homeTeam} price expected to RISE`; pL.style.color='#22c55e';
+      pL.textContent=`${yLabel} price expected to RISE`; pL.style.color='#22c55e';
     } else {
       pA.textContent='↓'; pA.style.color='#ef4444';
-      pL.textContent=`${homeTeam} price expected to FALL`; pL.style.color='#ef4444';
+      pL.textContent=`${yLabel} price expected to FALL`; pL.style.color='#ef4444';
     }
     pD.textContent='30s: '+(mid>0?'+':'')+mid.toFixed(3)+' · 2min: '+(last>0?'+':'')+last.toFixed(3);
   }
@@ -443,7 +520,6 @@ function upd(d){
   log.appendChild(ll);log.scrollTop=log.scrollHeight;
 
   if(rp>=.10){sigs++;document.getElementById('tSig').textContent=sigs}
-  if(d.market_ticker)document.getElementById('mktTitle').textContent='Market Orderbook ('+d.market_ticker+')';
 }
 </script>
 </body>

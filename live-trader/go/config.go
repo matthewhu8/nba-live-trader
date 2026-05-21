@@ -36,6 +36,13 @@ type Config struct {
 		StopLossCents         int     `yaml:"stop_loss_cents"`
 		MaxHoldPossessions    int     `yaml:"max_hold_possessions"`
 		PositionSizeContracts int     `yaml:"position_size_contracts"`
+		// 2026-05-19 pin-the-market: the scanner locks on to the initial closest-
+		// to-50¢ market and only swaps if the LOCKED market's bid drifts outside
+		// [MarketDriftLowBid, MarketDriftHighBid]. Wider than the entry band on
+		// purpose — we want to keep the same logical bet (and thus the same
+		// trajectory-sign meaning) even when the price drifts to lopsided.
+		MarketDriftLowBid  int `yaml:"market_drift_low_bid"`
+		MarketDriftHighBid int `yaml:"market_drift_high_bid"`
 	} `yaml:"agent"`
 	Feeds struct {
 		NBAPollIntervalMS      int `yaml:"nba_poll_interval_ms"`

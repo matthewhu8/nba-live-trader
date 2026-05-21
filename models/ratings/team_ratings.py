@@ -93,3 +93,4 @@ def apply_team_ewma(
         "net_rating":         raw_net,
         "last_5_net_ratings": ",".join(f"{x:.2f}" for x in last_5),
     }
+
