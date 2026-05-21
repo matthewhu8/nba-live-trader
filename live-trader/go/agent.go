@@ -1,26 +1,32 @@
-// Bandit — sits on top of the MMoE outputs and decides BUY_YES / BUY_NO / EXIT / WAIT.
+// Bandit — sits on top of the MMoE outputs and decides BUY_YES / BUY_NO / WAIT.
 //
-// On 2026-05-11 the entry path and exit path were both realigned to the
-// validated backtest config. On 2026-05-21 the hazard exit was RESTORED at a
-// loosened threshold of 0.85 after a 110-game val-set sweep (see CLAUDE.md
-// "Head C" section) showed hazard exit adds +$3.3k net vs the no-hazard
-// baseline (216 trades / 47.7% WR / +$39,586 vs 200 / 48.5% / +$36,319). The
-// improvement is concentrated in Q1/Q2 entries where weak early-game runs
-// would otherwise bleed to time_gate. Threshold 0.85 (vs the previous 0.75)
-// addresses the friend's "fires on 38% of possessions" concern in paper
-// trading — fewer fires, marginally better net P&L.
+// On 2026-05-11 the entry path and exit path were both realigned to exactly
+// match the validated backtest config (CLAUDE.md: 112 trades, 41% win rate,
+// +$9,977 net on Apr 7 → May 10 val set). The realignment reverses two
+// divergences that had been silently hurting live performance:
 //
-// Entry gates (in order of evaluation):
-//   1. is_overtime (period >= 5)     → Wait
-//   2. is_garbage_time / is_blowout  → Wait
-//   3. in_price_band  [30..70]       → Wait if outside
-//   4. run_prob ≥ min_run_prob_entry → Wait if below
-//   5. |traj_final| ≥ min_abs_traj   → Wait if below
-//   6. current_run_length ≥ min      → Wait if below
-//   7. trajectory sign               → BuyYes (>0) or BuyNo (<0)
+//   1. The run_prob entry gate was removed yesterday (Phase 8). Today's
+//      backtest re-confirmed that gate is what makes the strategy profitable —
+//      Head A's "rare but real" elevated outputs ARE the trades that win.
+//      Restored: `run_prob >= min_run_prob_entry` (default 0.15).
 //
-// Has-position branch: hazard[4] > max_hazard_for_hold → Exit, else Wait.
-// Router.CheckExit still owns TP / SL / TIME_STOP independently.
+//   2. The hazard-based exit was present in live but NOT in the validated
+//      backtest. Every backtest exit is TP / SL / momentum_flip / time_gate
+//      — no hazard exit anywhere. Live hazard exit was firing on 38% of
+//      all possessions (hazard5 > 0.75) and forcing premature exits at
+//      a net loss across 3 paper-trade games. Removed: bandit no longer
+//      returns Exit. The router's CheckExit (TP/SL/TIME_STOP) is now the
+//      sole exit mechanism, exactly like the backtest.
+//
+// Entry gates (matched to backtest, in order of evaluation):
+//   1. is_garbage_time / is_blowout  → Wait
+//   2. in_price_band  [30..70]       → Wait if outside
+//   3. run_prob ≥ min_run_prob_entry → Wait if below
+//   4. |traj_final| ≥ min_abs_traj   → Wait if below
+//   5. current_run_length ≥ min     → Wait if below
+//   6. trajectory sign               → BuyYes (>0) or BuyNo (<0)
+//
+// Has-position branch: always Wait. Exit logic is owned by router.CheckExit.
 package main
 
 type Action string
@@ -29,7 +35,7 @@ const (
 	Wait   Action = "WAIT"
 	BuyYes Action = "BUY_YES"
 	BuyNo  Action = "BUY_NO"
-	Exit   Action = "EXIT"
+	Exit   Action = "EXIT" // retained for future use; bandit no longer returns this
 )
 
 type ContextKey struct {
@@ -49,7 +55,6 @@ type Bandit struct {
 	minRunProbEntry   float32 // Head A gate — restored 2026-05-11
 	minAbsTrajEntry   float32 // Head B confidence (backtest: 0.08)
 	minRunLengthEntry float32 // momentum filter (backtest: 2)
-	maxHazardForHold  float32 // Head C exit gate (backtest sweep 2026-05-21: 0.85)
 	params            map[ContextKey][4]BetaParams // reserved for future bandit
 }
 
@@ -60,7 +65,6 @@ func NewBandit(cfg *Config) *Bandit {
 		minRunProbEntry:   cfg.Agent.MinRunProbEntry,
 		minAbsTrajEntry:   cfg.Agent.MinAbsTrajEntry,
 		minRunLengthEntry: float32(cfg.Agent.MinRunLengthEntry),
-		maxHazardForHold:  cfg.Agent.MaxHazardForHold,
 		params:            make(map[ContextKey][4]BetaParams),
 	}
 }
@@ -74,7 +78,6 @@ func NewBandit(cfg *Config) *Bandit {
 //   - RunProbPass / TrajMagnitudePass / RunLengthPass — only set in the
 //     no-position branch, in evaluation order. First failing gate is named
 //     in FirstBlocking.
-//   - HazardExitPass — only set in the has-position branch.
 type GateResult struct {
 	IsOvertime        bool    `json:"is_overtime"`
 	IsGarbageTime     bool    `json:"is_garbage_time"`
@@ -89,7 +92,6 @@ type GateResult struct {
 	CurrentRunLength  float32 `json:"current_run_length"`
 	RunLengthPass     *bool   `json:"run_length_pass"`
 	TrajectorySign    string  `json:"trajectory_sign"` // "pos" | "neg" | "zero"
-	HazardExitPass    *bool   `json:"hazard_exit_pass"`
 	FirstBlocking     string  `json:"first_blocking,omitempty"`
 }
 
@@ -143,16 +145,10 @@ func (b *Bandit) Decide(resp *PossessionResponse, hasPosition bool) (Action, Gat
 		return Wait, g
 	}
 
-	// Has-position branch: hazard[4] > max_hazard_for_hold → Exit, else Wait.
-	// Router.CheckExit independently handles TP / SL / TIME_STOP — hazard
-	// here is the model's "this run is dying" signal layered on top.
+	// Has-position branch: bandit does nothing. The router (TP/SL/TIME_STOP)
+	// is solely responsible for exits — this matches the validated backtest.
 	if hasPosition {
-		hazardExit := resp.Hazard[4] > b.maxHazardForHold
-		g.HazardExitPass = &hazardExit
-		if hazardExit {
-			return Exit, g
-		}
-		g.FirstBlocking = "hazard_exit_pass"
+		g.FirstBlocking = "holding_position"
 		return Wait, g
 	}
 

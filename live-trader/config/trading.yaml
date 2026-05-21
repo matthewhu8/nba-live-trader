@@ -39,15 +39,6 @@ agent:
   # meaning of traj_final and corrupts the model's assumptions).
   market_drift_low_bid: 20
   market_drift_high_bid: 80
-  # 2026-05-21 hazard exit RESTORED at loosened threshold (was removed in the
-  # OKC integration PR after paper-trade observation of 38%-of-possessions
-  # firing rate). The 110-game val sweep (mmoe_backtest --hazard-exit-threshold
-  # 0.85) shows hazard exit adds +$3.3k net vs no-hazard baseline (216 trades,
-  # 47.7% WR, +$39,586 vs 200 / 48.5% / +$36,319). Improvement is concentrated
-  # in Q1/Q2 entries where weak early-game runs would bleed to time_gate.
-  # 0.85 instead of the previous 0.75 — slightly fewer fires (better paper
-  # behavior), marginally better net P&L.
-  max_hazard_for_hold: 0.85
 
 feeds:
   nba_poll_interval_ms: 3000
