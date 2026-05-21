@@ -142,12 +142,14 @@ func defaultConfig() Config {
 			PositionSizeContracts int     `yaml:"position_size_contracts"`
 			MarketDriftLowBid     int     `yaml:"market_drift_low_bid"`
 			MarketDriftHighBid    int     `yaml:"market_drift_high_bid"`
+			MaxHazardForHold      float32 `yaml:"max_hazard_for_hold"`
 		}{
 			MinYesBid: 30, MaxYesBid: 70, MinRunProbEntry: 0.0,
 			MinAbsTrajEntry: 0.08, MinRunLengthEntry: 2,
 			TakeProfitCents: 5, StopLossCents: 3, MaxHoldPossessions: 6,
 			PositionSizeContracts: 100,
 			MarketDriftLowBid: 20, MarketDriftHighBid: 80,
+			MaxHazardForHold: 0.85,
 		},
 		Feeds: struct {
 			NBAPollIntervalMS      int `yaml:"nba_poll_interval_ms"`
