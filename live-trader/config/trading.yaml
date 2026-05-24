@@ -9,15 +9,11 @@ inference:
   timeout_ms: 500
 
 risk:
-  # 2026-05-18 mid-OKC-game: the original limits were sized for ~30-contract
-  # trades but we run at 100 contracts (matching the +$37,409 backtest).
-  # 100 × ~55¢ = $55 per trade, so per-game $20 blocked every trade.
-  # Sized now to comfortably hold one 100-contract position at any price
-  # in the 30-70¢ band, plus headroom for one held-position-while-signal.
-  max_total_exposure_cents: 20000     # $200 max open across all games
-  max_per_game_exposure_cents: 10000  # $100 max open per game
-  max_daily_loss_cents: 10000         # $100 daily loss limit — halt all trading
-  max_contracts_per_order: 100
+  # 10 contracts × 70¢ max = $7 per trade. Sized for one open position per game.
+  max_total_exposure_cents: 1500      # $15 max open across all games (~2 positions)
+  max_per_game_exposure_cents: 700    # $7 max open per game (1 position at 70¢)
+  max_daily_loss_cents: 3000          # $30 daily loss limit — halt all trading
+  max_contracts_per_order: 10
 
 agent:
   min_yes_bid: 30
@@ -31,7 +27,7 @@ agent:
   take_profit_cents: 5       # 2026-05-13: aligned to backtest (was 8). Backtest used 5¢ TP across 112 trades, 40 of which hit TP at exactly 5-7¢.
   stop_loss_cents: 3         # 2026-05-13: aligned to backtest (was 5). Backtest SL was -3¢.
   max_hold_possessions: 6
-  position_size_contracts: 100
+  position_size_contracts: 10
   # 2026-05-19 pin-the-market: scanner locks on to the initial closest-to-50¢
   # market and only swaps when the LOCKED market drifts outside this band.
   # Wider than [min_yes_bid, max_yes_bid] on purpose — we'd rather sit idle on
