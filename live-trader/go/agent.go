@@ -1,15 +1,5 @@
 // Bandit — sits on top of the MMoE outputs and decides BUY_YES / BUY_NO / EXIT / WAIT.
 //
-// On 2026-05-11 the entry path and exit path were both realigned to the
-// validated backtest config. On 2026-05-21 the hazard exit was RESTORED at a
-// loosened threshold of 0.85 after a 110-game val-set sweep (see CLAUDE.md
-// "Head C" section) showed hazard exit adds +$3.3k net vs the no-hazard
-// baseline (216 trades / 47.7% WR / +$39,586 vs 200 / 48.5% / +$36,319). The
-// improvement is concentrated in Q1/Q2 entries where weak early-game runs
-// would otherwise bleed to time_gate. Threshold 0.85 (vs the previous 0.75)
-// addresses the friend's "fires on 38% of possessions" concern in paper
-// trading — fewer fires, marginally better net P&L.
-//
 // Entry gates (in order of evaluation):
 //   1. is_overtime (period >= 5)     → Wait
 //   2. is_garbage_time / is_blowout  → Wait
@@ -19,8 +9,7 @@
 //   6. current_run_length ≥ min      → Wait if below
 //   7. trajectory sign               → BuyYes (>0) or BuyNo (<0)
 //
-// Has-position branch: hazard[4] > max_hazard_for_hold → Exit, else Wait.
-// Router.CheckExit still owns TP / SL / TIME_STOP independently.
+// Has-position branch: always returns Wait — Router.CheckExit owns TP / SL / TIME_STOP.
 package main
 
 type Action string
@@ -46,10 +35,9 @@ type BetaParams struct {
 type Bandit struct {
 	minYesBid         int
 	maxYesBid         int
-	minRunProbEntry   float32 // Head A gate — restored 2026-05-11
+	minRunProbEntry   float32 // Head A gate (threshold=0.0 in live config = effectively off)
 	minAbsTrajEntry   float32 // Head B confidence (backtest: 0.08)
 	minRunLengthEntry float32 // momentum filter (backtest: 2)
-	maxHazardForHold  float32 // Head C exit gate (backtest sweep 2026-05-21: 0.85)
 	params            map[ContextKey][4]BetaParams // reserved for future bandit
 }
 
@@ -60,7 +48,6 @@ func NewBandit(cfg *Config) *Bandit {
 		minRunProbEntry:   cfg.Agent.MinRunProbEntry,
 		minAbsTrajEntry:   cfg.Agent.MinAbsTrajEntry,
 		minRunLengthEntry: float32(cfg.Agent.MinRunLengthEntry),
-		maxHazardForHold:  cfg.Agent.MaxHazardForHold,
 		params:            make(map[ContextKey][4]BetaParams),
 	}
 }
@@ -70,11 +57,8 @@ func NewBandit(cfg *Config) *Bandit {
 // "which gate blocked entry on possession N?" without re-running anything.
 //
 // Conditional gates use *bool so JSON null distinguishes "not reached" from
-// "reached and false":
-//   - RunProbPass / TrajMagnitudePass / RunLengthPass — only set in the
-//     no-position branch, in evaluation order. First failing gate is named
-//     in FirstBlocking.
-//   - HazardExitPass — only set in the has-position branch.
+// "reached and false". RunProbPass / TrajMagnitudePass / RunLengthPass are
+// only set in the no-position branch.
 type GateResult struct {
 	IsOvertime        bool    `json:"is_overtime"`
 	IsGarbageTime     bool    `json:"is_garbage_time"`
@@ -89,7 +73,6 @@ type GateResult struct {
 	CurrentRunLength  float32 `json:"current_run_length"`
 	RunLengthPass     *bool   `json:"run_length_pass"`
 	TrajectorySign    string  `json:"trajectory_sign"` // "pos" | "neg" | "zero"
-	HazardExitPass    *bool   `json:"hazard_exit_pass"`
 	FirstBlocking     string  `json:"first_blocking,omitempty"`
 }
 
@@ -143,16 +126,10 @@ func (b *Bandit) Decide(resp *PossessionResponse, hasPosition bool) (Action, Gat
 		return Wait, g
 	}
 
-	// Has-position branch: hazard[4] > max_hazard_for_hold → Exit, else Wait.
-	// Router.CheckExit independently handles TP / SL / TIME_STOP — hazard
-	// here is the model's "this run is dying" signal layered on top.
+	// Has-position branch: Router.CheckExit owns TP / SL / TIME_STOP.
+	// Bandit always returns Wait here.
 	if hasPosition {
-		hazardExit := resp.Hazard[4] > b.maxHazardForHold
-		g.HazardExitPass = &hazardExit
-		if hazardExit {
-			return Exit, g
-		}
-		g.FirstBlocking = "hazard_exit_pass"
+		g.FirstBlocking = "holding_position"
 		return Wait, g
 	}
 

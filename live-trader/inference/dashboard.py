@@ -240,6 +240,21 @@ canvas{width:100%!important;height:100%!important}
   <div class="signal-sub" id="sigSub">Connect to a game to begin</div>
 </div>
 
+<!-- Open Position Panel -->
+<div class="cd" id="posPanel" style="display:none;margin-bottom:14px;border:2px solid var(--g)">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+    <div class="ct" style="margin:0">Open Position</div>
+    <div id="posHeld" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--td)"></div>
+  </div>
+  <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px">
+    <div class="mkt-item"><div class="v" id="posDir">--</div><div class="l">DIRECTION</div></div>
+    <div class="mkt-item"><div class="v" id="posEntry">--¢</div><div class="l">ENTRY</div></div>
+    <div class="mkt-item"><div class="v" id="posCur">--¢</div><div class="l">CURRENT</div></div>
+    <div class="mkt-item"><div class="v" id="posUnreal">--</div><div class="l">UNREALIZED</div></div>
+    <div class="mkt-item"><div class="v" id="posSize">--</div><div class="l">CONTRACTS</div></div>
+  </div>
+</div>
+
 <!-- Row 1: Run Prob | Price Direction | Momentum -->
 <div class="g3">
   <div class="cd">
@@ -291,6 +306,14 @@ canvas{width:100%!important;height:100%!important}
       <div class="tot"><div class="v" id="tPnl" style="color:var(--g)">$0</div><div class="l">Net P&L</div></div>
       <div class="tot"><div class="v" id="tWR">--</div><div class="l">Win Rate</div></div>
     </div>
+    <div style="margin-top:12px">
+      <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--td);margin-bottom:4px">
+        <span>Daily Loss Limit</span><span id="riskLbl">$0 / $20</span>
+      </div>
+      <div style="height:6px;background:var(--s2);border-radius:3px;overflow:hidden">
+        <div id="riskBar" style="height:100%;width:0%;background:var(--g);border-radius:3px;transition:width .4s,background .4s"></div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -304,6 +327,7 @@ canvas{width:100%!important;height:100%!important}
 
 <script>
 let es, sigs=0, trds=0, pnl=0, wins=0;
+let openPos = null, entryPossId = 0, currentPossId = 0;
 let homeTeam = 'HOME', awayTeam = 'AWAY';
 let yesTeam = '', noTeam = '';     // who BUY_YES / BUY_NO is actually backing
 let currentMarketTicker = '';      // updated from each SSE message
@@ -361,6 +385,8 @@ function go(){
   document.getElementById('glab').textContent='Connecting...';
   document.getElementById('dot').className='dot';
   document.getElementById('log').innerHTML='';
+  openPos = null; entryPossId = 0; currentPossId = 0;
+  document.getElementById('posPanel').style.display = 'none';
   es=new EventSource('/game/'+id+'/stream');
   es.onopen=()=>{document.getElementById('dot').className='dot on';document.getElementById('glab').textContent='Live — '+id};
   es.onmessage=(e)=>upd(JSON.parse(e.data));
@@ -392,22 +418,36 @@ function upd(d){
 
     if (t.action === 'ENTRY') {
       trds++; document.getElementById('tTrd').textContent = trds;
+      openPos = {direction: t.direction, price: t.price, size: t.size};
+      entryPossId = currentPossId;
+      const panel = document.getElementById('posPanel');
+      panel.style.display = 'block';
       const dColor = t.direction === 'YES' ? '#22c55e' : '#ef4444';
       const backing = t.direction === 'YES' ? (tradeYesTeam || 'YES') : (tradeNoTeam || 'NO');
-      // Team is the dominant info; (YES/NO) is secondary. Ticker appended in
-      // muted text so you can audit which exact contract was bought.
+      const dirEl = document.getElementById('posDir');
+      dirEl.textContent = backing; dirEl.style.color = dColor;
+      document.getElementById('posEntry').textContent = t.price+'¢';
+      document.getElementById('posSize').textContent = t.size+'x';
+      document.getElementById('posUnreal').textContent = '--';
+      document.getElementById('posUnreal').style.color = 'var(--td)';
       ll.innerHTML = `<span style="color:#6b7280">${ts}</span> <span style="color:${dColor};font-weight:700;font-size:13px">BUY ${backing}</span> <span style="color:#6b7280">(${t.direction})</span> · ${t.size} @ ${t.price}¢ <span style="color:#6b7280">· ${t.market_ticker || ''}</span>`;
     } else {
+      openPos = null;
+      document.getElementById('posPanel').style.display = 'none';
       pnl += t.pnl;
       if (t.pnl > 0) wins++;
       const pnlColor = t.pnl > 0 ? '#22c55e' : '#ef4444';
       const pnlSign = t.pnl > 0 ? '+' : '';
       const wasBacking = t.direction === 'YES' ? (tradeYesTeam || 'YES') : (tradeNoTeam || 'NO');
       ll.innerHTML = `<span style="color:#6b7280">${ts}</span> <span style="color:#eab308;font-weight:700;font-size:13px">EXIT ${wasBacking}</span> <span style="color:#6b7280">(${t.reason})</span> · @ ${t.price}¢ · P&L: <span style="color:${pnlColor}">${pnlSign}$${t.pnl.toFixed(2)}</span>`;
-
       document.getElementById('tPnl').textContent = (pnl>0?'+':'')+'$'+pnl.toFixed(2);
       document.getElementById('tPnl').style.color = pnl>0?'#22c55e':'#ef4444';
       document.getElementById('tWR').textContent = ((wins/trds)*100).toFixed(0)+'%';
+      const lossUsed = Math.max(0, -pnl);
+      const pct = Math.min(100, lossUsed/20*100);
+      document.getElementById('riskBar').style.width = pct+'%';
+      document.getElementById('riskBar').style.background = pct>75?'var(--r)':pct>40?'var(--y)':'var(--g)';
+      document.getElementById('riskLbl').textContent = '-$'+lossUsed.toFixed(2)+' / $20';
     }
     
     const log = document.getElementById('tradeLog');
@@ -416,16 +456,20 @@ function upd(d){
   }
 
   const rp=d.run_prob||0, f=d.features||{}, tr=d.trajectory||[], hz=d.hazard||[];
+  // Gate variables — mirror the actual agent thresholds exactly
+  const bid=d.yes_bid||0, inBand=bid>=30&&bid<=70;
+  const trajAbs=Math.abs(tr[9]||0), runLen=f.current_run_length||0;
+  const shouldBuy=inBand&&trajAbs>=0.08&&runLen>=2&&!d.is_garbage_time&&!d.is_blowout;
 
-  // Signal banner — name the actual team being backed, not just YES/NO.
+  // Signal banner
   const sig=document.getElementById('sig'), st=document.getElementById('sigTxt'), ss=document.getElementById('sigSub');
-  if(rp>=0.10 && tr[9]>0){
+  if(shouldBuy && tr[9]>0){
     const team = yesTeam || 'YES';
     sig.className='signal buy';
     st.textContent='★ BUY ' + team;
     st.style.color='#22c55e';
     ss.textContent='Run detected + price rising → backing ' + team + ' to cover';
-  } else if(rp>=0.10 && tr[9]<0){
+  } else if(shouldBuy && tr[9]<0){
     const team = noTeam || 'NO';
     sig.className='signal buy';
     st.textContent='★ BUY ' + team;
@@ -433,7 +477,20 @@ function upd(d){
     ss.textContent='Run detected + price falling → backing ' + team;
   } else {
     sig.className='signal'; st.textContent='WAIT'; st.style.color='#9ca3af';
-    ss.textContent='No scoring run detected · monitoring possessions';
+    ss.textContent='No signal · traj='+(tr[9]||0).toFixed(3)+' run='+runLen+(inBand?'':' band✗');
+  }
+
+  // Open position live update
+  currentPossId = d.possession_id || 0;
+  if (openPos) {
+    const curPrice = openPos.direction==='YES' ? (d.yes_bid||0) : (100-(d.yes_ask||0));
+    const unrealized = (curPrice-openPos.price)*openPos.size/100;
+    const uSign = unrealized>=0?'+':'';
+    document.getElementById('posCur').textContent = curPrice+'¢';
+    const uE=document.getElementById('posUnreal');
+    uE.textContent = uSign+'$'+Math.abs(unrealized).toFixed(2);
+    uE.style.color = unrealized>=0?'var(--g)':'var(--r)';
+    document.getElementById('posHeld').textContent = (currentPossId-entryPossId)+' poss held';
   }
 
   // Run probability
@@ -509,17 +566,21 @@ function upd(d){
 
   // Log
   const ll=document.createElement('div');ll.className='ll';
-  const ts=new Date().toLocaleTimeString();
-  const rc=rp>=.10?'color:#22c55e':'color:#9ca3af';
+  const ts=d.clock_str||new Date().toLocaleTimeString();
+  const rc=shouldBuy?'color:#22c55e':'color:#9ca3af';
   const tc=tr[9]>0?'color:#22c55e':tr[9]<0?'color:#ef4444':'color:#9ca3af';
+  const gBand=inBand?'<span style="color:var(--g)">B✓</span>':'<span style="color:var(--r)">B✗</span>';
+  const gTraj=trajAbs>=0.08?'<span style="color:var(--g)">T✓</span>':'<span style="color:var(--r)">T✗</span>';
+  const gRun=runLen>=2?'<span style="color:var(--g)">R✓</span>':'<span style="color:var(--r)">R✗</span>';
+  const gStr=d.is_garbage_time?' <span style="color:var(--y)">GARBAGE</span>':d.is_blowout?' <span style="color:var(--y)">BLOWOUT</span>':`${gBand}${gTraj}${gRun}`;
   ll.innerHTML='<span style="color:#6b7280">'+ts+'</span> '+
     'Run:<span style="'+rc+';font-weight:600"> '+(rp*100).toFixed(1)+'%</span> · '+
     'Price:<span style="'+tc+'"> '+(tr[9]>0?'↑':'↓')+Math.abs(tr[9]||0).toFixed(3)+'</span> · '+
-    'Bid:'+(d.yes_bid||0)+'¢';
+    'Bid:'+bid+'¢ '+gStr;
   const log=document.getElementById('log');
   log.appendChild(ll);log.scrollTop=log.scrollHeight;
 
-  if(rp>=.10){sigs++;document.getElementById('tSig').textContent=sigs}
+  if(shouldBuy){sigs++;document.getElementById('tSig').textContent=sigs}
 }
 </script>
 </body>

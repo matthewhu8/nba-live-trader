@@ -368,6 +368,8 @@ async def game_possession(game_id: str, request: PossessionRequest):
         "is_garbage_time": is_garbage_time,
         "is_blowout":    is_blowout,
         "pipeline_ms":   pipeline_ms,
+        "clock_str":     clock_str,
+        "period":        row.period,
         "features":      features,
         "market_ticker": state.market_ticker,
     })

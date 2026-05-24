@@ -156,8 +156,12 @@ func (g *GameEngine) Run(ctx context.Context) {
 	var wins int
 	var totalPipelineMS int64
 
+	mode := "PAPER"
+	if !g.cfg.Trading.PaperMode {
+		mode = "LIVE"
+	}
 	log.Println("──────────────────────────────────────────────────────")
-	log.Printf("  PAPER TRADING ENGINE STARTED FOR %s", g.gameID)
+	log.Printf("  %s TRADING ENGINE STARTED FOR %s", mode, g.gameID)
 	log.Println("──────────────────────────────────────────────────────")
 
 	// game_start records the engine going live for this game. Captures the
@@ -250,13 +254,9 @@ func (g *GameEngine) Run(ctx context.Context) {
 					}
 				}
 
-				if action == Exit {
-					shouldExit = true
-					reason = "HAZARD_EXIT"
-					pnl = calcNetPnL(openPosition.Size, openPosition.EntryPrice, currentPrice)
-				}
-
 				if shouldExit {
+					exitTicker, _ := activeMarketTicker.Load().(string)
+					router.PlaceExit(ctx, exitTicker, openPosition, currentPrice)
 					g.ledger.RecordExit(g.gameID, openPosition.Size, openPosition.EntryPrice, currentPrice)
 					possHeld := possCount - openPosition.EntryPossID
 					logger.EmitExit(g.gameID, reason, openPosition, currentPrice, pnl, possHeld)
@@ -273,7 +273,6 @@ func (g *GameEngine) Run(ctx context.Context) {
 						"traj_final":       resp.Trajectory[9],
 						"hazard5":          resp.Hazard[4],
 					})
-					exitTicker, _ := activeMarketTicker.Load().(string)
 					go inference.ReportTrade(g.gameID, TradePayload{
 						Action:       "EXIT",
 						Direction:    openPosition.Direction,
@@ -312,8 +311,9 @@ func (g *GameEngine) Run(ctx context.Context) {
 				if action == BuyNo {
 					direction = "NO"
 				}
+				size := kellyContracts(resp.Trajectory[9], g.cfg.Risk.MaxContractsPerOrder)
 				approved, blockReason := g.ledger.Check(
-					string(action), g.gameID, resp.YesBid, g.cfg.Agent.PositionSizeContracts,
+					string(action), g.gameID, resp.YesBid, size,
 				)
 				if !approved {
 					log.Printf("[RISK] order blocked: %s", blockReason)
@@ -323,7 +323,8 @@ func (g *GameEngine) Run(ctx context.Context) {
 						"reason":        blockReason,
 					})
 				} else {
-					pos := router.Place(g.gameID, resp, possCount, &g.cfg, direction)
+					entryTicker, _ := activeMarketTicker.Load().(string)
+					pos := router.Place(ctx, entryTicker, g.gameID, resp, possCount, size, direction)
 					if pos != nil {
 						g.ledger.RecordFill(g.gameID, pos.Size, pos.EntryPrice)
 						openPosition = pos
@@ -335,14 +336,13 @@ func (g *GameEngine) Run(ctx context.Context) {
 							"direction":     pos.Direction,
 							"entry_price":   pos.EntryPrice,
 							"size":          pos.Size,
-							"fee_dollars":   makerFee(pos.Size, pos.EntryPrice),
+							"kelly_size":    size,
+							"traj_final":    resp.Trajectory[9],
 							"yes_bid":       resp.YesBid,
 							"yes_ask":       resp.YesAsk,
 							"run_prob":      resp.RunProb,
-							"traj_final":    resp.Trajectory[9],
 							"hazard5":       resp.Hazard[4],
 						})
-						entryTicker, _ := activeMarketTicker.Load().(string)
 						go inference.ReportTrade(g.gameID, TradePayload{
 							Action:       "ENTRY",
 							Direction:    pos.Direction,

@@ -17,7 +17,6 @@ func newBacktestBandit() *Bandit {
 	cfg.Agent.MinRunProbEntry = 0.15
 	cfg.Agent.MinAbsTrajEntry = 0.08
 	cfg.Agent.MinRunLengthEntry = 2
-	cfg.Agent.MaxHazardForHold = 0.85
 	return NewBandit(&cfg)
 }
 
@@ -97,15 +96,12 @@ func TestDecideBacktestConfig(t *testing.T) {
 		{"at_upper_band_eligible", resp(withBid(70), withRunProb(0.5), withTraj9(-0.5), withRunLen(5)), false, BuyNo, ""},
 		{"band_takes_precedence_over_strong_signal", resp(withBid(80), withRunProb(0.5), withTraj9(0.5), withRunLen(5)), false, Wait, "in_price_band"},
 
-		// ── Has-position branch — hazard exit RESTORED at 0.85 (2026-05-21) ──
-		// Bandit returns Exit when hazard[4] > max_hazard_for_hold (0.85).
-		// Below threshold → Wait (router still owns TP/SL/TIME_STOP).
-		{"position_high_hazard_exits", resp(withHaz4(0.99)), true, Exit, ""},
-		{"position_just_above_threshold_exits", resp(withHaz4(0.851)), true, Exit, ""},
-		{"position_at_threshold_waits", resp(withHaz4(0.85)), true, Wait, "hazard_exit_pass"},
-		{"position_below_threshold_waits", resp(withHaz4(0.5)), true, Wait, "hazard_exit_pass"},
-		{"position_zero_hazard_waits", resp(), true, Wait, "hazard_exit_pass"},
-		{"position_max_hazard_exits", resp(withHaz4(1.0)), true, Exit, ""},
+		// ── Has-position branch — bandit always Waits; Router owns TP/SL/TIME_STOP ──
+		{"position_high_hazard_waits", resp(withHaz4(0.99)), true, Wait, "holding_position"},
+		{"position_mid_hazard_waits", resp(withHaz4(0.851)), true, Wait, "holding_position"},
+		{"position_low_hazard_waits", resp(withHaz4(0.5)), true, Wait, "holding_position"},
+		{"position_zero_hazard_waits", resp(), true, Wait, "holding_position"},
+		{"position_max_hazard_waits", resp(withHaz4(1.0)), true, Wait, "holding_position"},
 
 		// ── Entry path: run_prob gate (PRIMARY, restored 2026-05-11) ─────
 		{"run_prob_zero_blocks", resp(withRunProb(0.0), withTraj9(0.5), withRunLen(5)), false, Wait, "run_prob_pass"},
@@ -181,25 +177,20 @@ func TestDecideBacktestConfig(t *testing.T) {
 func TestGateResultInvariants(t *testing.T) {
 	b := newBacktestBandit()
 
-	// has_position=true → bandit returns Wait or Exit (never BuyYes/BuyNo).
-	// Entry-side gates must remain nil; the held-position branch only sets
-	// HazardExitPass. All three cases below sit below the hazard threshold
-	// (0.85) so they should all Wait.
+	// has_position=true → bandit always returns Wait (never BuyYes/BuyNo/Exit).
+	// Entry-side gates must remain nil.
 	for _, r := range []*PossessionResponse{
-		resp(withHaz4(0.84)),
+		resp(withHaz4(0.99)),
 		resp(withHaz4(0.5)),
 		resp(withRunProb(0.5), withTraj9(0.5), withRunLen(5)), // even strong entry signal
 	} {
 		action, g := b.Decide(r, true)
 		if action != Wait {
-			t.Errorf("has_position=true with sub-threshold hazard must return Wait, got %v (resp=%+v)", action, r)
+			t.Errorf("has_position=true must always return Wait, got %v (resp=%+v)", action, r)
 		}
 		if g.RunProbPass != nil || g.TrajMagnitudePass != nil || g.RunLengthPass != nil {
 			t.Errorf("entry gates should be nil when has_position=true (got rp=%v traj=%v rl=%v)",
 				g.RunProbPass, g.TrajMagnitudePass, g.RunLengthPass)
-		}
-		if g.HazardExitPass == nil {
-			t.Errorf("hazard_exit_pass must be populated when has_position=true (resp=%+v)", r)
 		}
 	}
 

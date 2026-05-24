@@ -154,10 +154,10 @@ def _build_feature_dict(
 
 
 def _compute_maker_fees(entry_price: float, exit_price: float, contracts: int) -> float:
-    """Maker fee for both entry and exit legs."""
-    entry_fee = 0.0175 * contracts * (entry_price / 100.0)
-    exit_fee  = 0.0175 * contracts * (exit_price / 100.0)
-    return entry_fee + exit_fee
+    """Maker fees for both entry and exit legs.
+    Kalshi charges $0 for resting (maker) orders on standard markets.
+    """
+    return 0.0
 
 
 # ── Per-game replay ──────────────────────────────────────────────────────────
