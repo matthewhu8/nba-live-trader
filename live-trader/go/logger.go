@@ -117,6 +117,13 @@ func (l *Logger) EmitPossession(
 		trajSign = "+"
 	}
 
+	// Parser-skip events (mid-possession fouls, offensive rebounds, etc.) have
+	// no model output and no dashboard broadcast — suppress from terminal to
+	// avoid false impression of a WAIT with zero model signal.
+	if resp.Action == "SKIP" {
+		return
+	}
+
 	actionLabel := resp.Action
 	if event.IsBackfill {
 		actionLabel = "BACKFILL"

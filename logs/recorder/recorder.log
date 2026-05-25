@@ -14499,3 +14499,25 @@ Traceback (most recent call last):
     ...<2 lines>...
     )
 RuntimeError: KALSHI_KEY_ID/API_KEY_ID and either PRIVATE_RSA_KEY_PEM, KALSHI_PEM_PATH, or PRIVATE_RSA_KEY must be set
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/Users/matthewhu/Code/Kalshi-Live-Game-Trading/data/ingestion/kalshi_recorder.py", line 572, in <module>
+    asyncio.run(main())
+    ~~~~~~~~~~~^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.4/Frameworks/Python.framework/Versions/3.13/lib/python3.13/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ~~~~~~~~~~^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.4/Frameworks/Python.framework/Versions/3.13/lib/python3.13/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.4/Frameworks/Python.framework/Versions/3.13/lib/python3.13/asyncio/base_events.py", line 725, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "/Users/matthewhu/Code/Kalshi-Live-Game-Trading/data/ingestion/kalshi_recorder.py", line 540, in main
+    auth = kalshi_auth_from_env()
+  File "/Users/matthewhu/Code/Kalshi-Live-Game-Trading/data/ingestion/../../data/ingestion/kalshi_historical_client.py", line 185, in kalshi_auth_from_env
+    raise RuntimeError(
+    ...<2 lines>...
+    )
+RuntimeError: KALSHI_KEY_ID/API_KEY_ID and either PRIVATE_RSA_KEY_PEM, KALSHI_PEM_PATH, or PRIVATE_RSA_KEY must be set

@@ -242,7 +242,7 @@ async def game_possession(game_id: str, request: PossessionRequest):
                 pipeline_ms   = pipeline_ms,
             )
         return PossessionResponse(
-            action          = "WAIT",
+            action          = "SKIP",
             run_prob        = 0.0,
             trajectory      = [0.0] * 10,
             hazard          = [0.0] * 10,
