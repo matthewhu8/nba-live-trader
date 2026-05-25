@@ -1,13 +1,12 @@
 // Bandit — sits on top of the MMoE outputs and decides BUY_YES / BUY_NO / EXIT / WAIT.
 //
-// Entry gates (in order of evaluation):
-//   1. is_overtime (period >= 5)     → Wait
-//   2. is_garbage_time / is_blowout  → Wait
-//   3. in_price_band  [30..70]       → Wait if outside
-//   4. run_prob ≥ min_run_prob_entry → Wait if below
-//   5. |traj_final| ≥ min_abs_traj   → Wait if below
-//   6. current_run_length ≥ min      → Wait if below
-//   7. trajectory sign               → BuyYes (>0) or BuyNo (<0)
+// Entry gates (matched to backtest, in order of evaluation):
+//  1. is_garbage_time / is_blowout  → Wait
+//  2. in_price_band  [30..70]       → Wait if outside
+//  3. run_prob ≥ min_run_prob_entry → Wait if below
+//  4. |traj_final| ≥ min_abs_traj   → Wait if below
+//  5. current_run_length ≥ min     → Wait if below
+//  6. trajectory sign               → BuyYes (>0) or BuyNo (<0)
 //
 // Has-position branch: always returns Wait — Router.CheckExit owns TP / SL / TIME_STOP.
 package main
@@ -18,7 +17,7 @@ const (
 	Wait   Action = "WAIT"
 	BuyYes Action = "BUY_YES"
 	BuyNo  Action = "BUY_NO"
-	Exit   Action = "EXIT"
+	Exit   Action = "EXIT" // retained for future use; bandit no longer returns this
 )
 
 type ContextKey struct {
@@ -35,9 +34,9 @@ type BetaParams struct {
 type Bandit struct {
 	minYesBid         int
 	maxYesBid         int
-	minRunProbEntry   float32 // Head A gate (threshold=0.0 in live config = effectively off)
-	minAbsTrajEntry   float32 // Head B confidence (backtest: 0.08)
-	minRunLengthEntry float32 // momentum filter (backtest: 2)
+	minRunProbEntry   float32                      // Head A gate (threshold=0.0 in live config = effectively off)
+	minAbsTrajEntry   float32                      // Head B confidence (backtest: 0.08)
+	minRunLengthEntry float32                      // momentum filter (backtest: 2)
 	params            map[ContextKey][4]BetaParams // reserved for future bandit
 }
 
@@ -129,6 +128,7 @@ func (b *Bandit) Decide(resp *PossessionResponse, hasPosition bool) (Action, Gat
 	// Has-position branch: Router.CheckExit owns TP / SL / TIME_STOP.
 	// Bandit always returns Wait here.
 	if hasPosition {
+		g.FirstBlocking = "holding_position"
 		g.FirstBlocking = "holding_position"
 		return Wait, g
 	}

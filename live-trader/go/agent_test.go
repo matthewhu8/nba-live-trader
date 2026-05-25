@@ -34,12 +34,22 @@ func resp(opts ...func(*PossessionResponse)) *PossessionResponse {
 	return r
 }
 
-func withBid(v int) func(*PossessionResponse)      { return func(r *PossessionResponse) { r.YesBid = v } }
-func withRunProb(v float32) func(*PossessionResponse) { return func(r *PossessionResponse) { r.RunProb = v } }
-func withTraj9(v float32) func(*PossessionResponse) { return func(r *PossessionResponse) { r.Trajectory[9] = v } }
-func withHaz4(v float32) func(*PossessionResponse)  { return func(r *PossessionResponse) { r.Hazard[4] = v } }
-func withGarbage() func(*PossessionResponse)        { return func(r *PossessionResponse) { r.IsGarbageTime = true } }
-func withBlowout() func(*PossessionResponse)        { return func(r *PossessionResponse) { r.IsBlowout = true } }
+func withBid(v int) func(*PossessionResponse) { return func(r *PossessionResponse) { r.YesBid = v } }
+func withRunProb(v float32) func(*PossessionResponse) {
+	return func(r *PossessionResponse) { r.RunProb = v }
+}
+func withTraj9(v float32) func(*PossessionResponse) {
+	return func(r *PossessionResponse) { r.Trajectory[9] = v }
+}
+func withHaz4(v float32) func(*PossessionResponse) {
+	return func(r *PossessionResponse) { r.Hazard[4] = v }
+}
+func withGarbage() func(*PossessionResponse) {
+	return func(r *PossessionResponse) { r.IsGarbageTime = true }
+}
+func withBlowout() func(*PossessionResponse) {
+	return func(r *PossessionResponse) { r.IsBlowout = true }
+}
 func withRunLen(v float32) func(*PossessionResponse) {
 	return func(r *PossessionResponse) {
 		if r.Features == nil {
@@ -198,8 +208,8 @@ func TestGateResultInvariants(t *testing.T) {
 	// trades. RunProbPass should ALWAYS be populated since it's the first
 	// entry gate.
 	for _, r := range []*PossessionResponse{
-		resp(withRunProb(0.05)),                                // blocked at run_prob
-		strongEntrySignal(),                                    // passes everything → trades
+		resp(withRunProb(0.05)), // blocked at run_prob
+		strongEntrySignal(),     // passes everything → trades
 		resp(withRunProb(0.3), withTraj9(0.05), withRunLen(5)), // blocked at traj
 	} {
 		_, g := b.Decide(r, false)

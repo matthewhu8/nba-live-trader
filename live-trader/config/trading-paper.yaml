@@ -1,0 +1,38 @@
+# Paper trading configuration — inference on port 8002, Go reads this via --config
+# paper_mode: true is the default — set to false only for real money
+
+trading:
+  paper_mode: true
+
+inference:
+  base_url: "http://localhost:8002"
+  timeout_ms: 500
+
+risk:
+  max_total_exposure_cents: 20000     # $200 max open across all games
+  max_per_game_exposure_cents: 10000  # $100 max open per game
+  max_daily_loss_cents: 10000         # $100 daily loss limit — halt all trading
+  max_contracts_per_order: 100
+
+agent:
+  min_yes_bid: 30
+  max_yes_bid: 70
+  min_run_prob_entry: 0.0
+  min_abs_traj_entry: 0.08
+  min_run_length_entry: 2
+  take_profit_cents: 5
+  stop_loss_cents: 3
+  max_hold_possessions: 6
+  position_size_contracts: 100
+  market_drift_low_bid: 20
+  market_drift_high_bid: 80
+
+feeds:
+  nba_poll_interval_ms: 3000
+  kalshi_stale_threshold_ms: 30000
+
+observability:
+  redis_stream: "possession_events"
+  log_level: "info"
+
+feature_cols_checksum: "83_cols_v1"
