@@ -2,7 +2,7 @@
 # paper_mode: true is the default — set to false only for real money
 
 trading:
-  paper_mode: true
+  paper_mode: false
 
 inference:
   base_url: "http://localhost:8001"
@@ -13,7 +13,7 @@ risk:
   max_total_exposure_cents: 1000      # $10 max open across all games
   max_per_game_exposure_cents: 500    # $5 max open per game
   max_daily_loss_cents: 2000          # $20 daily loss limit — halt all trading
-  max_contracts_per_order: 5          # Kelly sizes 1–5; this is the hard cap
+  max_contracts_per_order: 15          # Kelly sizes 1–5; this is the hard cap
 
 agent:
   min_yes_bid: 30
