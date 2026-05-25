@@ -34,12 +34,22 @@ func resp(opts ...func(*PossessionResponse)) *PossessionResponse {
 	return r
 }
 
-func withBid(v int) func(*PossessionResponse)      { return func(r *PossessionResponse) { r.YesBid = v } }
-func withRunProb(v float32) func(*PossessionResponse) { return func(r *PossessionResponse) { r.RunProb = v } }
-func withTraj9(v float32) func(*PossessionResponse) { return func(r *PossessionResponse) { r.Trajectory[9] = v } }
-func withHaz4(v float32) func(*PossessionResponse)  { return func(r *PossessionResponse) { r.Hazard[4] = v } }
-func withGarbage() func(*PossessionResponse)        { return func(r *PossessionResponse) { r.IsGarbageTime = true } }
-func withBlowout() func(*PossessionResponse)        { return func(r *PossessionResponse) { r.IsBlowout = true } }
+func withBid(v int) func(*PossessionResponse) { return func(r *PossessionResponse) { r.YesBid = v } }
+func withRunProb(v float32) func(*PossessionResponse) {
+	return func(r *PossessionResponse) { r.RunProb = v }
+}
+func withTraj9(v float32) func(*PossessionResponse) {
+	return func(r *PossessionResponse) { r.Trajectory[9] = v }
+}
+func withHaz4(v float32) func(*PossessionResponse) {
+	return func(r *PossessionResponse) { r.Hazard[4] = v }
+}
+func withGarbage() func(*PossessionResponse) {
+	return func(r *PossessionResponse) { r.IsGarbageTime = true }
+}
+func withBlowout() func(*PossessionResponse) {
+	return func(r *PossessionResponse) { r.IsBlowout = true }
+}
 func withRunLen(v float32) func(*PossessionResponse) {
 	return func(r *PossessionResponse) {
 		if r.Features == nil {
@@ -96,10 +106,9 @@ func TestDecideBacktestConfig(t *testing.T) {
 		{"at_upper_band_eligible", resp(withBid(70), withRunProb(0.5), withTraj9(-0.5), withRunLen(5)), false, BuyNo, ""},
 		{"band_takes_precedence_over_strong_signal", resp(withBid(80), withRunProb(0.5), withTraj9(0.5), withRunLen(5)), false, Wait, "in_price_band"},
 
-		// ── Has-position branch — bandit always waits, router handles exits ──
-		// (Hazard exit is REMOVED to match the backtest. The router's
-		//  CheckExit gates on TP/SL/TIME_STOP only.)
-		{"position_high_hazard_no_longer_exits", resp(withHaz4(0.99)), true, Wait, "holding_position"},
+		// ── Has-position branch — bandit always Waits; Router owns TP/SL/TIME_STOP ──
+		{"position_high_hazard_waits", resp(withHaz4(0.99)), true, Wait, "holding_position"},
+		{"position_mid_hazard_waits", resp(withHaz4(0.851)), true, Wait, "holding_position"},
 		{"position_low_hazard_waits", resp(withHaz4(0.5)), true, Wait, "holding_position"},
 		{"position_zero_hazard_waits", resp(), true, Wait, "holding_position"},
 		{"position_max_hazard_waits", resp(withHaz4(1.0)), true, Wait, "holding_position"},
@@ -178,16 +187,16 @@ func TestDecideBacktestConfig(t *testing.T) {
 func TestGateResultInvariants(t *testing.T) {
 	b := newBacktestBandit()
 
-	// has_position=true → bandit must always return Wait with no entry-side
-	// gates populated. The router owns exit decisions, not the bandit.
+	// has_position=true → bandit always returns Wait (never BuyYes/BuyNo/Exit).
+	// Entry-side gates must remain nil.
 	for _, r := range []*PossessionResponse{
-		resp(withHaz4(0.9)),
+		resp(withHaz4(0.99)),
 		resp(withHaz4(0.5)),
 		resp(withRunProb(0.5), withTraj9(0.5), withRunLen(5)), // even strong entry signal
 	} {
 		action, g := b.Decide(r, true)
 		if action != Wait {
-			t.Errorf("has_position=true must return Wait, got %v (resp=%+v)", action, r)
+			t.Errorf("has_position=true must always return Wait, got %v (resp=%+v)", action, r)
 		}
 		if g.RunProbPass != nil || g.TrajMagnitudePass != nil || g.RunLengthPass != nil {
 			t.Errorf("entry gates should be nil when has_position=true (got rp=%v traj=%v rl=%v)",
@@ -199,8 +208,8 @@ func TestGateResultInvariants(t *testing.T) {
 	// trades. RunProbPass should ALWAYS be populated since it's the first
 	// entry gate.
 	for _, r := range []*PossessionResponse{
-		resp(withRunProb(0.05)),                                // blocked at run_prob
-		strongEntrySignal(),                                    // passes everything → trades
+		resp(withRunProb(0.05)), // blocked at run_prob
+		strongEntrySignal(),     // passes everything → trades
 		resp(withRunProb(0.3), withTraj9(0.05), withRunLen(5)), // blocked at traj
 	} {
 		_, g := b.Decide(r, false)

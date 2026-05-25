@@ -117,6 +117,13 @@ func (l *Logger) EmitPossession(
 		trajSign = "+"
 	}
 
+	// Parser-skip events (mid-possession fouls, offensive rebounds, etc.) have
+	// no model output and no dashboard broadcast — suppress from terminal to
+	// avoid false impression of a WAIT with zero model signal.
+	if resp.Action == "SKIP" {
+		return
+	}
+
 	actionLabel := resp.Action
 	if event.IsBackfill {
 		actionLabel = "BACKFILL"
@@ -145,7 +152,7 @@ func (l *Logger) EmitPossession(
 //
 // Example:
 //
-//	2026-04-29T20:15:45Z  ★ BUY_YES  run=0.23  traj=+0.09  bid=52¢  100×  fee=$0.91  game=0042500121
+//	2026-04-29T20:15:45Z  ★ BUY_YES  run=0.23  traj=+0.09  bid=52¢  3×  game=0042500121
 func (l *Logger) EmitEntry(gameID string, pos *PaperPosition, resp *PossessionResponse) {
 	trajFinal := resp.Trajectory[9]
 	trajSign := ""
@@ -153,17 +160,14 @@ func (l *Logger) EmitEntry(gameID string, pos *PaperPosition, resp *PossessionRe
 		trajSign = "+"
 	}
 
-	fee := makerFee(pos.Size, pos.EntryPrice)
-
 	line := fmt.Sprintf(
-		"%s  ★ BUY_%s  run=%.2f  traj=%s%.2f  bid=%d¢  %d×  fee=$%.2f  game=%s",
+		"%s  ★ BUY_%s  run=%.2f  traj=%s%.2f  bid=%d¢  %d×  game=%s",
 		ts(),
 		pos.Direction,
 		resp.RunProb,
 		trajSign, trajFinal,
 		pos.EntryPrice,
 		pos.Size,
-		fee,
 		gameID,
 	)
 

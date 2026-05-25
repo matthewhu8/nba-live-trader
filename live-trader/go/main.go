@@ -98,6 +98,15 @@ func main() {
 		"pid":        os.Getpid(),
 	})
 
+	// In live mode, fail fast if credentials are missing or malformed
+	// rather than silently placing no orders.
+	if !cfg.Trading.PaperMode {
+		if _, err := GetKalshiAuthHeaders("GET", "/portfolio/balance"); err != nil {
+			log.Fatalf("[LIVE] credential check failed: %v\n  Set KALSHI_KEY_ID and KALSHI_PEM_PATH in .env", err)
+		}
+		log.Println("[LIVE] credentials verified ✓ — REAL MONEY MODE")
+	}
+
 	ks := NewKillSwitch()
 	ledger := NewLedger(RiskConfig{
 		MaxTotalExposureCents:   cfg.Risk.MaxTotalExposureCents,
@@ -145,8 +154,8 @@ func defaultConfig() Config {
 		}{
 			MinYesBid: 30, MaxYesBid: 70, MinRunProbEntry: 0.0,
 			MinAbsTrajEntry: 0.08, MinRunLengthEntry: 2,
-			TakeProfitCents: 5, StopLossCents: 3, MaxHoldPossessions: 6,
-			PositionSizeContracts: 100,
+			TakeProfitCents: 5, StopLossCents: 3, MaxHoldPossessions: 14,
+			PositionSizeContracts: 5,
 			MarketDriftLowBid: 20, MarketDriftHighBid: 80,
 		},
 		Feeds: struct {

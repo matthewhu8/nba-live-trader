@@ -9,45 +9,36 @@ inference:
   timeout_ms: 500
 
 risk:
-  # 2026-05-18 mid-OKC-game: the original limits were sized for ~30-contract
-  # trades but we run at 100 contracts (matching the +$37,409 backtest).
-  # 100 × ~55¢ = $55 per trade, so per-game $20 blocked every trade.
-  # Sized now to comfortably hold one 100-contract position at any price
-  # in the 30-70¢ band, plus headroom for one held-position-while-signal.
-  max_total_exposure_cents: 20000     # $200 max open across all games
-  max_per_game_exposure_cents: 10000  # $100 max open per game
-  max_daily_loss_cents: 10000         # $100 daily loss limit — halt all trading
-  max_contracts_per_order: 100
+  # Sized for max 5 contracts. Worst case: 5 × 70¢ = 350¢ exposure per trade.
+  max_total_exposure_cents: 1000      # $10 max open across all games
+  max_per_game_exposure_cents: 500    # $5 max open per game
+  max_daily_loss_cents: 2000          # $20 daily loss limit — halt all trading
+  max_contracts_per_order: 15          # Kelly sizes 1–5; this is the hard cap
 
 agent:
   min_yes_bid: 30
   max_yes_bid: 70
-  # All entry gates below match the validated backtest config exactly:
-  #   python -m backtesting.mmoe_backtest --use-traj-for-side --min-abs-traj 0.08 --min-run-length 2 --hold-seconds 240
-  # Apr 7 → May 10 val set: 112 trades, 41.1% win rate, +$9,977 net (per 100 contracts).
-  min_run_prob_entry: 0.0       # 2026-05-18: dropped to 0.0 per Matt's retrain backtest (110 val games on new entropy-regularized model). Tightening this threshold reduces P&L monotonically — Head A run_prob filter is worse than Head B trajectory filter at separating winners from losers. Backtest at 0.0: 207 trades, 47.8% win, +$37,409 vs 71 trades / +$9,865 at 0.15. Effective gating is now |traj_final|≥0.08, run_length≥2, 30–70¢ band.
-  min_abs_traj_entry: 0.08      # Head B confidence
+  # Entry gates match the validated backtest config exactly:
+  #   python -m backtesting.mmoe_backtest --use-traj-for-side --min-abs-traj 0.08
+  #     --min-run-length 2 --hold-seconds 240
+  #   207 trades, 47.8% win rate, +$37,409 net (110 val games)
+  min_run_prob_entry: 0.0
+  min_abs_traj_entry: 0.08      # Head B confidence gate
   min_run_length_entry: 2       # momentum filter
-  take_profit_cents: 5       # 2026-05-13: aligned to backtest (was 8). Backtest used 5¢ TP across 112 trades, 40 of which hit TP at exactly 5-7¢.
-  stop_loss_cents: 3         # 2026-05-13: aligned to backtest (was 5). Backtest SL was -3¢.
-  max_hold_possessions: 6
-  position_size_contracts: 100
-  # 2026-05-19 pin-the-market: scanner locks on to the initial closest-to-50¢
-  # market and only swaps when the LOCKED market drifts outside this band.
-  # Wider than [min_yes_bid, max_yes_bid] on purpose — we'd rather sit idle on
-  # the same logical bet than swap to a sibling contract (which inverts the
-  # meaning of traj_final and corrupts the model's assumptions).
+  take_profit_cents: 5
+  stop_loss_cents: 3
+  max_hold_possessions: 14      # ~240s at 17s/possession — matches backtest hold_seconds=240
+  position_size_contracts: 5    # fallback default; Kelly will vary 1–5 based on |traj_final|
   market_drift_low_bid: 20
   market_drift_high_bid: 80
 
 feeds:
   nba_poll_interval_ms: 3000
-  kalshi_stale_threshold_ms: 30000   # emit stale sentinel after 30s silence
+  kalshi_stale_threshold_ms: 30000
 
 observability:
   redis_stream: "possession_events"
   log_level: "info"
 
 # Feature column order — must match models/mmoe/feature_config.py ALL_FEATURE_COLS
-# Go reads this to align the 83-float vector sent to/from Python
-feature_cols_checksum: "83_cols_v1"  # bump when feature_config.py changes
+feature_cols_checksum: "83_cols_v1"
