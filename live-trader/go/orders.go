@@ -253,16 +253,29 @@ func calcNetPnL(size, entryPrice, exitPrice int) float64 {
 	return float64(exitPrice-entryPrice) * float64(size) / 100.0
 }
 
-// kellyContracts scales position size 1–maxContracts based on |traj_final|.
-// Linear scale: 0.08→1, 0.12→2, 0.16→3, 0.20→4, 0.24+→maxContracts.
+// kellyContracts scales position size linearly from the entry threshold.
+//
+// Formula: (|traj| - 0.10) × 100, floored at 5.
+//   0.15 → 5   (minimum signal → minimum size)
+//   0.20 → 10
+//   0.25 → 15
+//   0.30 → 20
+//   0.40 → 30
+//   0.50 → 40
+//   0.60 → 50  (capped at maxContracts)
+//
+// Anchoring at 0.10 (below the 0.15 entry threshold) means size is
+// zero-based on our actual confidence above noise — a traj just barely
+// clearing the gate gets the minimum 5, not an inflated count.
+// Break-even win rate at 5 contracts is 41.3% vs ~48% expected.
 func kellyContracts(trajFinal float32, maxContracts int) int {
 	abs := trajFinal
 	if abs < 0 {
 		abs = -abs
 	}
-	n := int((abs-0.04)/0.04)
-	if n < 1 {
-		n = 1
+	n := int((abs - 0.10) * 100)
+	if n < 5 {
+		n = 5
 	}
 	if n > maxContracts {
 		n = maxContracts

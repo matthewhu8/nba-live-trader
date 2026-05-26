@@ -60,10 +60,31 @@ func (g *GameEngine) Run(ctx context.Context) {
 		runIDForPy = g.run.ID
 		logDirForPy = g.run.LogDir
 	}
-	if err := inference.StartGame(ctx, g.gameID, g.eventTicker, homeID, awayID, runIDForPy, logDirForPy); err != nil {
-		log.Printf("[WARN] StartGame failed: %v — inference will return zeros", err)
-	} else {
-		log.Printf("[INIT] Python game session started")
+	const startRetries = 3
+	var startErr error
+	for attempt := 1; attempt <= startRetries; attempt++ {
+		startErr = inference.StartGame(ctx, g.gameID, g.eventTicker, homeID, awayID, runIDForPy, logDirForPy)
+		if startErr == nil {
+			log.Printf("[INIT] Python game session started")
+			break
+		}
+		log.Printf("[WARN] StartGame attempt %d/%d failed: %v", attempt, startRetries, startErr)
+		if attempt < startRetries {
+			select {
+			case <-time.After(3 * time.Second):
+			case <-ctx.Done():
+				return
+			}
+		}
+	}
+	if startErr != nil {
+		log.Printf("[ERROR] StartGame failed after %d attempts — aborting game %s: %v", startRetries, g.gameID, startErr)
+		g.jsonLog.Emit("error", g.gameID, map[string]interface{}{
+			"where":   "start_game",
+			"message": startErr.Error(),
+			"fatal":   true,
+		})
+		return
 	}
 
 	ringBuffer := NewRingBuffer()
