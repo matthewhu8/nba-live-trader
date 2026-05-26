@@ -326,6 +326,12 @@ canvas{width:100%!important;height:100%!important}
 </div>
 
 <script>
+// kalshiMakerFee: fee = ceil(0.0175 × C × P × (1-P) × 100) / 100
+function kalshiMakerFee(contracts, priceCents) {
+  const p = priceCents / 100;
+  return Math.ceil(0.0175 * contracts * p * (1 - p) * 100) / 100;
+}
+
 let es, sigs=0, trds=0, pnl=0, wins=0;
 let openPos = null, entryPossId = 0, currentPossId = 0;
 let homeTeam = 'HOME', awayTeam = 'AWAY';
@@ -434,12 +440,17 @@ function upd(d){
     } else {
       openPos = null;
       document.getElementById('posPanel').style.display = 'none';
-      pnl += t.pnl;
-      if (t.pnl > 0) wins++;
-      const pnlColor = t.pnl > 0 ? '#22c55e' : '#ef4444';
-      const pnlSign = t.pnl > 0 ? '+' : '';
+      // Compute round-trip maker fees: entry leg + exit leg
+      const entryFee = t.entry_price ? kalshiMakerFee(t.size, t.entry_price) : 0;
+      const exitFee  = kalshiMakerFee(t.size, t.price);
+      const netPnl   = t.pnl - entryFee - exitFee;
+      pnl += netPnl;
+      if (netPnl > 0) wins++;
+      const pnlColor = netPnl > 0 ? '#22c55e' : '#ef4444';
+      const pnlSign = netPnl >= 0 ? '+' : '';
+      const feeStr = `fees $${(entryFee+exitFee).toFixed(2)}`;
       const wasBacking = t.direction === 'YES' ? (tradeYesTeam || 'YES') : (tradeNoTeam || 'NO');
-      ll.innerHTML = `<span style="color:#6b7280">${ts}</span> <span style="color:#eab308;font-weight:700;font-size:13px">EXIT ${wasBacking}</span> <span style="color:#6b7280">(${t.reason})</span> · @ ${t.price}¢ · P&L: <span style="color:${pnlColor}">${pnlSign}$${t.pnl.toFixed(2)}</span>`;
+      ll.innerHTML = `<span style="color:#6b7280">${ts}</span> <span style="color:#eab308;font-weight:700;font-size:13px">EXIT ${wasBacking}</span> <span style="color:#6b7280">(${t.reason})</span> · @ ${t.price}¢ · P&L: <span style="color:${pnlColor}">${pnlSign}$${netPnl.toFixed(2)}</span> <span style="color:#6b7280;font-size:11px">${feeStr}</span>`;
       document.getElementById('tPnl').textContent = (pnl>0?'+':'')+'$'+pnl.toFixed(2);
       document.getElementById('tPnl').style.color = pnl>0?'#22c55e':'#ef4444';
       document.getElementById('tWR').textContent = ((wins/trds)*100).toFixed(0)+'%';

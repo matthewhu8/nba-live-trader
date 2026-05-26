@@ -183,7 +183,8 @@ func (c *InferenceClient) ProcessPossession(
 type TradePayload struct {
 	Action       string  `json:"action"`
 	Direction    string  `json:"direction"`
-	Price        int     `json:"price"`
+	Price        int     `json:"price"`       // exit price on EXIT, entry price on ENTRY
+	EntryPrice   int     `json:"entry_price"` // entry price on EXIT (for fee calculation); 0 on ENTRY
 	Size         int     `json:"size"`
 	PnL          float64 `json:"pnl"`
 	Reason       string  `json:"reason"`

@@ -90,7 +90,10 @@ class FeatureComputer:
         home_sustain     = _is_sustainable(state.home_scored_poss)
         away_sustain     = _is_sustainable(state.away_scored_poss)
 
-        # TODO: shot_quality_trend (needs prev-window xPPP — deque maxlen=5 doesn't keep it)
+        # Shot quality trend: improvement (+) or decline (-) in xPPP vs prior 5-poss window.
+        # Zero until both teams have filled their first full window (5 scored possessions).
+        home_traj = (home_xppp - state.home_prev_xppp) if state.home_prev_xppp > 0.0 else 0.0
+        away_traj = (away_xppp - state.away_prev_xppp) if state.away_prev_xppp > 0.0 else 0.0
 
         return {
             "home_points_last_5_poss":   float(home_last_5),
@@ -110,8 +113,8 @@ class FeatureComputer:
             "away_xPPP_last_5":          away_xppp,
             "home_actual_vs_expected_PPP": home_actual_ppp - home_xppp,
             "away_actual_vs_expected_PPP": away_actual_ppp - away_xppp,
-            "home_shot_quality_trend":   0.0,    # TODO
-            "away_shot_quality_trend":   0.0,    # TODO
+            "home_shot_quality_trend":   home_traj,
+            "away_shot_quality_trend":   away_traj,
             "shot_value":                float(possession.shot_value),
             "shot_distance":             possession.shot_distance,
         }
@@ -128,7 +131,7 @@ class FeatureComputer:
         minutes_elapsed = ((period - 1) * 12) + (720.0 - clock_secs) / 60.0
         minutes_remaining = max(0.1, 48.0 - minutes_elapsed)
 
-        is_blowout      = abs(score_diff) > 20
+        is_blowout      = abs(score_diff) > 30
         is_garbage_time = is_blowout and period == 4 and clock_secs < 360
 
         # Team fouls → bonus state

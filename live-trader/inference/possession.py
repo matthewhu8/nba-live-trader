@@ -115,10 +115,17 @@ def _handle_period(event: dict, state: "GameState") -> Optional[PossessionRow]:
     if is_end:
         # Flush any pending missed shot (the period ended with a miss + no rebound)
         if state.missed_shot_team:
-            row = _build_row(state, clock, period, team_scored="", points=0,
-                             shot_value=0, shot_distance=0.0, shot_area="")
+            shot_dist = state.missed_shot_dist
+            shot_area = state.missed_shot_area
+            shot_val  = state.missed_shot_val
             state.missed_shot_team = ""
-            state.ft_in_seq        = False
+            state.missed_shot_dist = 0.0
+            state.missed_shot_area = ""
+            state.missed_shot_val  = 0
+            row = _build_row(state, clock, period, team_scored="", points=0,
+                             shot_value=shot_val, shot_distance=shot_dist,
+                             shot_area=shot_area)
+            state.ft_in_seq = False
             state._reset_poss_flags()
             return row
         state.ft_in_seq = False
@@ -154,6 +161,9 @@ def _handle_field_goal(event: dict, state: "GameState") -> Optional[PossessionRo
     if shot_result == "Made":
         state.ft_in_seq        = False
         state.missed_shot_team = ""
+        state.missed_shot_dist = 0.0
+        state.missed_shot_area = ""
+        state.missed_shot_val  = 0
         row = _build_row(state, clock, period,
                          team_scored=team_side, points=shot_val,
                          shot_value=shot_val, shot_distance=shot_dist,
@@ -162,8 +172,11 @@ def _handle_field_goal(event: dict, state: "GameState") -> Optional[PossessionRo
         state._reset_poss_flags()
         return row
     else:
-        # Missed — wait for rebound
+        # Missed — preserve shot geometry for when the rebound ends the possession
         state.missed_shot_team = team_side
+        state.missed_shot_dist = shot_dist
+        state.missed_shot_area = shot_area
+        state.missed_shot_val  = shot_val
         state.possessing_team  = team_side
         return None
 
@@ -244,11 +257,19 @@ def _handle_rebound(event: dict, state: "GameState") -> Optional[PossessionRow]:
         state.missed_shot_team = ""
         return None
 
-    # Defensive rebound — end the missed team's possession as a stop
+    # Defensive rebound — end the missed team's possession as a stop.
+    # Carry the shot geometry (distance, area, value) so the model knows
+    # what kind of shot was attempted even though it didn't score.
+    shot_dist = state.missed_shot_dist
+    shot_area = state.missed_shot_area
+    shot_val  = state.missed_shot_val
     state.missed_shot_team = ""
+    state.missed_shot_dist = 0.0
+    state.missed_shot_area = ""
+    state.missed_shot_val  = 0
     row = _build_row(state, clock, period,
-                     team_scored="", points=0, shot_value=0,
-                     shot_distance=0.0, shot_area="")
+                     team_scored="", points=0, shot_value=shot_val,
+                     shot_distance=shot_dist, shot_area=shot_area)
     state.possessing_team = reb_side or _flip(state.possessing_team)
     state._reset_poss_flags()
     return row

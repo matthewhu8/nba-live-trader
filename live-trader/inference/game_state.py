@@ -73,6 +73,9 @@ class GameState:
 
     possessing_team:  str = ""   # "home" | "away" — current ball holder
     missed_shot_team: str = ""   # set after missed shot; cleared on rebound
+    missed_shot_dist: float = 0.0   # shot distance of the pending missed attempt
+    missed_shot_area: str = ""      # shot area of the pending missed attempt
+    missed_shot_val:  int = 0       # shot value (2 or 3) of the pending missed attempt
     pending_home_score: int = 0  # last known score (updated with each scoring event)
     pending_away_score: int = 0
 
@@ -95,6 +98,10 @@ class GameState:
     recent_possessions:   deque = field(default_factory=lambda: deque(maxlen=20))
     home_scored_poss:     deque = field(default_factory=lambda: deque(maxlen=5))
     away_scored_poss:     deque = field(default_factory=lambda: deque(maxlen=5))
+    # Shot quality trend: xPPP mean of the window *before* the current 5-poss window.
+    # Updated when a new scored possession evicts the oldest from the deque.
+    home_prev_xppp: float = 0.0
+    away_prev_xppp: float = 0.0
     possession_durations: deque = field(default_factory=lambda: deque(maxlen=10))
 
     # ── Prediction history cache ──────────────────────────────────────────────
@@ -221,8 +228,12 @@ class GameState:
 
         # CDN sends two events per substitution: subType "out" then "in"
         if sub_type == "out":
-            if player_id in lineup:
-                lineup.remove(player_id)
+            if player_id not in lineup:
+                # Player wasn't tracked — they must be a starter who never
+                # appeared in a prior sub event. Add them so the lineup
+                # reflects who was actually on court before this sub.
+                lineup.append(player_id)
+            lineup.remove(player_id)
         elif sub_type == "in":
             if player_id not in lineup:
                 lineup.append(player_id)
@@ -249,9 +260,12 @@ class GameState:
             self.away_team_fouls[period] = self.away_team_fouls.get(period, 0) + 1
 
         self.poss_had_foul = True
-        if "shooting" in sub_type:
+        # CDN sends sub_type="personal" for all non-technical fouls; shooting
+        # fouls are only distinguishable via the description field ("S.FOUL").
+        desc = (event.get("description") or "").upper()
+        if "shooting" in sub_type or "S.FOUL" in desc:
             self.poss_had_shooting_foul = True
-        elif "personal" in sub_type:
+        elif "personal" in sub_type or not sub_type:
             self.poss_had_personal_foul = True
 
     def _handle_timeout(self, event: dict) -> None:
@@ -317,8 +331,13 @@ class GameState:
             xppp          = possession.xppp,
         )
         if possession.team_scored == "home":
+            # Capture current window mean before it rolls over
+            if len(self.home_scored_poss) == self.home_scored_poss.maxlen:
+                self.home_prev_xppp = sum(p.xppp for p in self.home_scored_poss) / len(self.home_scored_poss)
             self.home_scored_poss.append(sp)
         else:
+            if len(self.away_scored_poss) == self.away_scored_poss.maxlen:
+                self.away_prev_xppp = sum(p.xppp for p in self.away_scored_poss) / len(self.away_scored_poss)
             self.away_scored_poss.append(sp)
 
     def _update_pace(self, possession: Any) -> None:

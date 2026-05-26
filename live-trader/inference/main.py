@@ -283,7 +283,7 @@ async def game_possession(game_id: str, request: PossessionRequest):
     ))
 
     is_garbage_time = features.get("garbage_time_risk", 0.0) >= 1.0
-    is_blowout      = abs(features.get("score_diff", 0.0)) > 20
+    is_blowout      = abs(features.get("score_diff", 0.0)) > 30
     clock_str       = f"Q{row.period} {int(row.game_clock_secs // 60)}:{int(row.game_clock_secs % 60):02d}"
     traj_final      = output.trajectory[-1] if output.trajectory else 0.0
     pipeline_ms     = int((time.time() - t0) * 1000)
