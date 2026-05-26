@@ -263,7 +263,7 @@ func readGitSHA() string {
 func detectEnvPresent() map[string]bool {
 	keys := []string{
 		"KALSHI_KEY_ID",
-		"KALSHI_PRIVATE_KEY_FILE",
+		"KALSHI_PEM_PATH",
 		"MOTHERDUCK_TOKEN",
 	}
 	out := make(map[string]bool, len(keys))

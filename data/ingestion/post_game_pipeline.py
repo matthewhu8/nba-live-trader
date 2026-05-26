@@ -873,9 +873,6 @@ def run_post_game_pipeline(game_date: date, games: list[GameInfo]) -> None:
     # Phase 0
     upsert_dim_games(games, game_date)
 
-    # Phase 4 (Moved up to ensure pregame features are calculated before games finish)
-    build_pregame_features_phase(games, game_date)
-
     # Phase 1
     parsed = fetch_and_parse_all(games)
     if not parsed:

@@ -98,10 +98,99 @@ async def _sleep_until(target: datetime) -> None:
         await asyncio.sleep(delta)
 
 
+CATCHUP_DAYS = 7   # look back this many days for unprocessed games on startup
+
+
 def _run_pipeline_sync(game_date: date, games: list[GameInfo]) -> None:
-    # Deferred import: keeps cold start fast and avoids circular import risk
     from data.ingestion.post_game_pipeline import run_post_game_pipeline
     run_post_game_pipeline(game_date, games)
+
+
+def _run_pregame_prefill_sync(tomorrow: date) -> None:
+    """
+    Compute and insert features.pregame rows for tomorrow's games so
+    load_pregame() finds real data at tip-off time instead of zeroed defaults.
+
+    Runs at 3 AM ET after tonight's ratings have been updated (Phase 3 already
+    wrote fresh player_ratings / lineup_ratings / team_ratings), so the pregame
+    features are computed with the most current ratings available.
+    """
+    from data.ingestion.post_game_pipeline import (
+        _md_connect, upsert_dim_games, build_pregame_features_phase,
+    )
+    games = get_todays_games(tomorrow)
+    if not games:
+        logger.info("Pregame prefill: no games found for %s", tomorrow.isoformat())
+        return
+    conn = _md_connect()
+    try:
+        # Ensure dim_games rows exist for tomorrow's games so the pregame
+        # feature queries can join on game_id → team tricodes.
+        upsert_dim_games(games, tomorrow)
+    finally:
+        conn.close()
+    build_pregame_features_phase(games, tomorrow)
+    logger.info(
+        "Pregame prefill: inserted features for %d game(s) on %s",
+        len(games), tomorrow.isoformat(),
+    )
+
+
+def _catchup_missed_games(lookback_days: int = CATCHUP_DAYS) -> None:
+    """
+    On daemon startup, check the last `lookback_days` days for games that are
+    in dim_games but missing from possession_flat, and re-run the pipeline for
+    each missed date.  Idempotent — safe to run every startup.
+    """
+    from data.ingestion.post_game_pipeline import _md_connect, _get_unprocessed_games
+    today = date.today()
+    conn = _md_connect()
+    try:
+        start = (today - timedelta(days=lookback_days)).isoformat()
+        rows = conn.execute(
+            "SELECT game_id, game_date, home_team, away_team FROM dim_games "
+            "WHERE game_date >= ? ORDER BY game_date",
+            [start],
+        ).fetchall()
+    finally:
+        conn.close()
+
+    if not rows:
+        return
+
+    all_ids = [r[0] for r in rows]
+    unprocessed = set(_get_unprocessed_games(all_ids))
+    if not unprocessed:
+        logger.info("Catch-up: all games from last %d days already processed", lookback_days)
+        return
+
+    # Group unprocessed game_ids back by date
+    from collections import defaultdict
+    by_date: dict[date, list] = defaultdict(list)
+    for game_id, game_date_raw, home_team, away_team in rows:
+        if game_id not in unprocessed:
+            continue
+        gd = game_date_raw if isinstance(game_date_raw, date) else date.fromisoformat(str(game_date_raw))
+        # Reconstruct a minimal GameInfo — only game_id, home_team, visitor_team used by pipeline
+        by_date[gd].append(GameInfo(
+            game_id      = game_id,
+            home_team    = home_team,
+            visitor_team = away_team,
+            tipoff_et    = "",
+            tipoff_utc   = datetime(gd.year, gd.month, gd.day, tzinfo=timezone.utc),
+            game_status  = "3",
+        ))
+
+    logger.info(
+        "Catch-up: found %d unprocessed game(s) across %d date(s) — backfilling",
+        len(unprocessed), len(by_date),
+    )
+    for gd in sorted(by_date):
+        logger.info("Catch-up: running pipeline for %s (%d games)", gd.isoformat(), len(by_date[gd]))
+        try:
+            _run_pipeline_sync(gd, by_date[gd])
+        except Exception:
+            logger.exception("Catch-up: pipeline failed for %s — continuing", gd.isoformat())
 
 
 async def run_daemon() -> None:
@@ -110,6 +199,13 @@ async def run_daemon() -> None:
     auth = _build_auth()
 
     logger.info("Kalshi recorder daemon started")
+
+    # On startup, backfill any games missed while the daemon was down
+    loop = asyncio.get_event_loop()
+    try:
+        await loop.run_in_executor(None, _catchup_missed_games)
+    except Exception:
+        logger.exception("Startup catch-up failed — continuing")
 
     while True:
         today    = date.today()
@@ -143,7 +239,7 @@ async def run_daemon() -> None:
         upcoming = [g for g in games if g.tipoff_utc > now - timedelta(hours=MAX_GAME_HOURS)]
         skipped  = len(games) - len(upcoming)
         if skipped:
-            logger.info("Skipping %d already-finished game(s)", skipped)
+            logger.info("Skipping %d already-finished game(s) for recording", skipped)
 
         if not upcoming:
             logger.info("All games for %s already finished — moving to tomorrow", game_date.isoformat())
@@ -167,14 +263,24 @@ async def run_daemon() -> None:
         if now < pipeline_at:
             await asyncio.sleep((pipeline_at - now).total_seconds())
 
+        # Pipeline: process ALL of tonight's games, not just the ones we recorded.
+        # Re-fetch the full list so games that were already finished at 7 AM still
+        # get their possession_flat + ratings rows updated.
         logger.info("Running post-game pipeline for %s", game_date.isoformat())
+        all_games_tonight = get_todays_games(game_date) or games
         try:
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, _run_pipeline_sync, game_date, upcoming)
+            await loop.run_in_executor(None, _run_pipeline_sync, game_date, all_games_tonight)
         except Exception:
             logger.exception("Post-game pipeline uncaught exception — continuing")
 
+        # Prefill pregame features for tomorrow so StartGame has real data at tip-off.
         tomorrow = game_date + timedelta(days=1)
+        logger.info("Prefilling pregame features for %s", tomorrow.isoformat())
+        try:
+            await loop.run_in_executor(None, _run_pregame_prefill_sync, tomorrow)
+        except Exception:
+            logger.exception("Pregame prefill failed — continuing")
+
         await _sleep_until(_schedule_fetch_utc(tomorrow))
 
 

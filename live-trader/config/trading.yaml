@@ -9,11 +9,11 @@ inference:
   timeout_ms: 500
 
 risk:
-  # Worst case at 10 contracts × 70¢ = 700¢ per trade.
-  max_total_exposure_cents: 1500      # $15 max open across all games
-  max_per_game_exposure_cents: 700    # $7 max open per game
+  # Worst case at 50 contracts × 70¢ = 3500¢ per trade.
+  max_total_exposure_cents: 4000      # $40 max open across all games
+  max_per_game_exposure_cents: 3500   # $35 max open per game
   max_daily_loss_cents: 2000          # $20 daily loss limit — halt all trading
-  max_contracts_per_order: 10         # Kelly sizes up to 10 contracts
+  max_contracts_per_order: 50         # Kelly sizes up to 50 contracts
 
 agent:
   min_yes_bid: 30
