@@ -135,7 +135,14 @@ func (g *GameEngine) Run(ctx context.Context) {
 			for {
 				select {
 				case tick := <-tickCh:
-					ringBuffer.Update(tick)
+					// Only accept ticks from the currently-subscribed market.
+					// After a swap, Kalshi may deliver a few more ticks from
+					// the old market before the unsubscribe is acknowledged —
+					// those would corrupt the ring buffer with stale prices.
+					cur, _ := activeMarketTicker.Load().(string)
+					if tick.MarketTicker == cur || cur == "" {
+						ringBuffer.Update(tick)
+					}
 				case <-ctx.Done():
 					return
 				}
@@ -277,6 +284,7 @@ func (g *GameEngine) Run(ctx context.Context) {
 						Action:       "EXIT",
 						Direction:    openPosition.Direction,
 						Price:        currentPrice,
+						EntryPrice:   openPosition.EntryPrice,
 						Size:         openPosition.Size,
 						PnL:          pnl,
 						Reason:       reason,

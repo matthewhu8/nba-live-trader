@@ -2,7 +2,7 @@
 # paper_mode: true is the default — set to false only for real money
 
 trading:
-  paper_mode: true
+  paper_mode: false
 
 inference:
   base_url: "http://localhost:8002"

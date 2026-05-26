@@ -467,7 +467,7 @@ def compute_player_ratings_ridge(
         poss = conn.execute(
             """
             SELECT game_id, home_lineup_id, away_lineup_id, team_scored, points
-            FROM possession_feed
+            FROM features.possession_flat
             WHERE game_id < ?
             ORDER BY game_id
             """,
@@ -772,7 +772,7 @@ def update_team_ratings_phase(parsed: dict[str, dict[str, pd.DataFrame]], as_of_
         league_avg_res = conn.execute("""
             SELECT AVG(pts * 100.0 / NULLIF(poss, 0)) FROM (
                 SELECT SUM(points) as pts, COUNT(*) as poss
-                FROM possession_feed WHERE possessing_team IN ('home', 'away')
+                FROM features.possession_flat WHERE possessing_team IN ('home', 'away')
                 GROUP BY game_id, possessing_team
             )
         """).fetchone()
@@ -802,7 +802,7 @@ def update_team_ratings_phase(parsed: dict[str, dict[str, pd.DataFrame]], as_of_
                 # Cumulative pace average across this team's games up to tonight
                 pace_res = conn.execute(f"""
                     SELECT AVG(pf.pace_season_baseline) 
-                    FROM possession_feed pf JOIN dim_games g ON pf.game_id = g.game_id 
+                    FROM features.possession_flat pf JOIN dim_games g ON pf.game_id = g.game_id
                     WHERE (g.home_team='{tricode}' OR g.away_team='{tricode}') 
                       AND pf.pace_season_baseline > 0 AND g.game_id <= '{game_id}'
                 """).fetchone()

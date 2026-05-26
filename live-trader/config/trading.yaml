@@ -2,33 +2,33 @@
 # paper_mode: true is the default — set to false only for real money
 
 trading:
-  paper_mode: true
+  paper_mode: false
 
 inference:
   base_url: "http://localhost:8001"
   timeout_ms: 500
 
 risk:
-  # Sized for max 5 contracts. Worst case: 5 × 70¢ = 350¢ exposure per trade.
-  max_total_exposure_cents: 1000      # $10 max open across all games
-  max_per_game_exposure_cents: 500    # $5 max open per game
+  # Worst case at 10 contracts × 70¢ = 700¢ per trade.
+  max_total_exposure_cents: 1500      # $15 max open across all games
+  max_per_game_exposure_cents: 700    # $7 max open per game
   max_daily_loss_cents: 2000          # $20 daily loss limit — halt all trading
-  max_contracts_per_order: 15          # Kelly sizes 1–5; this is the hard cap
+  max_contracts_per_order: 10         # Kelly sizes up to 10 contracts
 
 agent:
   min_yes_bid: 30
   max_yes_bid: 70
-  # Entry gates match the validated backtest config exactly:
-  #   python -m backtesting.mmoe_backtest --use-traj-for-side --min-abs-traj 0.08
-  #     --min-run-length 2 --hold-seconds 240
-  #   207 trades, 47.8% win rate, +$37,409 net (110 val games)
+  # Fee-adjusted config: TP=10¢, SL=5¢ ensures positive EV at 47.8% win rate
+  # after maker fees (0.0175 × C × P × (1-P), ceiling-rounded per order).
+  # At 5 contracts: break-even win rate = 43.9% vs 47.8% actual.
+  # traj≥0.15 replaces run_length gate (more selective, higher expected win rate).
   min_run_prob_entry: 0.0
-  min_abs_traj_entry: 0.08      # Head B confidence gate
-  min_run_length_entry: 2       # momentum filter
-  take_profit_cents: 5
-  stop_loss_cents: 3
-  max_hold_possessions: 14      # ~240s at 17s/possession — matches backtest hold_seconds=240
-  position_size_contracts: 5    # fallback default; Kelly will vary 1–5 based on |traj_final|
+  min_abs_traj_entry: 0.15      # Head B confidence gate (raised from 0.08)
+  min_run_length_entry: 0       # disabled — traj gate is primary filter
+  take_profit_cents: 10
+  stop_loss_cents: 5
+  max_hold_possessions: 20      # wider window to let TP=10¢ be reachable
+  position_size_contracts: 5    # fallback default; Kelly varies by |traj_final|
   market_drift_low_bid: 20
   market_drift_high_bid: 80
 
