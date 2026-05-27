@@ -9,25 +9,25 @@ inference:
   timeout_ms: 500
 
 risk:
-  # Worst case at 50 contracts × 70¢ = 3500¢ per trade.
-  max_total_exposure_cents: 4000      # $40 max open across all games
-  max_per_game_exposure_cents: 3500   # $35 max open per game
+  # Worst case at 10 contracts × 70¢ = 700¢ per trade.
+  max_total_exposure_cents: 1500      # $15 max open across all games
+  max_per_game_exposure_cents: 700    # $7 max open per game
   max_daily_loss_cents: 2000          # $20 daily loss limit — halt all trading
-  max_contracts_per_order: 50         # Kelly sizes up to 50 contracts
+  max_contracts_per_order: 10         # Kelly sizes up to 10 contracts
 
 agent:
   min_yes_bid: 30
   max_yes_bid: 70
-  # Fee-adjusted config: TP=10¢, SL=5¢ ensures positive EV at 47.8% win rate
-  # after maker fees (0.0175 × C × P × (1-P), ceiling-rounded per order).
-  # At 5 contracts: break-even win rate = 43.9% vs 47.8% actual.
-  # traj≥0.15 replaces run_length gate (more selective, higher expected win rate).
+  # Backtested config: TP=5¢, SL=3¢ validated against val set.
+  # traj≥0.15, TP=5, SL=3: 46 trades, 56.5% win rate, +$9,700 net (per 100C).
+  # traj≥0.15, TP=10, SL=5: 126 trades, ~25% win rate, -$1,700 net — TP too far.
+  # Break-even at TP=5/SL=3 is 37.5%; actual 56.5% gives strong margin.
   min_run_prob_entry: 0.0
-  min_abs_traj_entry: 0.15      # Head B confidence gate (raised from 0.08)
+  min_abs_traj_entry: 0.08      # Head B confidence gate; 0.08 → 104 trades, +$18K (per 100C) in val
   min_run_length_entry: 0       # disabled — traj gate is primary filter
-  take_profit_cents: 10
-  stop_loss_cents: 5
-  max_hold_possessions: 20      # wider window to let TP=10¢ be reachable
+  take_profit_cents: 5
+  stop_loss_cents: 3
+  max_hold_possessions: 20      # avg hold ~48s in backtest; gate rarely binds
   position_size_contracts: 5    # fallback default; Kelly varies by |traj_final|
   market_drift_low_bid: 20
   market_drift_high_bid: 80

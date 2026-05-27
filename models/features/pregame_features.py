@@ -42,19 +42,19 @@ def compute_pregame_features(
     # for backfilling history.
     for team, side in [(home_team, 'home'), (away_team, 'away')]:
         row = conn.execute(f"""
-            SELECT tr.off_rating, tr.def_rating, tr.net_rating
+            SELECT tr.ewma_off_rating, tr.ewma_def_rating, tr.ewma_net_rating
             FROM features.team_ratings tr
             JOIN dim_games g ON tr.as_of_game_id = g.game_id
-            WHERE tr.team_tricode = '{team}' 
+            WHERE tr.team_tricode = '{team}'
               AND g.game_date < '{game_date}'
             ORDER BY g.game_date DESC
             LIMIT 1
         """).fetchone()
-        
+
         if row:
             features[f'{side}_off_rating'] = row[0]
             features[f'{side}_def_rating'] = row[1]
-            
+
     # Computes pregame net rating delta (Home Net - Away Net)
     home_net = features['home_off_rating'] - features['home_def_rating']
     away_net = features['away_off_rating'] - features['away_def_rating']
@@ -179,10 +179,10 @@ def compute_pregame_features(
     for team, side in [(home_team, 'home'), (away_team, 'away')]:
         # Pace + Form fetched from our features.team_ratings table
         row = conn.execute(f"""
-            SELECT tr.avg_secs_per_poss, tr.last_5_net_ratings, tr.net_rating
+            SELECT tr.avg_secs_per_poss, tr.last_5_net_ratings, tr.ewma_net_rating
             FROM features.team_ratings tr
             JOIN dim_games g ON tr.as_of_game_id = g.game_id
-            WHERE tr.team_tricode = '{team}' 
+            WHERE tr.team_tricode = '{team}'
               AND g.game_date < '{game_date}'
             ORDER BY g.game_date DESC
             LIMIT 1

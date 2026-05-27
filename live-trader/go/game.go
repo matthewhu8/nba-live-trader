@@ -283,40 +283,49 @@ func (g *GameEngine) Run(ctx context.Context) {
 				}
 
 				if shouldExit {
-					exitTicker, _ := activeMarketTicker.Load().(string)
-					router.PlaceExit(ctx, exitTicker, openPosition, currentPrice)
-					g.ledger.RecordExit(g.gameID, openPosition.Size, openPosition.EntryPrice, currentPrice)
-					possHeld := possCount - openPosition.EntryPossID
-					logger.EmitExit(g.gameID, reason, openPosition, currentPrice, pnl, possHeld)
-					g.jsonLog.Emit("exit", g.gameID, map[string]interface{}{
-						"possession_id":    possCount,
-						"reason":           reason,
-						"direction":        openPosition.Direction,
-						"entry_price":      openPosition.EntryPrice,
-						"exit_price":       currentPrice,
-						"size":             openPosition.Size,
-						"net_pnl_dollars":  pnl,
-						"possessions_held": possHeld,
-						"run_prob":         resp.RunProb,
-						"traj_final":       resp.Trajectory[9],
-						"hazard5":          resp.Hazard[4],
-					})
-					go inference.ReportTrade(g.gameID, TradePayload{
-						Action:       "EXIT",
-						Direction:    openPosition.Direction,
-						Price:        currentPrice,
-						EntryPrice:   openPosition.EntryPrice,
-						Size:         openPosition.Size,
-						PnL:          pnl,
-						Reason:       reason,
-						MarketTicker: exitTicker,
-					})
-					netPnL += pnl
-					positionsClosed++
-					if pnl > 0 {
-						wins++
+					ok := router.PlaceExit(ctx, openPosition, currentPrice)
+					if !ok {
+						// Exit order failed — keep position open and retry next possession.
+						g.jsonLog.Emit("exit_retry", g.gameID, map[string]interface{}{
+							"possession_id": possCount,
+							"reason":        reason,
+							"entry_ticker":  openPosition.EntryTicker,
+							"exit_price":    currentPrice,
+						})
+					} else {
+						g.ledger.RecordExit(g.gameID, openPosition.Size, openPosition.EntryPrice, currentPrice)
+						possHeld := possCount - openPosition.EntryPossID
+						logger.EmitExit(g.gameID, reason, openPosition, currentPrice, pnl, possHeld)
+						g.jsonLog.Emit("exit", g.gameID, map[string]interface{}{
+							"possession_id":    possCount,
+							"reason":           reason,
+							"direction":        openPosition.Direction,
+							"entry_price":      openPosition.EntryPrice,
+							"exit_price":       currentPrice,
+							"size":             openPosition.Size,
+							"net_pnl_dollars":  pnl,
+							"possessions_held": possHeld,
+							"run_prob":         resp.RunProb,
+							"traj_final":       resp.Trajectory[9],
+							"hazard5":          resp.Hazard[4],
+						})
+						go inference.ReportTrade(g.gameID, TradePayload{
+							Action:       "EXIT",
+							Direction:    openPosition.Direction,
+							Price:        currentPrice,
+							EntryPrice:   openPosition.EntryPrice,
+							Size:         openPosition.Size,
+							PnL:          pnl,
+							Reason:       reason,
+							MarketTicker: openPosition.EntryTicker,
+						})
+						netPnL += pnl
+						positionsClosed++
+						if pnl > 0 {
+							wins++
+						}
+						openPosition = nil
 					}
-					openPosition = nil
 				} else {
 					possHeld := possCount - openPosition.EntryPossID
 					logger.EmitHold(g.gameID, openPosition, resp, possHeld)
@@ -355,6 +364,7 @@ func (g *GameEngine) Run(ctx context.Context) {
 					entryTicker, _ := activeMarketTicker.Load().(string)
 					pos := router.Place(ctx, entryTicker, g.gameID, resp, possCount, size, direction)
 					if pos != nil {
+						pos.EntryTicker = entryTicker
 						g.ledger.RecordFill(g.gameID, pos.Size, pos.EntryPrice)
 						openPosition = pos
 						signalCount++
@@ -399,6 +409,29 @@ func (g *GameEngine) Run(ctx context.Context) {
 		case <-ctx.Done():
 			if openPosition != nil {
 				positionsClosed++
+				if !g.cfg.Trading.PaperMode {
+					// Best-effort emergency close — use a fresh context since engineCtx is cancelled.
+					// MarketSnapshot.Features[0]=YesBid, Features[1]=YesAsk (cents as float32).
+					snap := ringBuffer.Snapshot()
+					yesBid := int(snap.Features[0])
+					yesAsk := int(snap.Features[1])
+					emergencyPrice := yesBid
+					if openPosition.Direction == "NO" {
+						emergencyPrice = 100 - yesAsk
+						if yesAsk == 0 {
+							emergencyPrice = 100 - yesBid
+						}
+					}
+					exitCtx, exitCancel := context.WithTimeout(context.Background(), 5*time.Second)
+					ok := router.PlaceExit(exitCtx, openPosition, emergencyPrice)
+					exitCancel()
+					g.jsonLog.Emit("emergency_exit", g.gameID, map[string]interface{}{
+						"direction":    openPosition.Direction,
+						"entry_ticker": openPosition.EntryTicker,
+						"exit_price":   emergencyPrice,
+						"sent":         ok,
+					})
+				}
 			}
 
 			avgPipeline := float64(0)
