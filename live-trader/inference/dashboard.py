@@ -468,9 +468,10 @@ function upd(d){
 
   const rp=d.run_prob||0, f=d.features||{}, tr=d.trajectory||[], hz=d.hazard||[];
   // Gate variables — mirror the actual agent thresholds exactly
+  // min_run_length_entry=0 means run gate is disabled (always passes)
   const bid=d.yes_bid||0, inBand=bid>=30&&bid<=70;
   const trajAbs=Math.abs(tr[9]||0), runLen=f.current_run_length||0;
-  const shouldBuy=inBand&&trajAbs>=0.08&&runLen>=2&&!d.is_garbage_time&&!d.is_blowout;
+  const shouldBuy=inBand&&trajAbs>=0.08&&!d.is_garbage_time&&!d.is_blowout;
 
   // Signal banner
   const sig=document.getElementById('sig'), st=document.getElementById('sigTxt'), ss=document.getElementById('sigSub');
@@ -582,7 +583,7 @@ function upd(d){
   const tc=tr[9]>0?'color:#22c55e':tr[9]<0?'color:#ef4444':'color:#9ca3af';
   const gBand=inBand?'<span style="color:var(--g)">B✓</span>':'<span style="color:var(--r)">B✗</span>';
   const gTraj=trajAbs>=0.08?'<span style="color:var(--g)">T✓</span>':'<span style="color:var(--r)">T✗</span>';
-  const gRun=runLen>=2?'<span style="color:var(--g)">R✓</span>':'<span style="color:var(--r)">R✗</span>';
+  const gRun='<span style="color:var(--g)">R✓</span>'; // min_run_length=0 → always passes
   const gStr=d.is_garbage_time?' <span style="color:var(--y)">GARBAGE</span>':d.is_blowout?' <span style="color:var(--y)">BLOWOUT</span>':`${gBand}${gTraj}${gRun}`;
   ll.innerHTML='<span style="color:#6b7280">'+ts+'</span> '+
     'Run:<span style="'+rc+';font-weight:600"> '+(rp*100).toFixed(1)+'%</span> · '+

@@ -35,6 +35,7 @@ func NewRouter(apiKey string, paperMode bool) *Router {
 // PaperPosition records an open trade entry (paper or live).
 type PaperPosition struct {
 	GameID      string
+	EntryTicker string    // Kalshi market ticker at entry — used for exits (active market may swap mid-game)
 	Direction   string    // "YES" or "NO"
 	EntryPrice  int       // cents
 	Size        int       // contracts
@@ -185,10 +186,12 @@ func (r *Router) Place(
 }
 
 // PlaceExit sends a live limit sell order to close an open position.
-// No-op in paper mode — paper exits are tracked in-process only.
-func (r *Router) PlaceExit(ctx context.Context, ticker string, pos *PaperPosition, exitPrice int) {
+// Always uses pos.EntryTicker — the market where the position was opened —
+// not the current active market, which may have swapped since entry.
+// Returns true if the order was sent (paper always returns true).
+func (r *Router) PlaceExit(ctx context.Context, pos *PaperPosition, exitPrice int) bool {
 	if r.paperMode {
-		return
+		return true
 	}
 
 	side := "yes"
@@ -197,7 +200,7 @@ func (r *Router) PlaceExit(ctx context.Context, ticker string, pos *PaperPositio
 	}
 
 	req := kalshiOrderRequest{
-		Ticker:        ticker,
+		Ticker:        pos.EntryTicker,
 		Action:        "sell",
 		Side:          side,
 		Type:          "limit",
@@ -213,13 +216,15 @@ func (r *Router) PlaceExit(ctx context.Context, ticker string, pos *PaperPositio
 
 	if _, err := placeKalshiOrder(ctx, req); err != nil {
 		zlog.Error().Err(err).
-			Str("ticker", ticker).
+			Str("ticker", pos.EntryTicker).
 			Str("entry_order_id", pos.OrderID).
 			Str("direction", pos.Direction).
 			Int("exit_price", exitPrice).
 			Int("size", pos.Size).
 			Msg("live exit order failed")
+		return false
 	}
+	return true
 }
 
 // CheckExit evaluates whether an open position should be closed.

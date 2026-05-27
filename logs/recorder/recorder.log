@@ -14565,3 +14565,17 @@ Traceback (most recent call last):
     ...<2 lines>...
     )
 RuntimeError: KALSHI_KEY_ID/API_KEY_ID and either PRIVATE_RSA_KEY_PEM, KALSHI_PEM_PATH, or PRIVATE_RSA_KEY must be set
+2026-05-26T22:30:01  INFO      Starting Kalshi recorder | PID=29701 | series=KXNBASPREAD | max_spread=3 | max_runtime=7.0h
+2026-05-26T22:30:01  INFO      Discovered 6 moneyline-proxy markets (spread ≤ 3)
+2026-05-26T22:30:01  INFO      Subscribed to 6 markets
+2026-05-26T22:35:03  INFO      Flushed 1054 rows | session ticks: 1054 | elapsed: 0.1h
+2026-05-26T22:40:03  INFO      Flushed 1007 rows | session ticks: 2061 | elapsed: 0.2h
+2026-05-26T22:45:04  INFO      Flushed 911 rows | session ticks: 2972 | elapsed: 0.3h
+2026-05-26T22:50:05  INFO      Flushed 1421 rows | session ticks: 4393 | elapsed: 0.3h
+2026-05-26T22:55:06  INFO      Flushed 993 rows | session ticks: 5386 | elapsed: 0.4h
+2026-05-26T23:00:07  INFO      Flushed 1193 rows | session ticks: 6579 | elapsed: 0.5h
+2026-05-26T23:05:08  INFO      Flushed 1393 rows | session ticks: 7972 | elapsed: 0.6h
+2026-05-26T23:10:09  INFO      Flushed 539 rows | session ticks: 8511 | elapsed: 0.7h
+2026-05-26T23:15:23  INFO      Flushed 392 rows | session ticks: 8903 | elapsed: 0.8h
+2026-05-26T23:30:01  WARNING   Recorder already running as PID 29701 — exiting. Kill that process first if it is stuck: kill 29701
+2026-05-26T23:31:21  INFO      Flushed 17 rows | session ticks: 8920 | elapsed: 1.0h
