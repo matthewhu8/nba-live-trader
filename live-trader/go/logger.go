@@ -39,13 +39,17 @@ type GameSummary struct {
 // Logger writes human-readable event lines to stdout and, for trade events,
 // to a per-game file under logs/paper_trades/.
 type Logger struct {
-	paperMode   bool
-	redisStream string
-	logFile     *os.File
+	paperMode      bool
+	redisStream    string
+	trajAggregator string // chosen Head B aggregator — keeps console output in lockstep with the trading decision
+	logFile        *os.File
 }
 
-func NewLogger(paperMode bool, redisStream string) *Logger {
-	return &Logger{paperMode: paperMode, redisStream: redisStream}
+func NewLogger(paperMode bool, redisStream, trajAggregator string) *Logger {
+	if trajAggregator == "" {
+		trajAggregator = "final"
+	}
+	return &Logger{paperMode: paperMode, redisStream: redisStream, trajAggregator: trajAggregator}
 }
 
 // OpenTradeLog creates (or appends to) logs/paper_trades/{gameID}_{date}.log.
@@ -111,9 +115,9 @@ func (l *Logger) EmitPossession(
 	riskApproved bool,
 	start time.Time,
 ) {
-	trajFinal := resp.Trajectory[9]
+	trajUsed := aggregateTraj(resp.Trajectory, l.trajAggregator)
 	trajSign := ""
-	if trajFinal >= 0 {
+	if trajUsed >= 0 {
 		trajSign = "+"
 	}
 
@@ -136,7 +140,7 @@ func (l *Logger) EmitPossession(
 		formatClock(event.Clock),
 		actionLabel,
 		resp.RunProb,
-		trajSign, trajFinal,
+		trajSign, trajUsed,
 		resp.YesBid,
 		resp.YesAsk,
 		gameID,
@@ -154,9 +158,9 @@ func (l *Logger) EmitPossession(
 //
 //	2026-04-29T20:15:45Z  ★ BUY_YES  run=0.23  traj=+0.09  bid=52¢  3×  game=0042500121
 func (l *Logger) EmitEntry(gameID string, pos *PaperPosition, resp *PossessionResponse) {
-	trajFinal := resp.Trajectory[9]
+	trajUsed := aggregateTraj(resp.Trajectory, l.trajAggregator)
 	trajSign := ""
-	if trajFinal >= 0 {
+	if trajUsed >= 0 {
 		trajSign = "+"
 	}
 
@@ -165,7 +169,7 @@ func (l *Logger) EmitEntry(gameID string, pos *PaperPosition, resp *PossessionRe
 		ts(),
 		pos.Direction,
 		resp.RunProb,
-		trajSign, trajFinal,
+		trajSign, trajUsed,
 		pos.EntryPrice,
 		pos.Size,
 		gameID,
@@ -177,11 +181,24 @@ func (l *Logger) EmitEntry(gameID string, pos *PaperPosition, resp *PossessionRe
 // EmitHold prints a HOLD update for an open position. Called every possession
 // while a position is live.
 //
+// The displayed "bid" is the price of the side we own (yes_bid for YES positions,
+// no_bid ≈ 100 - yes_ask for NO positions) — mirrors the direction-aware logic
+// in Router.CheckExit so the operator sees the price actually moving for/against
+// the position, not the raw yes_bid which inverts sign for NO holds.
+//
 // Example:
 //
 //	2026-04-29T20:15:52Z  HOLD  bid=54¢  +2¢  unrealized=+$1.17  poss=3  hazard5=0.31  game=0042500121
 func (l *Logger) EmitHold(gameID string, pos *PaperPosition, resp *PossessionResponse, possHeld int) {
-	priceDelta := resp.YesBid - pos.EntryPrice
+	currentPrice := resp.YesBid
+	if pos.Direction == "NO" {
+		currentPrice = 100 - resp.YesAsk
+		if resp.YesAsk == 0 {
+			currentPrice = 100 - resp.YesBid
+		}
+	}
+
+	priceDelta := currentPrice - pos.EntryPrice
 	deltaSign := ""
 	if priceDelta >= 0 {
 		deltaSign = "+"
@@ -196,7 +213,7 @@ func (l *Logger) EmitHold(gameID string, pos *PaperPosition, resp *PossessionRes
 	line := fmt.Sprintf(
 		"%s  HOLD  bid=%d¢  %s%d¢  unrealized=%s$%.2f  poss=%d  hazard5=%.2f  game=%s",
 		ts(),
-		resp.YesBid,
+		currentPrice,
 		deltaSign, priceDelta,
 		unrealizedSign, unrealized,
 		possHeld,
@@ -343,6 +360,8 @@ func exitReasonLabel(reason string) string {
 		return "SL_EXIT"
 	case "TIME_STOP":
 		return "TIME_EXIT"
+	case "TRAIL_STOP":
+		return "TRAIL_EXIT"
 	default:
 		return reason
 	}

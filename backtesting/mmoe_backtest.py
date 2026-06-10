@@ -64,12 +64,43 @@ class ClosedPosition:
     hold_time_s:   float
     gross_pnl:     float        # entry_side * (exit_price - entry_price)
     net_pnl:       float        # gross_pnl * contracts - fees
-    run_prob:      float
-    traj_final:    float        # trajectory[-1] at entry
-    hazard_final:  float        # hazard[-1] at entry
-    quarter:       int
-    score_diff:    int
-    run_length:    int
+    run_prob:        float
+    traj_final:      float      # trajectory[-1] at entry (legacy column, kept for backward compat)
+    traj_used:       float      # aggregated trajectory actually consulted for entry gate
+    traj_aggregator: str        # which aggregator produced traj_used ("final"/"mean"/"mean_3_to_9"/"max_abs")
+    hazard_final:    float      # hazard[-1] at entry
+    quarter:         int
+    score_diff:      int
+    run_length:      int
+
+
+TRAJ_AGGREGATORS = ("final", "mean", "mean_3_to_9", "max_abs")
+
+
+def aggregate_traj(trajectory: list[float], mode: str) -> float:
+    """
+    Reduce the 10-element Head B trajectory to a single signed scalar for entry gating.
+
+    Modes:
+      - "final"        : trajectory[-1]                      (current production behavior)
+      - "mean"         : mean of all 10 horizons             (lowest variance, smooths Huber noise)
+      - "mean_3_to_9"  : mean of horizons 3-9                (drops the very-short-term noisy heads)
+      - "max_abs"      : the element with largest |.|        (peak conviction across horizons)
+
+    For "max_abs" the sign is preserved from the source element so downstream
+    direction inference (sign(traj_final)) still works.
+    """
+    if mode == "final":
+        return float(trajectory[-1])
+    if mode == "mean":
+        return float(sum(trajectory) / len(trajectory))
+    if mode == "mean_3_to_9":
+        window = trajectory[3:]
+        return float(sum(window) / len(window))
+    if mode == "max_abs":
+        idx = max(range(len(trajectory)), key=lambda i: abs(trajectory[i]))
+        return float(trajectory[idx])
+    raise ValueError(f"unknown traj aggregator mode: {mode!r} (valid: {TRAJ_AGGREGATORS})")
 
 
 @dataclass
@@ -176,6 +207,7 @@ def _run_game(
     min_abs_traj: float = 0.0,
     min_run_length: int = 1,
     hold_seconds: int = 120,
+    traj_aggregator: str = "final",
 ) -> list[ClosedPosition]:
     """Replay one game and return all closed positions."""
     if game_ticks.empty:
@@ -235,17 +267,20 @@ def _run_game(
         if not (30 <= yes_bid <= 70):
             continue
 
-        traj_final = output.trajectory[-1]
+        # `traj_final` (legacy column name) preserves trajectory[-1] for backward-compatible CSVs.
+        # `traj_used` is the aggregated value the entry gate and direction logic actually consult.
+        traj_final = float(output.trajectory[-1])
+        traj_used = aggregate_traj(output.trajectory, traj_aggregator)
 
-        # Head B directional confidence filter
-        if abs(traj_final) < min_abs_traj:
+        # Head B directional confidence filter — applied to the aggregated value
+        if abs(traj_used) < min_abs_traj:
             continue
 
         # Determine trade direction.
         # use_traj_for_side: let Head B prediction set direction (positive→BUY_YES, negative→BUY_NO)
         # Default: use basketball run_team_encoded (home run→BUY_YES, away run→BUY_NO)
         if use_traj_for_side:
-            entry_side = 1 if traj_final >= 0 else -1
+            entry_side = 1 if traj_used >= 0 else -1
         else:
             run_team_encoded = fd.get("current_run_team_encoded", 0.0)
             entry_side = 1 if run_team_encoded >= 0 else -1
@@ -281,12 +316,14 @@ def _run_game(
             hold_time_s   = sim.exit_time_offset_s,
             gross_pnl     = gross,
             net_pnl       = net,
-            run_prob      = output.run_prob,
-            traj_final    = traj_final,
-            hazard_final  = output.hazard[-1],
-            quarter       = int(row.get("period", 0)),
-            score_diff    = int(row.get("score_diff", 0)),
-            run_length    = int(row.get("current_run_length", 0)),
+            run_prob        = output.run_prob,
+            traj_final      = traj_final,
+            traj_used       = traj_used,
+            traj_aggregator = traj_aggregator,
+            hazard_final    = output.hazard[-1],
+            quarter         = int(row.get("period", 0)),
+            score_diff      = int(row.get("score_diff", 0)),
+            run_length      = int(row.get("current_run_length", 0)),
         ))
 
         # Block new entries until exit time
@@ -350,6 +387,7 @@ def run_backtest(
     min_run_length: int = 1,
     hold_seconds: int = 120,
     only_game: str | None = None,
+    traj_aggregator: str = "final",
 ) -> BacktestSummary:
     logger.info("Connecting to MotherDuck...")
     conn = _connect_motherduck()
@@ -427,6 +465,7 @@ def run_backtest(
             min_abs_traj=min_abs_traj,
             min_run_length=min_run_length,
             hold_seconds=hold_seconds,
+            traj_aggregator=traj_aggregator,
         )
         all_positions.extend(positions)
 
@@ -502,7 +541,10 @@ if __name__ == "__main__":
     parser.add_argument("--contracts",        type=int,   default=100,    help="contract size per trade")
     parser.add_argument("--delay",            type=int,   default=FEED_DELAY_SECONDS_NBA, help="feed delay in seconds")
     parser.add_argument("--use-traj-for-side",action="store_true",        help="use Head B traj_final sign to set BUY_YES vs BUY_NO (vs basketball run_team)")
-    parser.add_argument("--min-abs-traj",     type=float, default=0.0,    help="minimum |traj_final| to enter (Head B confidence filter)")
+    parser.add_argument("--min-abs-traj",     type=float, default=0.0,    help="minimum |traj_used| to enter (Head B confidence filter applied to aggregated value)")
+    parser.add_argument("--traj-aggregator",  type=str,   default="final",
+                        choices=list(TRAJ_AGGREGATORS),
+                        help="how to reduce the 10-element Head B trajectory to a scalar for entry gating")
     parser.add_argument("--min-run-length",   type=int,   default=1,      help="minimum run_length at entry")
     parser.add_argument("--hold-seconds",     type=int,   default=120,    help="time gate override in seconds (default 120 matching training)")
     parser.add_argument(
@@ -531,11 +573,13 @@ if __name__ == "__main__":
         min_run_length     = args.min_run_length,
         hold_seconds       = args.hold_seconds,
         only_game          = args.game,
+        traj_aggregator    = args.traj_aggregator,
     )
 
     label = (
         f"thr={args.threshold} tp={args.tp} sl={args.sl} "
         f"hold={args.hold_seconds}s rl>={args.min_run_length} "
+        f"agg={args.traj_aggregator} "
         f"{'traj-side ' if args.use_traj_for_side else ''}"
         f"min|traj|={args.min_abs_traj}"
     )

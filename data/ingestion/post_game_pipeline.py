@@ -900,7 +900,13 @@ def run_post_game_pipeline(game_date: date, games: list[GameInfo]) -> None:
         conn = _md_connect()
         try:
             for game in games:
-                backfill_game(game.game_id, game.tipoff_utc.date(), conn)
+                # Use the ET game_date, NOT tipoff_utc.date(): for evening ET
+                # games the UTC tipoff rolls to the next calendar day, which
+                # shifted every wall_clock_ts +1 day and silently excluded the
+                # game from any tick-joined backtest (2026-05 WCF games). The
+                # anchor logic in backfill_game handles late-night rollover
+                # internally from the correct base date.
+                backfill_game(game.game_id, game_date, conn)
         finally:
             conn.close()
     except Exception:

@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"sync/atomic"
 	"time"
 )
 
@@ -59,7 +60,12 @@ func NewMarketScanner(eventTicker string, driftLowBid, driftHighBid int, jsonLog
 
 // Run polls every 10 seconds and sends new market tickers on outCh whenever
 // a swap is warranted. Returns immediately if eventTicker is empty.
-func (s *MarketScanner) Run(ctx context.Context, initialTicker string, outCh chan<- string) {
+//
+// positionOpen (nil-safe) gates swaps: while a position is open the scanner
+// holds the locked market even if it drifts out of band, because exits price
+// off the active market's book — swapping mid-position would compute the exit
+// from a different strike than the one we hold. Swaps resume once we're flat.
+func (s *MarketScanner) Run(ctx context.Context, initialTicker string, outCh chan<- string, positionOpen *atomic.Bool) {
 	if s.eventTicker == "" {
 		return
 	}
@@ -121,6 +127,12 @@ func (s *MarketScanner) Run(ctx context.Context, initialTicker string, outCh cha
 			case !inBand:
 				decision = "swap"
 				reason = "out_of_band"
+			}
+
+			// Defer swaps while a position is open (see Run doc comment). The
+			// position stays on its own market; we resume swapping once flat.
+			if decision == "swap" && positionOpen != nil && positionOpen.Load() {
+				decision = "swap_deferred_open"
 			}
 
 			s.emitScan(currentTicker, currentBid, best, bestBid, nCandidates, inBand, decision)

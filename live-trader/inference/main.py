@@ -13,11 +13,13 @@ Routes:
     GET  /health                     — liveness check
 """
 
+import asyncio
 import logging
 import sys
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
@@ -28,7 +30,7 @@ from inference.features import FeatureComputer
 from inference.game_state import GameState, PredictionRecord
 from inference.possession import PossessionBuilder
 from inference.pregame import load_pregame
-from models.mmoe.predictor import MMoEPredictor, MODEL_PATH, SCALER_PATH
+from models.mmoe.predictor import MMoEPredictor, MODEL_PATH, SCALER_PATH, ROOT_DIR
 from inference.dashboard import router as dashboard_router, broadcast_prediction
 
 logging.basicConfig(
@@ -70,38 +72,116 @@ _ZSCORE_FEATURES: list[str] = [
     "garbage_time_risk",
 ]
 
-# {feature_name: (mean, std)} — populated at lifespan startup once the
-# predictor is loaded. Empty if the predictor failed to load.
+# {feature_name: (mean, std)} — populated when the predictor loads.
+# Empty if the predictor failed to load.
 _zscore_stats: dict[str, tuple[float, float]] = {}
+
+# Reload bookkeeping. The model path is config-driven (forwarded by Go from
+# trading.yaml on /game/start). We track which paths are currently loaded so a
+# /start only triggers a reload when they actually change, and serialise reloads
+# with a lock so concurrent game starts can't load the model twice at once.
+_loaded_model_path: Optional[str] = None
+_loaded_scaler_path: Optional[str] = None
+_predictor_lock = asyncio.Lock()
+
+# Dashboard gate thresholds, forwarded by Go on /game/start so the dashboard
+# green-light mirrors the live agent instead of stale hardcoded literals.
+# Defaults match the historical dashboard.py values until a /start updates them.
+_dashboard_gates: dict[str, float] = {
+    "min_abs_traj":   0.08,
+    "min_yes_bid":    30,
+    "max_yes_bid":    70,
+    "min_run_length": 0,
+}
+
+
+def _resolve_path(p: str) -> Path:
+    """Resolve a config path: relative paths are anchored at the repo root."""
+    path = Path(p)
+    return path if path.is_absolute() else (ROOT_DIR / path)
+
+
+def compute_gate_flags(
+    score_diff: float,
+    period: int,
+    clock_secs: float,
+    blowout_margin_pts: int,
+    garbage_time_period: int,
+    garbage_time_clock_secs: int,
+) -> tuple[bool, bool]:
+    """Agent GATE flags from config thresholds. Returns (is_garbage_time, is_blowout).
+
+    Deliberately independent of the frozen `garbage_time_risk` model feature so
+    tuning the trade gate in trading.yaml never shifts a model input.
+    """
+    is_blowout = abs(score_diff) > blowout_margin_pts
+    is_garbage_time = (
+        is_blowout
+        and period >= garbage_time_period
+        and clock_secs < garbage_time_clock_secs
+    )
+    return is_garbage_time, is_blowout
+
+
+def _requested_paths(model_path: Optional[str], scaler_path: Optional[str]) -> tuple[str, str]:
+    """Resolve the model/scaler paths a /start asked for, falling back to defaults."""
+    want_model = str(_resolve_path(model_path)) if model_path else str(MODEL_PATH)
+    want_scaler = str(_resolve_path(scaler_path)) if scaler_path else str(SCALER_PATH)
+    return want_model, want_scaler
+
+
+def _needs_reload(model_path: Optional[str], scaler_path: Optional[str]) -> bool:
+    """True if the requested paths differ from what's currently loaded."""
+    want_model, want_scaler = _requested_paths(model_path, scaler_path)
+    return want_model != _loaded_model_path or want_scaler != _loaded_scaler_path
+
+
+def _build_zscore_stats(predictor: MMoEPredictor) -> dict[str, tuple[float, float]]:
+    """Slice the ~10 decision-relevant features out of the scaler's per-feature
+    mean/std. Skips features missing from the scaler or with std≈0 (which would
+    divide by zero)."""
+    stats: dict[str, tuple[float, float]] = {}
+    all_stats = predictor.get_feature_stats()
+    for name in _ZSCORE_FEATURES:
+        if name not in all_stats:
+            logging.warning("[MODEL] z-score feature %s not in scaler — skipped", name)
+            continue
+        mean, std = all_stats[name]
+        if std < 1e-10:
+            logging.warning("[MODEL] z-score feature %s has std≈0 — skipped", name)
+            continue
+        stats[name] = (mean, std)
+    return stats
+
+
+def _load_predictor(model_path: Optional[str] = None, scaler_path: Optional[str] = None) -> bool:
+    """Load (or reload) the MMoE predictor and rebuild z-score stats.
+
+    Paths default to the packaged model when None. Updates the module globals
+    on success and returns True; on a missing artifact, logs and returns False
+    (the service keeps running without inference, matching prior behavior).
+    """
+    global _predictor, _zscore_stats, _loaded_model_path, _loaded_scaler_path
+    mp = _resolve_path(model_path) if model_path else MODEL_PATH
+    sp = _resolve_path(scaler_path) if scaler_path else SCALER_PATH
+    try:
+        predictor = MMoEPredictor.load(mp, sp)
+    except FileNotFoundError as exc:
+        logging.warning("[MODEL] artifact not found — running without inference: %s", exc)
+        return False
+    _predictor = predictor
+    _zscore_stats = _build_zscore_stats(predictor)
+    _loaded_model_path = str(mp)
+    _loaded_scaler_path = str(sp)
+    logging.info("[MODEL] loaded %s (z-score stats for %d features)", mp.name, len(_zscore_stats))
+    return True
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _predictor, _service_started_at, _zscore_stats
+    global _service_started_at
     _service_started_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-    try:
-        _predictor = MMoEPredictor.load()
-        logging.info("[STARTUP] MMoE model loaded successfully")
-
-        # Build the z-score lookup once at startup. The scaler's mean_/scale_
-        # arrays are aligned to ALL_FEATURE_COLS; we just extract the columns
-        # for the ~10 decision-relevant features we want to z-score per
-        # possession. Skip features whose std is ≈0 (constant features) —
-        # those would divide by zero.
-        all_stats = _predictor.get_feature_stats()
-        for name in _ZSCORE_FEATURES:
-            if name not in all_stats:
-                logging.warning("[STARTUP] z-score feature %s not in scaler — skipped", name)
-                continue
-            mean, std = all_stats[name]
-            if std < 1e-10:
-                logging.warning("[STARTUP] z-score feature %s has std≈0 — skipped", name)
-                continue
-            _zscore_stats[name] = (mean, std)
-        logging.info("[STARTUP] z-score stats loaded for %d features", len(_zscore_stats))
-
-    except FileNotFoundError as exc:
-        logging.warning("[STARTUP] MMoE model not found — running without inference: %s", exc)
+    _load_predictor()  # eager default load — Go can later swap via /game/start
     yield
     # Shutdown: close any active JSONL logger so buffered writes flush.
     jsonlog.shutdown()
@@ -121,12 +201,28 @@ class GameStartRequest(BaseModel):
     # still works — Python falls back to no JSONL logging on this run.
     run_id:        Optional[str] = None
     log_dir:       Optional[str] = None
+    # Config forwarded from trading.yaml. Model paths trigger a reload only on
+    # change; the gate thresholds feed the dashboard so it tracks the live agent.
+    # All optional — an older Go binary keeps the loaded model + default gates.
+    model_path:    Optional[str] = None
+    scaler_path:   Optional[str] = None
+    min_abs_traj:   Optional[float] = None
+    min_yes_bid:    Optional[int] = None
+    max_yes_bid:    Optional[int] = None
+    min_run_length: Optional[int] = None
 
 
 class PossessionRequest(BaseModel):
     raw_event:       dict
     kalshi_snapshot: list[float]  # 14 floats in MARKET_COLS order
     wall_clock_ts:   str          # ISO-8601
+    # Garbage-time / blowout GATE thresholds forwarded from trading.yaml. These
+    # drive the is_garbage_time / is_blowout flags the agent uses to skip trading
+    # — DISTINCT from the frozen `garbage_time_risk` model feature. Defaults match
+    # the historical hardcoded values so an older Go binary is unaffected.
+    blowout_margin_pts:      int = 30
+    garbage_time_period:     int = 4
+    garbage_time_clock_secs: int = 360
 
 
 class PossessionResponse(BaseModel):
@@ -152,6 +248,26 @@ async def game_start(game_id: str, request: GameStartRequest):
     if request.run_id and request.log_dir:
         jsonlog.set_run(request.run_id, request.log_dir)
         _maybe_emit_service_info(request.run_id)
+
+    # Config-driven model swap: reload only if Go forwarded paths that differ
+    # from what's loaded. Serialised so concurrent game starts can't double-load.
+    if (request.model_path or request.scaler_path) and _needs_reload(request.model_path, request.scaler_path):
+        async with _predictor_lock:
+            # Re-check under the lock — another /start may have just loaded it.
+            if _needs_reload(request.model_path, request.scaler_path):
+                want_model, want_scaler = _requested_paths(request.model_path, request.scaler_path)
+                logging.info("[MODEL] reload requested via /start: %s / %s", want_model, want_scaler)
+                _load_predictor(request.model_path, request.scaler_path)
+
+    # Cache dashboard gate thresholds so the SSE feed mirrors the live agent.
+    if request.min_abs_traj is not None:
+        _dashboard_gates["min_abs_traj"] = request.min_abs_traj
+    if request.min_yes_bid is not None:
+        _dashboard_gates["min_yes_bid"] = request.min_yes_bid
+    if request.max_yes_bid is not None:
+        _dashboard_gates["max_yes_bid"] = request.max_yes_bid
+    if request.min_run_length is not None:
+        _dashboard_gates["min_run_length"] = request.min_run_length
 
     pregame = await load_pregame(
         game_id,
@@ -282,8 +398,17 @@ async def game_possession(game_id: str, request: PossessionRequest):
         yes_ask       = yes_ask,
     ))
 
-    is_garbage_time = features.get("garbage_time_risk", 0.0) >= 1.0
-    is_blowout      = abs(features.get("score_diff", 0.0)) > 30
+    # Agent GATE flags — driven by the config thresholds Go forwarded, NOT by the
+    # frozen `garbage_time_risk` model feature (which stays at training values in
+    # features.py). Tuning trading.yaml moves this gate without touching the model input.
+    is_garbage_time, is_blowout = compute_gate_flags(
+        score_diff              = features.get("score_diff", 0.0),
+        period                  = row.period,
+        clock_secs              = row.game_clock_secs,
+        blowout_margin_pts      = request.blowout_margin_pts,
+        garbage_time_period     = request.garbage_time_period,
+        garbage_time_clock_secs = request.garbage_time_clock_secs,
+    )
     clock_str       = f"Q{row.period} {int(row.game_clock_secs // 60)}:{int(row.game_clock_secs % 60):02d}"
     traj_final      = output.trajectory[-1] if output.trajectory else 0.0
     pipeline_ms     = int((time.time() - t0) * 1000)
@@ -372,6 +497,8 @@ async def game_possession(game_id: str, request: PossessionRequest):
         "period":        row.period,
         "features":      features,
         "market_ticker": state.market_ticker,
+        # Live agent gate thresholds so the dashboard green-light matches reality.
+        "gates":         dict(_dashboard_gates),
     })
 
     return response
