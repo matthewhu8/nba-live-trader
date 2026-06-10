@@ -18,6 +18,9 @@ __pycache__/
 live-trader/go/live-trader
 live-trader/go/go
 
+# Feature-importance analysis artifacts (large binaries, rebuildable)
+analysis/
+
 # feature_distribution_diff.py reference cache (rebuildable from MotherDuck)
 tools/.reference_distribution.json
 .DS_Store

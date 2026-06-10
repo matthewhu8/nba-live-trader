@@ -467,11 +467,12 @@ function upd(d){
   }
 
   const rp=d.run_prob||0, f=d.features||{}, tr=d.trajectory||[], hz=d.hazard||[];
-  // Gate variables — mirror the actual agent thresholds exactly
-  // min_run_length_entry=0 means run gate is disabled (always passes)
-  const bid=d.yes_bid||0, inBand=bid>=30&&bid<=70;
+  // Gate thresholds forwarded live from the agent (trading.yaml) via d.gates.
+  // Fallback literals keep the dashboard working against an older service.
+  const g=d.gates||{min_abs_traj:0.08,min_yes_bid:30,max_yes_bid:70,min_run_length:0};
+  const bid=d.yes_bid||0, inBand=bid>=g.min_yes_bid&&bid<=g.max_yes_bid;
   const trajAbs=Math.abs(tr[9]||0), runLen=f.current_run_length||0;
-  const shouldBuy=inBand&&trajAbs>=0.08&&!d.is_garbage_time&&!d.is_blowout;
+  const shouldBuy=inBand&&trajAbs>=g.min_abs_traj&&runLen>=g.min_run_length&&!d.is_garbage_time&&!d.is_blowout;
 
   // Signal banner
   const sig=document.getElementById('sig'), st=document.getElementById('sigTxt'), ss=document.getElementById('sigSub');

@@ -24,6 +24,15 @@ from typing import TYPE_CHECKING
 
 from models.mmoe.feature_config import ALL_FEATURE_COLS, MARKET_COLS
 
+# Training-parity constants for the `garbage_time_risk` MODEL feature. The MMoE
+# was trained with garbage time defined at exactly these values, so they are
+# FROZEN here — do NOT make them configurable. The tunable trade GATE
+# (is_garbage_time / is_blowout, in main.py) is a SEPARATE concern driven by
+# trading.yaml; decoupling them prevents train/serve skew on a model input.
+_TRAIN_BLOWOUT_MARGIN_PTS = 30
+_TRAIN_GARBAGE_PERIOD = 4
+_TRAIN_GARBAGE_CLOCK_SECS = 360
+
 if TYPE_CHECKING:
     from inference.game_state import GameState
     from inference.possession import PossessionRow
@@ -73,7 +82,9 @@ class FeatureComputer:
         away_last_10 = _sum_points(state.recent_possessions, "away", n=10)
 
         # Run state — read before update (shift(1) invariant)
-        run_3pt_pct  = (state.run_3pt_count / state.run_points) if state.run_points > 0 else 0.0
+        # 3pt_pct: fraction of run POINTS from threes (not fraction of shots).
+        # Matches training at momentum_features.py:101: (3 * 3pt_count) / points.
+        run_3pt_pct  = (3 * state.run_3pt_count / state.run_points) if state.run_points > 0 else 0.0
         run_paint_pct = (state.run_paint_pts / state.run_points) if state.run_points > 0 else 0.0
 
         # Pace — mean of possession_durations deque
@@ -90,10 +101,11 @@ class FeatureComputer:
         home_sustain     = _is_sustainable(state.home_scored_poss)
         away_sustain     = _is_sustainable(state.away_scored_poss)
 
-        # Shot quality trend: improvement (+) or decline (-) in xPPP vs prior 5-poss window.
-        # Zero until both teams have filled their first full window (5 scored possessions).
-        home_traj = (home_xppp - state.home_prev_xppp) if state.home_prev_xppp > 0.0 else 0.0
-        away_traj = (away_xppp - state.away_prev_xppp) if state.away_prev_xppp > 0.0 else 0.0
+        # Shot quality trend: sign of xPPP change vs prior 5-poss window — discrete {-1, 0, +1}.
+        # Matches training at momentum_features.py:222-223 (np.sign). Raw float would be
+        # ~10× smaller in magnitude than the training distribution after StandardScaler.
+        home_traj = _sign(home_xppp - state.home_prev_xppp) if state.home_prev_xppp > 0.0 else 0.0
+        away_traj = _sign(away_xppp - state.away_prev_xppp) if state.away_prev_xppp > 0.0 else 0.0
 
         return {
             "home_points_last_5_poss":   float(home_last_5),
@@ -131,8 +143,14 @@ class FeatureComputer:
         minutes_elapsed = ((period - 1) * 12) + (720.0 - clock_secs) / 60.0
         minutes_remaining = max(0.1, 48.0 - minutes_elapsed)
 
-        is_blowout      = abs(score_diff) > 30
-        is_garbage_time = is_blowout and period == 4 and clock_secs < 360
+        # FROZEN training definition — feeds the `garbage_time_risk` model input
+        # below. Not the trade gate (see _TRAIN_* constants above).
+        is_blowout      = abs(score_diff) > _TRAIN_BLOWOUT_MARGIN_PTS
+        is_garbage_time = (
+            is_blowout
+            and period == _TRAIN_GARBAGE_PERIOD
+            and clock_secs < _TRAIN_GARBAGE_CLOCK_SECS
+        )
 
         # Team fouls → bonus state
         home_team_fouls_q = state.home_team_fouls.get(period, 0)
@@ -227,6 +245,15 @@ class FeatureComputer:
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _sign(x: float) -> float:
+    """Scalar np.sign equivalent. Avoids adding numpy to the inference dependency tree."""
+    if x > 0.0:
+        return 1.0
+    if x < 0.0:
+        return -1.0
+    return 0.0
+
 
 def _sum_points(recent: "deque", team: str, n: int) -> int:
     """Sum points scored by `team` in the last `n` possessions."""

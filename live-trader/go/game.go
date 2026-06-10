@@ -51,7 +51,17 @@ func (g *GameEngine) Run(ctx context.Context) {
 	if inferenceURL == "" {
 		inferenceURL = "http://localhost:8001"
 	}
-	inference := NewInferenceClient(inferenceURL)
+	inference := NewInferenceClient(inferenceURL, InferenceConfig{
+		BlowoutMarginPts:     g.cfg.Agent.BlowoutMarginPts,
+		GarbageTimePeriod:    g.cfg.Agent.GarbageTimePeriod,
+		GarbageTimeClockSecs: g.cfg.Agent.GarbageTimeClockSecs,
+		ModelPath:            g.cfg.Inference.ModelPath,
+		ScalerPath:           g.cfg.Inference.ScalerPath,
+		MinAbsTraj:           g.cfg.Agent.MinAbsTrajEntry,
+		MinYesBid:            g.cfg.Agent.MinYesBid,
+		MaxYesBid:            g.cfg.Agent.MaxYesBid,
+		MinRunLength:         g.cfg.Agent.MinRunLengthEntry,
+	})
 
 	log.Printf("[INIT] calling Python /game/%s/start ...", g.gameID)
 	runIDForPy := ""
@@ -90,7 +100,7 @@ func (g *GameEngine) Run(ctx context.Context) {
 	ringBuffer := NewRingBuffer()
 	bandit := NewBandit(&g.cfg)
 	router := NewRouter(os.Getenv("KALSHI_KEY_ID"), g.cfg.Trading.PaperMode)
-	logger := NewLogger(g.cfg.Trading.PaperMode, g.cfg.Observability.RedisStream)
+	logger := NewLogger(g.cfg.Trading.PaperMode, g.cfg.Observability.RedisStream, g.cfg.Agent.TrajAggregator)
 	runID := ""
 	if g.run != nil {
 		runID = g.run.ID
@@ -114,6 +124,13 @@ func (g *GameEngine) Run(ctx context.Context) {
 	var activeMarketTicker atomic.Value
 	activeMarketTicker.Store("")
 
+	// positionOpen lets the market scanner defer swaps while we hold a position.
+	// Exits price off the active market's order book, so swapping mid-position
+	// would compute the exit price from a different strike than the one we
+	// actually hold (2026-05-28 post-mortem latent hazard). The engine sets
+	// this on entry/exit; the scanner reads it before every swap.
+	var positionOpen atomic.Bool
+
 	if g.eventTicker != "" {
 		scanner := NewMarketScanner(g.eventTicker, g.cfg.Agent.MarketDriftLowBid, g.cfg.Agent.MarketDriftHighBid, g.jsonLog, g.gameID)
 		best, _, err := scanner.scan(ctx)
@@ -124,7 +141,7 @@ func (g *GameEngine) Run(ctx context.Context) {
 		}
 		activeMarketTicker.Store(initialTicker)
 
-		go scanner.Run(ctx, initialTicker, marketCh)
+		go scanner.Run(ctx, initialTicker, marketCh, &positionOpen)
 
 		// Fanout: the scanner emits ticker swaps on marketCh; kalshi_feed needs
 		// them to re-subscribe, and trade reporting needs them so it can tag
@@ -229,6 +246,15 @@ func (g *GameEngine) Run(ctx context.Context) {
 
 			totalPipelineMS += resp.PipelineMS
 
+			// Compute the aggregated traj once per possession — used for telemetry,
+			// the entry gate (via bandit.Decide), and Kelly sizing. Keeps every
+			// downstream consumer reading the same number for the same possession.
+			trajAggregator := g.cfg.Agent.TrajAggregator
+			if trajAggregator == "" {
+				trajAggregator = "final"
+			}
+			trajUsed := aggregateTraj(resp.Trajectory, trajAggregator)
+
 			riskOK := !g.killSwitch.IsSet()
 			logger.EmitPossession(g.gameID, event, resp, riskOK, start)
 
@@ -249,7 +275,9 @@ func (g *GameEngine) Run(ctx context.Context) {
 				"yes_ask":            resp.YesAsk,
 				"run_prob":           resp.RunProb,
 				"trajectory":         resp.Trajectory,
-				"traj_final":         resp.Trajectory[9],
+				"traj_final":         resp.Trajectory[9], // raw single horizon — legacy
+				"traj_used":          trajUsed,           // aggregated value driving decisions
+				"traj_aggregator":    trajAggregator,
 				"hazard":             resp.Hazard,
 				"hazard5":            resp.Hazard[4],
 				"is_garbage_time":    resp.IsGarbageTime,
@@ -272,8 +300,11 @@ func (g *GameEngine) Run(ctx context.Context) {
 			g.jsonLog.Emit("possession", g.gameID, possessionFields)
 
 			if openPosition != nil {
-				shouldExit, reason, pnl := router.CheckExit(openPosition, resp, possCount, &g.cfg)
+				shouldExit, reason, pnl := router.CheckExit(ctx, openPosition, resp, possCount, &g.cfg)
 
+				// For TP_EXIT, the resting maker order filled at RestingTPPrice;
+				// for everything else (SL/TIME/momentum), the close price is the
+				// direction-aware current price the crossing exit will reach.
 				currentPrice := resp.YesBid
 				if openPosition.Direction == "NO" {
 					currentPrice = 100 - resp.YesAsk
@@ -281,38 +312,85 @@ func (g *GameEngine) Run(ctx context.Context) {
 						currentPrice = 100 - resp.YesBid
 					}
 				}
+				closePrice := currentPrice
+				if reason == "TAKE_PROFIT" && openPosition.RestingTPStatus == "executed" {
+					closePrice = openPosition.RestingTPPrice
+				}
 
 				if shouldExit {
-					ok := router.PlaceExit(ctx, openPosition, currentPrice)
-					if !ok {
-						// Exit order failed — keep position open and retry next possession.
-						g.jsonLog.Emit("exit_retry", g.gameID, map[string]interface{}{
-							"possession_id": possCount,
-							"reason":        reason,
-							"entry_ticker":  openPosition.EntryTicker,
-							"exit_price":    currentPrice,
-						})
-					} else {
-						g.ledger.RecordExit(g.gameID, openPosition.Size, openPosition.EntryPrice, currentPrice)
+					// Resting TP fill: position is ALREADY closed on Kalshi — no
+					// further order needed. Just record the trade and free state.
+					tpFilled := reason == "TAKE_PROFIT" && openPosition.RestingTPStatus == "executed"
+
+					ok := tpFilled
+					if !tpFilled {
+						// Non-TP exit (SL, TIME, momentum). If a resting TP is still
+						// open, cancel it FIRST so we don't double-close. The cancel
+						// response is authoritative — if Kalshi says the TP just
+						// executed, treat the position as TP-closed and skip the SL.
+						if openPosition.RestingTPStatus == "open" {
+							status, err := router.CancelRestingTP(ctx, openPosition)
+							if err != nil {
+								zlog.Warn().Err(err).
+									Str("order_id", openPosition.RestingTPOrderID).
+									Msg("resting TP cancel failed — proceeding with crossing exit anyway")
+							}
+							if status == "executed" {
+								// Cancel-vs-fill race: TP won. Re-route as TP exit.
+								reason = "TAKE_PROFIT"
+								closePrice = openPosition.RestingTPPrice
+								pnl = calcNetPnL(openPosition.Size, openPosition.EntryPrice, closePrice)
+								tpFilled = true
+								ok = true
+							}
+						}
+
+						if !tpFilled {
+							// Crossing exit (taker) — same path as before.
+							// Each failed attempt widens the crossing budget by 1¢ so a
+							// thin/fast book can't trap us in a position — we cross a
+							// little deeper next possession until we're out.
+							budget := g.cfg.Agent.ExitSlippageBudgetCents + openPosition.ExitAttempts
+							ok = router.PlaceExit(ctx, openPosition, currentPrice, budget)
+							if !ok {
+								openPosition.ExitAttempts++
+								g.jsonLog.Emit("exit_retry", g.gameID, map[string]interface{}{
+									"possession_id": possCount,
+									"reason":        reason,
+									"entry_ticker":  openPosition.EntryTicker,
+									"exit_price":    currentPrice,
+									"attempts":      openPosition.ExitAttempts,
+									"budget_cents":  budget,
+								})
+							}
+						}
+					}
+
+					if ok {
+						g.ledger.RecordExit(g.gameID, openPosition.Size, openPosition.EntryPrice, closePrice)
 						possHeld := possCount - openPosition.EntryPossID
-						logger.EmitExit(g.gameID, reason, openPosition, currentPrice, pnl, possHeld)
+						logger.EmitExit(g.gameID, reason, openPosition, closePrice, pnl, possHeld)
 						g.jsonLog.Emit("exit", g.gameID, map[string]interface{}{
-							"possession_id":    possCount,
-							"reason":           reason,
-							"direction":        openPosition.Direction,
-							"entry_price":      openPosition.EntryPrice,
-							"exit_price":       currentPrice,
-							"size":             openPosition.Size,
-							"net_pnl_dollars":  pnl,
-							"possessions_held": possHeld,
-							"run_prob":         resp.RunProb,
-							"traj_final":       resp.Trajectory[9],
-							"hazard5":          resp.Hazard[4],
+							"possession_id":      possCount,
+							"reason":             reason,
+							"direction":          openPosition.Direction,
+							"entry_price":        openPosition.EntryPrice,
+							"exit_price":         closePrice,
+							"size":               openPosition.Size,
+							"net_pnl_dollars":    pnl,
+							"possessions_held":   possHeld,
+							"run_prob":           resp.RunProb,
+							"traj_final":         resp.Trajectory[9],
+							"traj_used":          trajUsed,
+							"hazard5":            resp.Hazard[4],
+							"resting_tp_order":   openPosition.RestingTPOrderID,
+							"resting_tp_status":  openPosition.RestingTPStatus,
+							"resting_tp_filled":  tpFilled,
 						})
 						go inference.ReportTrade(g.gameID, TradePayload{
 							Action:       "EXIT",
 							Direction:    openPosition.Direction,
-							Price:        currentPrice,
+							Price:        closePrice,
 							EntryPrice:   openPosition.EntryPrice,
 							Size:         openPosition.Size,
 							PnL:          pnl,
@@ -325,6 +403,7 @@ func (g *GameEngine) Run(ctx context.Context) {
 							wins++
 						}
 						openPosition = nil
+						positionOpen.Store(false) // let the scanner resume swapping
 					}
 				} else {
 					possHeld := possCount - openPosition.EntryPossID
@@ -342,6 +421,7 @@ func (g *GameEngine) Run(ctx context.Context) {
 						"hazard5":            resp.Hazard[4],
 						"run_prob":           resp.RunProb,
 						"traj_final":         resp.Trajectory[9],
+						"traj_used":          trajUsed,
 					})
 				}
 			} else if action == BuyYes || action == BuyNo {
@@ -349,7 +429,13 @@ func (g *GameEngine) Run(ctx context.Context) {
 				if action == BuyNo {
 					direction = "NO"
 				}
-				size := kellyContracts(resp.Trajectory[9], g.cfg.Risk.MaxContractsPerOrder)
+				size := kellyContracts(
+					trajUsed,
+					g.cfg.Risk.MaxContractsPerOrder,
+					g.cfg.Agent.KellyAnchorTraj,
+					g.cfg.Agent.KellySlope,
+					g.cfg.Agent.KellyMinContracts,
+				)
 				approved, blockReason := g.ledger.Check(
 					string(action), g.gameID, resp.YesBid, size,
 				)
@@ -365,22 +451,39 @@ func (g *GameEngine) Run(ctx context.Context) {
 					pos := router.Place(ctx, entryTicker, g.gameID, resp, possCount, size, direction)
 					if pos != nil {
 						pos.EntryTicker = entryTicker
+						pos.PeakPrice = pos.EntryPrice // trailing take-profit baseline
 						g.ledger.RecordFill(g.gameID, pos.Size, pos.EntryPrice)
 						openPosition = pos
+						positionOpen.Store(true) // freeze market swaps while we hold this position
 						signalCount++
 						positionsOpened++
+
+						// Immediately place the resting maker TP. Failure is non-fatal
+						// (CheckExit will retry next possession); errors are logged inside.
+						if err := router.PlaceRestingTP(ctx, pos, g.cfg.Agent.TakeProfitCents); err != nil {
+							zlog.Warn().Err(err).
+								Str("ticker", entryTicker).
+								Int("tp_price", pos.RestingTPPrice).
+								Msg("initial resting TP placement failed — CheckExit will retry")
+						}
+
 						logger.EmitEntry(g.gameID, pos, resp)
 						g.jsonLog.Emit("entry", g.gameID, map[string]interface{}{
-							"possession_id": possCount,
-							"direction":     pos.Direction,
-							"entry_price":   pos.EntryPrice,
-							"size":          pos.Size,
-							"kelly_size":    size,
-							"traj_final":    resp.Trajectory[9],
-							"yes_bid":       resp.YesBid,
-							"yes_ask":       resp.YesAsk,
-							"run_prob":      resp.RunProb,
-							"hazard5":       resp.Hazard[4],
+							"possession_id":     possCount,
+							"direction":         pos.Direction,
+							"entry_price":       pos.EntryPrice,
+							"size":              pos.Size,
+							"kelly_size":        size,
+							"traj_final":        resp.Trajectory[9],
+							"traj_used":         trajUsed,
+							"traj_aggregator":   trajAggregator,
+							"yes_bid":           resp.YesBid,
+							"yes_ask":           resp.YesAsk,
+							"run_prob":          resp.RunProb,
+							"hazard5":           resp.Hazard[4],
+							"resting_tp_price":  pos.RestingTPPrice,
+							"resting_tp_order":  pos.RestingTPOrderID,
+							"resting_tp_status": pos.RestingTPStatus,
 						})
 						go inference.ReportTrade(g.gameID, TradePayload{
 							Action:       "ENTRY",
@@ -423,7 +526,9 @@ func (g *GameEngine) Run(ctx context.Context) {
 						}
 					}
 					exitCtx, exitCancel := context.WithTimeout(context.Background(), 5*time.Second)
-					ok := router.PlaceExit(exitCtx, openPosition, emergencyPrice)
+					// Shutdown: cross more aggressively to guarantee we're flat.
+					emergencyBudget := g.cfg.Agent.ExitSlippageBudgetCents + 3
+					ok := router.PlaceExit(exitCtx, openPosition, emergencyPrice, emergencyBudget)
 					exitCancel()
 					g.jsonLog.Emit("emergency_exit", g.gameID, map[string]interface{}{
 						"direction":    openPosition.Direction,

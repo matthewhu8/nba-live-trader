@@ -4,9 +4,9 @@
 //  1. is_garbage_time / is_blowout  → Wait
 //  2. in_price_band  [30..70]       → Wait if outside
 //  3. run_prob ≥ min_run_prob_entry → Wait if below
-//  4. |traj_final| ≥ min_abs_traj   → Wait if below
+//  4. |traj_used| ≥ min_abs_traj    → Wait if below   (traj_used = aggregateTraj(Trajectory))
 //  5. current_run_length ≥ min     → Wait if below
-//  6. trajectory sign               → BuyYes (>0) or BuyNo (<0)
+//  6. sign(traj_used)              → BuyYes (>0) or BuyNo (<0)
 //
 // Has-position branch: always returns Wait — Router.CheckExit owns TP / SL / TIME_STOP.
 package main
@@ -35,19 +35,68 @@ type Bandit struct {
 	minYesBid         int
 	maxYesBid         int
 	minRunProbEntry   float32                      // Head A gate (threshold=0.0 in live config = effectively off)
-	minAbsTrajEntry   float32                      // Head B confidence (backtest: 0.08)
+	minAbsTrajEntry   float32                      // Head B confidence — applied to traj_used (aggregator output)
 	minRunLengthEntry float32                      // momentum filter (backtest: 2)
+	trajAggregator    string                       // "final" / "mean" / "mean_3_to_9" / "max_abs" — Phase 1 winner: "mean"
 	params            map[ContextKey][4]BetaParams // reserved for future bandit
 }
 
 func NewBandit(cfg *Config) *Bandit {
+	agg := cfg.Agent.TrajAggregator
+	if agg == "" {
+		agg = "final" // default preserves legacy behavior for unset configs
+	}
 	return &Bandit{
 		minYesBid:         cfg.Agent.MinYesBid,
 		maxYesBid:         cfg.Agent.MaxYesBid,
 		minRunProbEntry:   cfg.Agent.MinRunProbEntry,
 		minAbsTrajEntry:   cfg.Agent.MinAbsTrajEntry,
 		minRunLengthEntry: float32(cfg.Agent.MinRunLengthEntry),
+		trajAggregator:    agg,
 		params:            make(map[ContextKey][4]BetaParams),
+	}
+}
+
+// aggregateTraj reduces the 10-element Head B trajectory to a single signed scalar
+// for entry gating + sizing. MUST match backtesting/mmoe_backtest.py `aggregate_traj`.
+//
+// Modes:
+//   - "final"        : trajectory[9]                       (legacy, single horizon)
+//   - "mean"         : mean of all 10 horizons             (Phase 1 winner — lowest variance)
+//   - "mean_3_to_9"  : mean of horizons 3-9                (skips noisy short horizons)
+//   - "max_abs"      : element with largest |·|            (peak conviction; sign preserved)
+//
+// For max_abs the source element's sign is preserved so downstream direction
+// inference (sign of return value) stays valid.
+func aggregateTraj(traj [10]float32, mode string) float32 {
+	switch mode {
+	case "final":
+		return traj[9]
+	case "mean":
+		var sum float32
+		for _, v := range traj {
+			sum += v
+		}
+		return sum / 10.0
+	case "mean_3_to_9":
+		var sum float32
+		for i := 3; i < 10; i++ {
+			sum += traj[i]
+		}
+		return sum / 7.0
+	case "max_abs":
+		maxIdx := 0
+		maxAbs := absF32(traj[0])
+		for i := 1; i < 10; i++ {
+			if a := absF32(traj[i]); a > maxAbs {
+				maxAbs = a
+				maxIdx = i
+			}
+		}
+		return traj[maxIdx]
+	default:
+		// Unknown mode — fall back to legacy behavior rather than crash.
+		return traj[9]
 	}
 }
 
@@ -67,20 +116,26 @@ type GateResult struct {
 	HasPosition       bool    `json:"has_position"`
 	RunProb           float32 `json:"run_prob"`
 	RunProbPass       *bool   `json:"run_prob_pass"`
+	// TrajFinal is the raw Trajectory[9] — kept for backward-compatible log analysis.
+	// TrajUsed is the aggregated value that actually drives the entry decision.
+	// Aggregator identifies which aggregation mode produced TrajUsed.
 	TrajFinal         float32 `json:"traj_final"`
+	TrajUsed          float32 `json:"traj_used"`
+	Aggregator        string  `json:"traj_aggregator"`
 	TrajMagnitudePass *bool   `json:"traj_magnitude_pass"`
 	CurrentRunLength  float32 `json:"current_run_length"`
 	RunLengthPass     *bool   `json:"run_length_pass"`
-	TrajectorySign    string  `json:"trajectory_sign"` // "pos" | "neg" | "zero"
+	TrajectorySign    string  `json:"trajectory_sign"` // "pos" | "neg" | "zero" — sign of TrajUsed
 	FirstBlocking     string  `json:"first_blocking,omitempty"`
 }
 
 func (b *Bandit) Decide(resp *PossessionResponse, hasPosition bool) (Action, GateResult) {
 	trajFinal := resp.Trajectory[9]
+	trajUsed := aggregateTraj(resp.Trajectory, b.trajAggregator)
 	trajSign := "zero"
-	if trajFinal > 0 {
+	if trajUsed > 0 {
 		trajSign = "pos"
-	} else if trajFinal < 0 {
+	} else if trajUsed < 0 {
 		trajSign = "neg"
 	}
 
@@ -103,6 +158,8 @@ func (b *Bandit) Decide(resp *PossessionResponse, hasPosition bool) (Action, Gat
 		HasPosition:      hasPosition,
 		RunProb:          resp.RunProb,
 		TrajFinal:        trajFinal,
+		TrajUsed:         trajUsed,
+		Aggregator:       b.trajAggregator,
 		CurrentRunLength: currentRunLength,
 		TrajectorySign:   trajSign,
 	}
@@ -142,7 +199,7 @@ func (b *Bandit) Decide(resp *PossessionResponse, hasPosition bool) (Action, Gat
 		return Wait, g
 	}
 
-	trajMagPass := absF32(trajFinal) >= b.minAbsTrajEntry
+	trajMagPass := absF32(trajUsed) >= b.minAbsTrajEntry
 	g.TrajMagnitudePass = &trajMagPass
 	if !trajMagPass {
 		g.FirstBlocking = "traj_magnitude_pass"
@@ -156,8 +213,10 @@ func (b *Bandit) Decide(resp *PossessionResponse, hasPosition bool) (Action, Gat
 		return Wait, g
 	}
 
-	// Magnitude ≥ 0.08 guarantees non-zero, so sign always picks a direction.
-	if trajFinal > 0 {
+	// Magnitude ≥ min_abs_traj_entry guarantees non-zero, so sign always picks a direction.
+	// This matches the backtest's `use_traj_for_side=True` mode — Head B's sign drives
+	// BUY YES vs BUY NO, independent of basketball run-team direction.
+	if trajUsed > 0 {
 		return BuyYes, g
 	}
 	return BuyNo, g

@@ -21,10 +21,38 @@ const startGameTimeout = 30 * time.Second
 const inferenceTimeout = 500 * time.Millisecond
 
 // PossessionRequest is sent to the Python inference service.
+//
+// The garbage/blowout threshold fields are forwarded from trading.yaml so the
+// agent GATE flags (is_garbage_time / is_blowout) are config-driven rather than
+// hardcoded in Python. omitempty keeps the wire backwards-compatible: an older
+// Go binary that doesn't send them lets Python fall back to its 30/4/360 defaults.
 type PossessionRequest struct {
-	RawEvent       NBAEvent  `json:"raw_event"`
-	KalshiSnapshot [14]float32    `json:"kalshi_snapshot"` // pre-computed by RingBuffer
-	WallClockTS    time.Time      `json:"wall_clock_ts"`
+	RawEvent       NBAEvent    `json:"raw_event"`
+	KalshiSnapshot [14]float32 `json:"kalshi_snapshot"` // pre-computed by RingBuffer
+	WallClockTS    time.Time   `json:"wall_clock_ts"`
+
+	BlowoutMarginPts     int `json:"blowout_margin_pts,omitempty"`
+	GarbageTimePeriod    int `json:"garbage_time_period,omitempty"`
+	GarbageTimeClockSecs int `json:"garbage_time_clock_secs,omitempty"`
+}
+
+// InferenceConfig holds the trading.yaml-derived values the Go engine forwards
+// to the Python inference service. Per-possession thresholds ride on
+// PossessionRequest; the once-per-game values ride on the /game/start body.
+type InferenceConfig struct {
+	// Garbage/blowout GATE (per-possession).
+	BlowoutMarginPts     int
+	GarbageTimePeriod    int
+	GarbageTimeClockSecs int
+	// Model artifact paths (once per game, on /game/start).
+	ModelPath  string
+	ScalerPath string
+	// Dashboard gate thresholds (once per game) — let the dashboard green-light
+	// mirror the real agent thresholds instead of stale hardcoded literals.
+	MinAbsTraj   float32
+	MinYesBid    int
+	MaxYesBid    int
+	MinRunLength int
 }
 
 // PossessionResponse is returned by the Python inference service.
@@ -44,17 +72,19 @@ type PossessionResponse struct {
 
 type InferenceClient struct {
 	baseURL       string
+	cfg           InferenceConfig
 	httpClient    *http.Client // 500ms timeout — used for ProcessPossession
 	slowClient    *http.Client // no client-level timeout — used for StartGame (ctx controls deadline)
 }
 
-func NewInferenceClient(baseURL string) *InferenceClient {
+func NewInferenceClient(baseURL string, cfg InferenceConfig) *InferenceClient {
 	transport := &http.Transport{
 		MaxIdleConns:    10,
 		IdleConnTimeout: 90 * time.Second,
 	}
 	return &InferenceClient{
 		baseURL: baseURL,
+		cfg:     cfg,
 		httpClient: &http.Client{
 			Timeout:   inferenceTimeout,
 			Transport: transport,
@@ -80,12 +110,26 @@ func (c *InferenceClient) StartGame(ctx context.Context, gameID, ticker string, 
 		AwayTeamID   int64  `json:"away_team_id"`
 		RunID        string `json:"run_id,omitempty"`
 		LogDir       string `json:"log_dir,omitempty"`
+		// Forwarded config — model paths (Python reloads only on change) and the
+		// dashboard gate thresholds (so the dashboard tracks the live agent).
+		ModelPath    string  `json:"model_path,omitempty"`
+		ScalerPath   string  `json:"scaler_path,omitempty"`
+		MinAbsTraj   float32 `json:"min_abs_traj,omitempty"`
+		MinYesBid    int     `json:"min_yes_bid,omitempty"`
+		MaxYesBid    int     `json:"max_yes_bid,omitempty"`
+		MinRunLength int     `json:"min_run_length,omitempty"`
 	}{
 		MarketTicker: ticker,
 		HomeTeamID:   homeID,
 		AwayTeamID:   awayID,
 		RunID:        runID,
 		LogDir:       logDir,
+		ModelPath:    c.cfg.ModelPath,
+		ScalerPath:   c.cfg.ScalerPath,
+		MinAbsTraj:   c.cfg.MinAbsTraj,
+		MinYesBid:    c.cfg.MinYesBid,
+		MaxYesBid:    c.cfg.MaxYesBid,
+		MinRunLength: c.cfg.MinRunLength,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal start game request: %w", err)
@@ -144,9 +188,12 @@ func (c *InferenceClient) ProcessPossession(
 	snap MarketSnapshot,
 ) (*PossessionResponse, error) {
 	req := PossessionRequest{
-		RawEvent:       event,
-		KalshiSnapshot: snap.Features,
-		WallClockTS:    time.Now(),
+		RawEvent:             event,
+		KalshiSnapshot:       snap.Features,
+		WallClockTS:          time.Now(),
+		BlowoutMarginPts:     c.cfg.BlowoutMarginPts,
+		GarbageTimePeriod:    c.cfg.GarbageTimePeriod,
+		GarbageTimeClockSecs: c.cfg.GarbageTimeClockSecs,
 	}
 
 	body, err := json.Marshal(req)

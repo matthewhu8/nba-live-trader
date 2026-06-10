@@ -136,27 +136,47 @@ func defaultConfig() Config {
 			PaperMode bool `yaml:"paper_mode"`
 		}{PaperMode: true},
 		Inference: struct {
-			BaseURL   string `yaml:"base_url"`
-			TimeoutMS int    `yaml:"timeout_ms"`
-		}{BaseURL: "http://localhost:8001", TimeoutMS: 500},
+			BaseURL    string `yaml:"base_url"`
+			TimeoutMS  int    `yaml:"timeout_ms"`
+			ModelPath  string `yaml:"model_path"`
+			ScalerPath string `yaml:"scaler_path"`
+		}{
+			BaseURL: "http://localhost:8001", TimeoutMS: 500,
+			ModelPath:  "models/saved/mmoe_delay20.pt",
+			ScalerPath: "models/saved/mmoe_scaler_delay20.pkl",
+		},
 		Agent: struct {
-			MinYesBid             int     `yaml:"min_yes_bid"`
-			MaxYesBid             int     `yaml:"max_yes_bid"`
-			MinRunProbEntry       float32 `yaml:"min_run_prob_entry"`
-			MinAbsTrajEntry       float32 `yaml:"min_abs_traj_entry"`
-			MinRunLengthEntry     int     `yaml:"min_run_length_entry"`
-			TakeProfitCents       int     `yaml:"take_profit_cents"`
-			StopLossCents         int     `yaml:"stop_loss_cents"`
-			MaxHoldPossessions    int     `yaml:"max_hold_possessions"`
-			PositionSizeContracts int     `yaml:"position_size_contracts"`
-			MarketDriftLowBid     int     `yaml:"market_drift_low_bid"`
-			MarketDriftHighBid    int     `yaml:"market_drift_high_bid"`
+			MinYesBid               int     `yaml:"min_yes_bid"`
+			MaxYesBid               int     `yaml:"max_yes_bid"`
+			MinRunProbEntry         float32 `yaml:"min_run_prob_entry"`
+			MinAbsTrajEntry         float32 `yaml:"min_abs_traj_entry"`
+			MinRunLengthEntry       int     `yaml:"min_run_length_entry"`
+			TrajAggregator          string  `yaml:"traj_aggregator"`
+			TakeProfitCents         int     `yaml:"take_profit_cents"`
+			StopLossCents           int     `yaml:"stop_loss_cents"`
+			MaxHoldPossessions      int     `yaml:"max_hold_possessions"`
+			PositionSizeContracts   int     `yaml:"position_size_contracts"`
+			KellyAnchorTraj         float32 `yaml:"kelly_anchor_traj"`
+			KellySlope              float32 `yaml:"kelly_slope"`
+			KellyMinContracts       int     `yaml:"kelly_min_contracts"`
+			MarketDriftLowBid       int     `yaml:"market_drift_low_bid"`
+			MarketDriftHighBid      int     `yaml:"market_drift_high_bid"`
+			ExitSlippageBudgetCents int     `yaml:"exit_slippage_budget_cents"`
+			TrailActivateCents      int     `yaml:"trail_activate_cents"`
+			TrailGivebackCents      int     `yaml:"trail_giveback_cents"`
+			BlowoutMarginPts        int     `yaml:"blowout_margin_pts"`
+			GarbageTimePeriod       int     `yaml:"garbage_time_period"`
+			GarbageTimeClockSecs    int     `yaml:"garbage_time_clock_secs"`
 		}{
 			MinYesBid: 30, MaxYesBid: 70, MinRunProbEntry: 0.0,
 			MinAbsTrajEntry: 0.08, MinRunLengthEntry: 2,
+			TrajAggregator: "mean",
 			TakeProfitCents: 5, StopLossCents: 3, MaxHoldPossessions: 14,
-			PositionSizeContracts: 5,
+			PositionSizeContracts: 10,
+			KellyAnchorTraj: 0.08, KellySlope: 200, KellyMinContracts: 10,
 			MarketDriftLowBid: 20, MarketDriftHighBid: 80,
+			ExitSlippageBudgetCents: 2, TrailActivateCents: 5, TrailGivebackCents: 0,
+			BlowoutMarginPts: 30, GarbageTimePeriod: 4, GarbageTimeClockSecs: 360,
 		},
 		Feeds: struct {
 			NBAPollIntervalMS      int `yaml:"nba_poll_interval_ms"`

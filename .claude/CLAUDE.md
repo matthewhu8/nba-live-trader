@@ -26,7 +26,7 @@ Retail bettors overreact to runs they just watched on TV. They underreact to lin
 ---
 
 ## Non-Negotiable Rules
-- **ALWAYS maker orders** — limit orders only. Never market orders. 4x fee difference.
+- **Prefer maker orders** — limit orders by default (4x cheaper fees). Taker orders are allowed when the expected move justifies the higher taker fee — i.e. the edge still clears fees after accounting for the 0.07/contract taker cost. Maker remains the default; takers are the exception, only when it's clearly more profitable to cross the spread than to wait for a fill.
 - **Fees in every signal calculation** — if edge doesn't clear fees, don't trade
 - **Paper trade before real money** — weeks minimum, not days
 - **Position limits before every order** — `live-trader/go/risk.go`, no exceptions
@@ -345,7 +345,7 @@ Structured JSONL across Go and Python, correlatable via shared `run_id`. Every G
 - The end goal is live profitable trading. Every decision should serve that.
 - Lookahead bias makes backtests look great and live trading look terrible — be paranoid about it
 - When touching execution code: paper mode must be default, confirm before changing
-- Never suggest a taker order under any circumstance
+- Only suggest a taker order when the edge still clears the higher taker fee — maker is the default, takers are the justified exception
 - Blowout / garbage time = model off. Never trade garbage time.
 - If a backtest result looks suspiciously good, assume lookahead bias first
 - We are in Phase 6 (paper trading). Don't skip paper validation — minimum 4 weeks before real money.
