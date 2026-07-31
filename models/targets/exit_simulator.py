@@ -33,9 +33,25 @@ from scipy.special import logit
 
 logger = logging.getLogger(__name__)
 
-CHECKPOINT_SECONDS = [12, 24, 36, 48, 60, 72, 84, 96, 108, 120]
-N_CHECKPOINTS = len(CHECKPOINT_SECONDS)
-MAX_SECONDS = CHECKPOINT_SECONDS[-1]
+# Head B always emits a fixed-length trajectory (model output dim). The horizon
+# (how far out the last checkpoint sits) is configurable so we can train scalping
+# (120s) and swing (360s/600s) variants without changing the model architecture.
+N_CHECKPOINTS = 10
+DEFAULT_HORIZON_SECONDS = 120
+
+
+def make_checkpoints(horizon_seconds: int, n: int = N_CHECKPOINTS) -> list[int]:
+    """N evenly-spaced checkpoint times from horizon/n up to horizon (inclusive).
+
+    horizon=120 → [12,24,...,120]; horizon=360 → [36,...,360]; horizon=600 → [60,...,600].
+    """
+    step = horizon_seconds / n
+    return [int(round(step * (k + 1))) for k in range(n)]
+
+
+# Back-compat module-level defaults (120s scalping horizon).
+CHECKPOINT_SECONDS = make_checkpoints(DEFAULT_HORIZON_SECONDS)
+MAX_SECONDS = DEFAULT_HORIZON_SECONDS
 
 EXIT_REASONS = ("take_profit", "stop_loss", "momentum_flip", "time_gate", "garbage_time")
 
@@ -142,12 +158,13 @@ def simulate_exit(
             exit_time_offset_s = elapsed_s
             break
 
-    # Build 10-checkpoint trajectory with exit clipping.
-    # Checkpoints always use CHECKPOINT_SECONDS (training-compatible fixed intervals).
+    # Build 10-checkpoint trajectory with exit clipping. Checkpoints span the hold
+    # window evenly, so a 120s scalp and a 600s swing both yield 10 comparable points.
     trajectory: list[float] = []
+    checkpoints = make_checkpoints(hold_limit)
     exit_abs_ts = entry_wall_clock + pd.Timedelta(seconds=exit_time_offset_s)
 
-    for checkpoint_s in CHECKPOINT_SECONDS:
+    for checkpoint_s in checkpoints:
         checkpoint_ts = entry_wall_clock + pd.Timedelta(seconds=checkpoint_s)
         if checkpoint_ts <= exit_abs_ts:
             price = _lookup_price_at_or_after(future_ticks, checkpoint_ts, exit_price)
@@ -173,6 +190,7 @@ def build_trajectory_targets(
     all_possessions: pd.DataFrame,
     tp: float = 5.0,
     sl: float = 3.0,
+    horizon_seconds: int = DEFAULT_HORIZON_SECONDS,
 ) -> pd.DataFrame:
     """
     Build trajectory targets for all entry rows with Kalshi tick data.
@@ -235,6 +253,7 @@ def build_trajectory_targets(
                 tp=tp,
                 sl=sl,
                 entry_side=entry_side,
+                max_seconds=horizon_seconds,
             )
 
             for i, val in enumerate(sim.trajectory):

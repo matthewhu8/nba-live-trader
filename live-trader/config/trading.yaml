@@ -6,7 +6,8 @@ trading:
   # money by default; flip to false locally for a live session. Live history:
   # 2026-06-03 went live for NYK@SAS Game 1 (user-authorized after Phase 0/1/3
   # ship — aggregator switch, doubled sizing) with the daily kill at $40.
-  paper_mode: true
+  # 2026-06-10 went live for SAS@NYK (user-authorized; orphan-TP shutdown fix landed).
+  paper_mode: false
 
 inference:
   base_url: "http://localhost:8001"

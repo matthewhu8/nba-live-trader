@@ -559,6 +559,7 @@ def build_dataloaders(
     sl: float = 3.0,
     num_workers: int = 0,
     feed_delay_seconds: int = FEED_DELAY_SECONDS_NBA,
+    horizon_seconds: int = 120,
 ) -> tuple[DataLoader, DataLoader, StandardScaler]:
     """
     Full data pipeline: load → feature engineer → targets → split → DataLoaders.
@@ -597,7 +598,7 @@ def build_dataloaders(
         joint_df = _add_run_target(joint_df)
         joint_df = _add_hazard_targets_all_games(joint_df)
 
-        logger.info("Computing trajectory targets (exit simulator) for joint rows...")
+        logger.info("Computing trajectory targets (exit simulator, horizon=%ds) for joint rows...", horizon_seconds)
         # For exit simulator we also need the full possession history per game
         # (to detect momentum flips and garbage time)
         joint_df = build_trajectory_targets(
@@ -606,6 +607,7 @@ def build_dataloaders(
             all_possessions=possessions,
             tp=tp,
             sl=sl,
+            horizon_seconds=horizon_seconds,
         )
 
         # Ensure market feature columns exist on bball_only (filled with 0)
