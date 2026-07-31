@@ -392,80 +392,67 @@ What the agent learns that rules can't capture:
 
 ```
 kalshi-trader/
-├── AGENTS.md
+├── AGENTS.md                         # Architecture and principles
 ├── .env                              # credentials — never commit
-├── .gitignore                        # .env, data/, logs/, __pycache__
-│
-├── .Codex/
-│   ├── skills/
-│   │   ├── feature-engineering/SKILL.md
-│   │   ├── kalshi-execution/SKILL.md
-│   │   ├── backtesting/SKILL.md
-│   │   └── rl-agent/SKILL.md
-│   └── commands/
-│       ├── check-risk.md
-│       ├── review-strategy.md
-│       └── backtest-summary.md
+├── .gitignore
 │
 ├── data/
 │   ├── ingestion/
-│   │   ├── nba_api_client.py         # historical pull — play-by-play, lineups
-│   │   ├── kalshi_recorder.py        # !! RUNS FROM DAY ONE !! records price ticks
-│   │   └── live_feed.py              # future: Sportradar live connector
+│   │   ├── nba_api_client.py         # Historical play-by-play + lineups
+│   │   ├── kalshi_recorder.py        # Live tick recording
+│   │   └── post_game_pipeline.py     # Nightly 3 AM pipeline (Fly.io)
 │   ├── raw/
 │   │   ├── games.parquet
 │   │   ├── possessions.parquet
 │   │   ├── substitution_events.parquet
 │   │   └── kalshi_price_ticks.parquet
 │   └── feature_store/
-│       ├── player_ratings.parquet    # rolling point-in-time ratings
-│       ├── lineup_ratings.parquet    # per lineup, per as_of_game
-│       ├── rotation_tendencies.parquet
-│       └── feature_rows.parquet      # THE feature store — one row per possession
+│       ├── player_ratings.parquet
+│       ├── lineup_ratings.parquet
+│       └── feature_rows.parquet
 │
 ├── models/
+│   ├── mmoe/                         # Multi-task Mixture-of-Experts model
+│   │   ├── model.py
+│   │   └── train.py
 │   ├── features/
-│   │   ├── builder.py                # orchestrates full feature row construction
+│   │   ├── builder.py
 │   │   ├── lineup_features.py
 │   │   ├── momentum_features.py
 │   │   ├── context_features.py
-│   │   └── targets.py                # forward-looking targets (training only)
+│   │   └── targets.py
 │   ├── ratings/
-│   │   ├── player_rapm.py            # rolling regularized plus/minus
+│   │   ├── player_rapm.py
 │   │   └── lineup_net_rating.py
-│   ├── rotation_tendency.py
-│   ├── stint_segmenter.py            # detects lineup changes from event stream
-│   ├── run_predictor.py              # XGBoost run prediction model
-│   ├── synthetic_kalshi.py           # synthetic price model (pre-real-data)
-│   └── rl_agent.py                   # sequential trade decision agent
-│
-├── strategies/
-│   ├── base.py                       # BaseStrategy interface
-│   ├── mean_reversion.py
-│   ├── lineup_edge.py
-│   ├── rotation_anticipation.py
-│   ├── momentum.py
-│   └── composite.py
+│   └── saved/
+│       ├── mmoe_delay20.pt
+│       └── mmoe_scaler_delay20.pkl
 │
 ├── backtesting/
-│   ├── simulator.py                  # core replay engine
-│   ├── evaluator.py                  # metrics, context breakdown, attribution
-│   └── results/                      # strategy run outputs
+│   ├── simulator.py                  # Core replay engine
+│   ├── evaluator.py                  # Metrics and context breakdown
+│   ├── mmoe_backtest.py
+│   └── results/
+│
+├── live-trader/
+│   ├── go/                           # Go execution engine
+│   │   ├── main.go
+│   │   ├── coordinator.go
+│   │   ├── agent.go
+│   │   ├── risk.go
+│   │   └── jsonlog.go
+│   ├── inference/                    # Python inference (FastAPI)
+│   │   ├── main.py
+│   │   ├── features.py
+│   │   └── dashboard.py
+│   └── config/
+│       └── trading.yaml
 │
 ├── pregame/
 │   └── pregame_analyzer.py
 │
-├── execution/
-│   ├── kalshi_client.py              # ONLY Kalshi API touchpoint
-│   ├── order_manager.py
-│   └── paper_trader.py
-│
-├── risk/
-│   └── position_limits.py            # called before every order, no exceptions
-│
 └── logs/
-    ├── live_trades/
-    └── paper_trades/
+    └── runs/{date}/{run_id}/
 ```
 
 ---
@@ -499,178 +486,16 @@ data permanently lost. This is the first thing to build and the first thing to d
 
 ---
 
-## Build Order
-
-### Phase 1 — Data Foundation (start here, nothing else matters yet)
-1. `data/ingestion/kalshi_recorder.py` — deploy immediately, record every game
-2. `data/ingestion/nba_api_client.py` — pull 3 seasons of historical play-by-play
-3. Raw table normalization → `possessions.parquet`, `substitution_events.parquet`
-
-### Phase 2 — Feature Store
-4. `models/ratings/player_rapm.py` — rolling point-in-time player ratings
-5. `models/ratings/lineup_net_rating.py` — lineup ratings from player ratings
-6. `models/rotation_tendency.py` — coach rotation tendency model
-7. `models/stint_segmenter.py` — lineup change detection
-8. `models/features/` — all feature modules + `builder.py`
-9. Validate: manually spot-check 50 feature rows for lookahead bias
-
-### Phase 3 — Backtesting Infrastructure
-10. `models/synthetic_kalshi.py` — synthetic price model
-11. `strategies/base.py` + first two strategies (mean_reversion, lineup_edge)
-12. `backtesting/simulator.py` — replay engine with latency enforcement
-13. `backtesting/evaluator.py` — metrics and context breakdown
-14. First backtest run + analysis
-
-### Phase 4 — Model Layer
-15. MMoE model — ✅ complete (`models/mmoe/`)
-16. `models/rl_agent.py` — trained through backtesting simulator
-17. `pregame/pregame_analyzer.py`
-
-### Phase 5 — Execution
-19. `execution/kalshi_client.py` — Kalshi REST + WebSocket
-20. `execution/paper_trader.py` — paper mode (default)
-21. `execution/order_manager.py`
-22. `risk/position_limits.py` + kill switch
-
-### Phase 6 — Live Validation
-23. Paper trading — minimum 4 weeks, multiple games per week
-24. Analyze paper results vs backtest — explain discrepancies
-25. Real money — small size, single game at a time, monitor every trade
-
----
-
 ## Current Status
-- [x] Phase 1: Kalshi recorder deployed
-- [x] Phase 1: nba_api ingestion complete
-- [x] Phase 1: Raw tables normalized → `features.possession_flat` (400K rows, 86 cols)
-- [x] Phase 2: Player ratings (rolling RAPM)
-- [x] Phase 2: Lineup ratings (47M rows, 1,065 games)
-- [ ] Phase 2: Rotation tendency model
-- [x] Phase 2: Feature store built + validated (58 features, lineup signals included)
-- [x] Phase 2: **Nightly post-game pipeline** — runs at 3 AM ET on Fly.io, updates all tables automatically
-- [x] Phase 3: **MMoE backtest complete (2026-04-23)** — edge validated on Apr 7–12 val set ← **COMPLETED**
-  - Baseline (naïve entry): 92 trades, 29.3% win rate, **-$3,086 net**
-  - **Best config**: `--use-traj-for-side --min-abs-traj 0.08 --min-run-length 2 --hold-seconds 240`
-  - Best result: 19 trades, **42.1% win rate, +$2,463 net** (100 contracts, 48 val games)
-  - Q3 strongest quarter: 71.4% win rate, +$2,584 net
-  - Key fix: entry direction from Head B `traj_final` sign, not basketball `run_team_encoded`
-  - Key filters: `|traj_final| ≥ 0.08` (Head B confidence) + `run_length ≥ 2` (no single-basket noise)
-  - 240s hold > 120s: market reprices over 3-4 min; 300s adds noise (50% SL rate)
-  - Backtest script: `python -m backtesting.mmoe_backtest --use-traj-for-side --min-abs-traj 0.08 --min-run-length 2 --hold-seconds 240`
-- [x] Phase 4: **MMoE model trained (2026-04-15)**
-  - **Head A (run classifier):** AUCPR 0.1533 vs 0.0840 baseline (+82%)
-  - **Head B (price trajectory):** RMSE 0.5525 log-odds delta; Dir Acc 59.2% on meaningful-exit rows
-  - **Head C (run survival hazard):** Brier 0.0939 across 10 horizons
-  - Architecture: 83 input features (58 physics + 10 pregame + 14 market + 1 market flag), 3 experts (64-dim MLP), 3 gating networks, 3 heads. ~37K params.
-  - Data: 433K basketball rows (Heads A/C) + 24K joint rows with Kalshi ticks (Head B), 148 games
-  - Model artifacts: `models/saved/mmoe_delay20.pt`, `models/saved/mmoe_scaler_delay20.pkl`
-- [ ] Phase 4: RL agent ← **CURRENT FOCUS**
-- [ ] Phase 5: Execution layer (paper mode)
-- [ ] Phase 5: Risk module + kill switch
-- [ ] Phase 6: Paper trading (4+ weeks)
-- [ ] Phase 6: Live trading
 
----
+- [x] Phase 1: Data foundation (recorder deployed, nba_api ingestion, raw tables normalized)
+- [x] Phase 2: Feature store (58 features, player ratings, lineup ratings, nightly pipeline)
+- [x] Phase 3: Backtesting infrastructure (simulator, evaluator, MMoE validation)
+- [x] Phase 4: MMoE model trained and validated (Head A, B, C all deployed)
+- [x] Phase 5: Go execution engine + Python inference service (paper mode)
+- [ ] **Phase 6: Paper trading** ← CURRENT FOCUS
 
-## Nightly Post-Game Pipeline (completed 2026-04-02)
-
-### What it does
-Runs automatically at 3 AM ET on the existing Fly.io recorder machine after all games finish.
-No extra infra — same machine, same Docker image, triggered from `recorder_daemon.py`.
-
-### Files
-- **NEW:** `data/ingestion/post_game_pipeline.py` — main pipeline logic
-- **MODIFIED:** `data/ingestion/recorder_daemon.py` — 3 AM trigger after `_schedule_games` returns
-- **MODIFIED:** `models/ratings/lineup_net_rating.py` — added `games_together: int32` to schema
-
-### Pipeline phases (must run in order)
-```
-Phase 0  Upsert dim_games                  (all other tables FK on game_id)
-Phase 1  Fetch + parse PBP via nba_api     (stateless, no disk cache)
-Phase 2  Build possession_flat rows        (uses pre-tonight ASOF ratings — point-in-time correct)
-Phase 3  Update player_ratings + lineup_ratings  (Ridge regression + EWMA, for tomorrow)
-```
-
-### Key design decisions
-- **Stateless**: all reads/writes go directly to MotherDuck — no local DuckDB, no disk
-- **ASOF ratings**: `MAX(as_of_game_id) WHERE as_of_game_id <= game_id` — works even if ratings are one game stale
-- **Player ratings**: full Ridge regression (same as `player_rapm.py`) run once nightly for ONE new as_of point (~5s, ~40MB peak)
-- **Lineup ratings**: EWMA with adaptive α = `max(0.05, 1/n)` for observed component, then Bayesian shrinkage blend
-- **`games_together`**: new int32 column added to `features.lineup_ratings` in MotherDuck. Historical rows are NULL; pipeline falls back to `possessions_together // 25`
-- **Idempotent**: re-running skips Phase 2 if game_id already in possession_flat; skips Phase 3 inserts if as_of_game_id already exists
-- **INSERT OR IGNORE not available** in DuckDB 1.5.1 without a PRIMARY KEY — pipeline uses plain INSERT with pre-check guards instead
-
-### MotherDuck access
-- `kalshi_trading` database owned by the account whose token is in `.env` / Fly.io secrets
-- The old token was a read-only share token — replaced with owner token on 2026-04-02
-- **IMPORTANT**: Fly.io `MOTHERDUCK_TOKEN` secret also needs updating before deploy:
-  ```bash
-  fly secrets set MOTHERDUCK_TOKEN="<new-token>" -a kalshi-recorder
-  fly deploy -a kalshi-recorder
-  ```
-
-### Verified results (2026-04-02 test run)
-- March 31 games: 1,411 possession_flat rows inserted (7 games)
-- player_ratings: 697 players at `as_of=0022501104`
-- lineup_ratings: 209 new rows at `as_of=0022501104` with `games_together` populated
-- Idempotency confirmed: second run skipped Phase 2 entirely
-- Tonight's games (not yet played): Phase 0 inserted 6 dim_games rows, Phase 1 exited cleanly
-
-### Manual trigger (for testing or backfill)
-```bash
-python -m data.ingestion.post_game_pipeline 2026-03-31
-```
-
-### Known issues / gotchas
-- `duckdb_loader.py` has a broken `INSERT OR IGNORE` on `dim_teams` in DuckDB 1.5.1 — the `--pull-motherduck` and `--pull-motherduck-full` flags don't work locally. Use `--pull-possession-flat` and `--pull-features-schema` as standalone flags instead.
-- Local DuckDB (`kalshi_trading.duckdb`) may be stale — trust MotherDuck as source of truth, work directly against cloud when verifying pipeline results.
-- `possession_flat` in MotherDuck uses `wall_clock_ts` but local feature builder produces `period_wall_clock` — the pipeline handles this by aligning DataFrame columns to the target table schema before inserting.
-
----
-
-## Common Commands
-
-All commands run from the project root with `source venv/bin/activate` first.
-
-### Data Pipeline
-
-```bash
-# Fetch PBP for games missing from possessions parquet, then update local DuckDB + sync to cloud
-python -m data.ingestion.nba_api_client                        # all missing games
-python -m data.ingestion.nba_api_client --since 2026-03-13     # only games on/after this date
-python -m data.ingestion.nba_api_client --game 0022501039      # single game
-
-# Build/update local DuckDB only
-python -m data.ingestion.duckdb_loader
-
-# Build local DuckDB, then push new rows to MotherDuck (additive — never deletes remote rows)
-python -m data.ingestion.duckdb_loader --sync-motherduck
-
-# Pull new rows from MotherDuck into local DB (additive — never deletes local rows)
-python -m data.ingestion.duckdb_loader --pull-motherduck
-
-# DESTRUCTIVE: replace entire local DB with MotherDuck copy (use for fresh setup or reset)
-python -m data.ingestion.duckdb_loader --pull-motherduck-full
-```
-
-### Sync behavior
-Both `--sync-motherduck` and `--pull-motherduck` are additive merges keyed on each table's
-natural key (e.g. `game_id + event_id` for possession_feed). Running either direction twice
-is safe — the second run sees everything already exists and does nothing. Remote-only rows
-are never deleted by a push; local-only rows are never deleted by a merge pull.
-
-Use `--pull-motherduck-full` only when you want a clean slate (new machine, corrupted local DB).
-
-### Recorder
-
-```bash
-# Record live Kalshi ticks during NBA games (run continuously on game days)
-python data/ingestion/kalshi_recorder.py
-
-# Check today's game schedule + recommended recorder start time
-python data/ingestion/game_schedule.py
-python data/ingestion/game_schedule.py --date 2026-03-25
-```
+**See `/data-ingestion`, `/backtesting`, and `/kalshi-execution` skills for operational commands.**
 
 ---
 
