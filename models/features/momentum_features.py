@@ -155,10 +155,21 @@ def add_momentum_features(poss_df: pd.DataFrame) -> pd.DataFrame:
     df["pace_last_10_possessions"] = (
         valid_dur.shift(1).rolling(10, min_periods=1).mean().fillna(15.0).values
     )
-    # Season baseline: cumulative mean up to (but not including) this possession
-    df["pace_season_baseline"] = (
+    # Expanding WITHIN-GAME mean up to (but not including) this possession.
+    #
+    # Historically named `pace_season_baseline`, which is not what it is — there is
+    # nothing seasonal about it. That name caused a real bug: the live path read the
+    # name rather than the behavior and fed the pregame constant under it, so the
+    # column was a different quantity in each path. The true pregame prior is
+    # `expected_pace`; the two are combined by transforms.pace_ref().
+    #
+    # Both names are written while possession_flat still carries the old column.
+    # Drop `pace_season_baseline` once the table has been rebuilt.
+    pace_game_to_date = (
         valid_dur.shift(1).expanding(min_periods=1).mean().fillna(15.0).values
     )
+    df["pace_game_to_date"]    = pace_game_to_date
+    df["pace_season_baseline"] = pace_game_to_date
 
     # Shot quality / sustainability:
     # "sustainable" = scoring via 3-pointers or short shots (distance < 5 ft = paint)
@@ -219,7 +230,13 @@ def add_momentum_features(poss_df: pd.DataFrame) -> pd.DataFrame:
     df["away_xPPP_last_5"]            = away_xppp_last5.values
     df["home_actual_vs_expected_PPP"]  = (home_actual_last5 - home_xppp_last5).values
     df["away_actual_vs_expected_PPP"]  = (away_actual_last5 - away_xppp_last5).values
-    df["home_shot_quality_trend"]      = np.sign(home_xppp_last5.values - home_xppp_prev5.values)
-    df["away_shot_quality_trend"]      = np.sign(away_xppp_last5.values - away_xppp_prev5.values)
+    # RAW differences, not np.sign(). The signed form collapsed every magnitude onto
+    # {-1, 0, +1}, so a shot-quality collapse and an imperceptible drift produced the
+    # same input. The prev-5 windows are also emitted so consumers can rebuild the
+    # trend without recomputing the rolling windows.
+    df["home_xPPP_prev_5"]        = home_xppp_prev5.values
+    df["away_xPPP_prev_5"]        = away_xppp_prev5.values
+    df["home_shot_quality_trend"] = home_xppp_last5.values - home_xppp_prev5.values
+    df["away_shot_quality_trend"] = away_xppp_last5.values - away_xppp_prev5.values
 
     return df

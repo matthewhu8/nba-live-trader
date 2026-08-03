@@ -7,7 +7,7 @@ Loads and prepares the two training datasets:
     Targets:  target_run (Head A), hazard_0..9 (Head C). No trajectory targets.
 
   Dataset B (joint): ~24K rows — possessions with Kalshi tick data
-    Features: X_physics + X_pregame + X_market (all 83 features)
+    Features: X_physics + X_pregame + X_market (58 features: 33 + 11 + 14)
     Targets:  target_run, hazard_0..9, traj_0..9 (all three heads)
 
 Train/val splits:
@@ -33,6 +33,7 @@ from dotenv import load_dotenv
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
 
+from models.features import transforms as T
 from models.mmoe.feature_config import ALL_FEATURE_COLS, MARKET_COLS, PHYSICS_COLS, PREGAME_COLS
 from models.targets.exit_simulator import build_trajectory_targets
 from models.targets.kalshi_targets import add_hazard_targets
@@ -64,17 +65,104 @@ TARGET_RUN = "target_meaningful_run_5_scoring"
 
 PREGAME_TABLE_COLS = [c for c in PREGAME_COLS if c != "has_pregame_data"]
 
+# Raw boolean columns from possession_flat that survive into PHYSICS_COLS as-is and
+# must be cast before StandardScaler. Consolidated columns are already floats,
+# because every transform in transforms.py returns float.
 BOOL_COLS = [
-    "home_scoring_sustainable", "away_scoring_sustainable",
-    "q4_close_game",
-    "home_in_bonus", "away_in_bonus",
-    "home_star_in_foul_trouble", "away_star_in_foul_trouble",
-    "home_star_on_court", "away_star_on_court",
-    "was_foul", "was_sub",
-    "had_shooting_foul", "had_personal_foul",
-    "home_called_timeout_in_last_3_poss", "away_called_timeout_in_last_3_poss",
-    "home_lineup_just_changed", "away_lineup_just_changed",
+    "was_sub",
+    "had_shooting_foul",
+    "had_personal_foul",
 ]
+
+# ── Traded-regime filter ─────────────────────────────────────────────────────
+# The agent refuses to trade overtime, blowouts, and garbage time (agent.go gate
+# chain). Training on those rows teaches the model a regime it will never be
+# allowed to act in, so they are dropped before the split.
+
+REGULATION_LAST_PERIOD = 4
+TRADING_CONFIG_PATH = Path(__file__).resolve().parents[2] / "live-trader" / "config" / "trading.yaml"
+
+# Columns whose absence means the feature pipeline never populated the row. Filling
+# these with 0 would teach the model that a pace of 0 seconds per possession is a
+# real game state, which is physically impossible.
+REQUIRED_NON_NULL_COLS = [
+    "home_xPPP_last_5",
+    "current_run_3pt_pct",
+]
+
+# Fallback only. The live gate value is authoritative and read from trading.yaml.
+_DEFAULT_BLOWOUT_MARGIN_PTS = 30
+
+
+def _blowout_margin_pts() -> int:
+    """
+    Read the blowout threshold from the same trading.yaml the live agent uses.
+
+    Deliberately NOT the stored `possession_flat.is_garbage_time` column, which is
+    built on |score_diff| > 20. The live gate uses 30, so filtering on the stored
+    column would discard 28,627 rows the system would actually have traded.
+    """
+    try:
+        import yaml
+        with open(TRADING_CONFIG_PATH) as fh:
+            cfg = yaml.safe_load(fh) or {}
+        margin = cfg.get("agent", {}).get("blowout_margin_pts")
+        if margin is None:
+            raise KeyError("agent.blowout_margin_pts")
+        return int(margin)
+    except Exception as exc:
+        logger.warning(
+            "Could not read agent.blowout_margin_pts from %s (%s) — falling back to %d. "
+            "Training and the live gate may now disagree.",
+            TRADING_CONFIG_PATH, exc, _DEFAULT_BLOWOUT_MARGIN_PTS,
+        )
+        return _DEFAULT_BLOWOUT_MARGIN_PTS
+
+
+def _filter_to_traded_regime(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Keep only possessions the agent could actually trade, and drop rows the feature
+    pipeline left incomplete. Logs each filter's cost so a future data regression
+    shows up as a jump in one of these counts.
+    """
+    margin = _blowout_margin_pts()
+    start = len(df)
+
+    is_regulation = df["period"] <= REGULATION_LAST_PERIOD
+    n_overtime = int((~is_regulation).sum())
+    out = df[is_regulation]
+
+    # Garbage time is a strict subset of (blowout AND late), so the margin filter
+    # already covers it — no separate condition needed.
+    within_margin = out["score_diff"].abs() <= margin
+    n_blowout = int((~within_margin).sum())
+    out = out[within_margin]
+
+    present = [c for c in REQUIRED_NON_NULL_COLS if c in out.columns]
+    pace_col = "pace_game_to_date" if "pace_game_to_date" in out.columns else "pace_season_baseline"
+    if pace_col in out.columns:
+        present.append(pace_col)
+    before_null = len(out)
+    out = out.dropna(subset=present)
+    n_incomplete = before_null - len(out)
+
+    kept = len(out)
+    logger.info(
+        "Traded-regime filter: %d → %d rows (%.1f%% kept). "
+        "Dropped %d overtime (period>%d), %d blowout (|score_diff|>%d, from trading.yaml), "
+        "%d incomplete (NULL in %s)",
+        start, kept, 100.0 * kept / start if start else 0.0,
+        n_overtime, REGULATION_LAST_PERIOD,
+        n_blowout, margin,
+        n_incomplete, ", ".join(present),
+    )
+    if kept == 0:
+        raise ValueError(
+            f"Traded-regime filter removed every row of {start}. Check that "
+            f"`period` and `score_diff` are populated in possession_flat."
+        )
+    return out.reset_index(drop=True)
+
 
 _MONTH_MAP = {
     "JAN": "01", "FEB": "02", "MAR": "03", "APR": "04",
@@ -136,29 +224,167 @@ def _load_kalshi_ticks(conn: duckdb.DuckDBPyConnection) -> pd.DataFrame:
 
 # ── Derived features ──────────────────────────────────────────────────────────
 
+def _xppp_trend_windows(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+    """
+    Recompute the raw (unsigned) shot-quality trend per team.
+
+    possession_flat stores `home/away_shot_quality_trend` already collapsed to
+    np.sign(), so the magnitude is not recoverable from the stored column. The
+    windows are rebuilt here from the per-possession shot data using the same
+    shift/rolling spans as momentum_features.add_momentum_features(): the last 5
+    scoring possessions vs the 5 before those.
+
+    Returns (home_trend, away_trend) as raw xPPP differences.
+    """
+    xppp = pd.Series(
+        T.shot_xppp(df["shot_value"].values, df["shot_distance"].values),
+        index=df.index,
+    )
+    scored = df["points"].fillna(0) > 0
+    games = df["game_id"]
+
+    trends: list[pd.Series] = []
+    for side in ("home", "away"):
+        side_mask = (df["team_scored"] == side) & scored
+        masked = xppp.where(side_mask, other=np.nan)
+        grouped = masked.groupby(games)
+        last_5 = grouped.transform(
+            lambda s: s.shift(1).rolling(5, min_periods=1).mean()
+        ).fillna(1.0)
+        prev_5 = grouped.transform(
+            lambda s: s.shift(6).rolling(5, min_periods=1).mean()
+        ).fillna(1.0)
+        trends.append(last_5 - prev_5)
+
+    return trends[0], trends[1]
+
+
 def _add_derived_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Compute features derived from raw possession_flat columns."""
+    """
+    Build the 33 physics features from raw possession_flat columns.
+
+    Every derived value routes through models/features/transforms.py so the live
+    streamer computes the identical quantity from the identical constants. Do not
+    inline a formula here — add it to transforms.py and call it, or the two paths
+    will drift again.
+
+    Must run AFTER _join_pregame: the pace shrinkage blends toward `expected_pace`.
+    """
     out = df.copy()
 
-    elapsed_in_period = (720 - out["game_clock_secs"].clip(0, 720)) / 60
-    out["minutes_into_game"] = (out["period"] - 1) * 12 + elapsed_in_period
+    if "expected_pace" not in out.columns:
+        raise ValueError(
+            "_add_derived_features requires `expected_pace`, which is supplied by "
+            "_join_pregame(). Call _join_pregame() first."
+        )
 
-    for col in ("home_team_fouls_q", "away_team_fouls_q", "home_timeouts_used", "away_timeouts_used"):
+    for col in (
+        "home_team_fouls_q", "away_team_fouls_q",
+        "home_timeouts_used", "away_timeouts_used",
+        "home_sub_count", "away_sub_count",
+        "home_lineup_sample_size", "away_lineup_sample_size",
+    ):
         out[col] = out[col].fillna(0)
 
-    out["home_in_bonus"]          = (out["home_team_fouls_q"] >= 5).astype(int)
-    out["away_in_bonus"]          = (out["away_team_fouls_q"] >= 5).astype(int)
-    out["home_fouls_until_bonus"] = (5 - out["home_team_fouls_q"]).clip(lower=0)
-    out["away_fouls_until_bonus"] = (5 - out["away_team_fouls_q"]).clip(lower=0)
+    period = out["period"]
+    clock = out["game_clock_secs"]
 
-    out["home_full_timeouts_remaining"] = (4 - out["home_timeouts_used"]).clip(lower=0)
-    out["away_full_timeouts_remaining"] = (4 - out["away_timeouts_used"]).clip(lower=0)
+    # ── Score x time ──────────────────────────────────────────────────────────
+    out["lead_z"] = T.lead_z(out["score_diff"], period, clock)
+    out["time_leverage"] = T.time_leverage(period, clock)
+    # Recomputed rather than read from possession_flat so there is exactly one
+    # definition of this column in the codebase.
+    out["garbage_time_risk"] = T.garbage_time_risk(out["score_diff"], period, clock)
 
-    out["current_run_team_encoded"] = (
-        out["current_run_team"].map({"home": 1, "away": -1}).fillna(0)
+    # ── Runs ──────────────────────────────────────────────────────────────────
+    # Kept on the frame even though it is no longer a model input: exit_simulator
+    # .build_trajectory_targets() reads it to pick the trade side, and it runs after
+    # this function. Dropping it would silently force entry_side=+1 on every row and
+    # corrupt the Head B trajectory targets.
+    run_team_encoded = out["current_run_team"].map({"home": 1.0, "away": -1.0}).fillna(0.0)
+    out["current_run_team_encoded"] = run_team_encoded
+    out["run_signed_points"] = T.run_signed_points(run_team_encoded, out["current_run_points"])
+    out["run_efficiency"] = T.run_efficiency(out["current_run_points"], out["current_run_length"])
+    out["run_fragility"] = T.run_fragility(out["current_run_3pt_pct"], out["current_run_paint_pct"])
+
+    # ── Recent scoring ────────────────────────────────────────────────────────
+    out["swing_5"] = T.swing_5(out["home_points_last_5_poss"], out["away_points_last_5_poss"])
+    out["swing_accel"] = T.swing_accel(
+        out["home_points_last_5_poss"], out["away_points_last_5_poss"],
+        out["home_points_last_10_poss"], out["away_points_last_10_poss"],
     )
-    out["home_star_in_foul_trouble"] = (out["home_trouble_star_tier"] > 0).astype(float)
-    out["away_star_in_foul_trouble"] = (out["away_trouble_star_tier"] > 0).astype(float)
+
+    # ── Pace ──────────────────────────────────────────────────────────────────
+    # `pace_season_baseline` is the legacy name for the expanding WITHIN-GAME mean;
+    # nothing about it is seasonal. momentum_features.py now writes it as
+    # `pace_game_to_date`, so accept either while possession_flat is mid-migration.
+    # The genuine pregame prior is `expected_pace`, and pace_ref blends the two.
+    if "pace_game_to_date" in out.columns:
+        pace_to_date = out["pace_game_to_date"]
+    elif "pace_season_baseline" in out.columns:
+        pace_to_date = out["pace_season_baseline"]
+    else:
+        raise ValueError(
+            "possession_flat has neither `pace_game_to_date` nor its legacy name "
+            "`pace_season_baseline`; the within-game pace mean is required for "
+            "pace_ref/pace_surprise."
+        )
+
+    elapsed_possessions = out.groupby("game_id").cumcount()
+    out["pace_ref"] = T.pace_ref(pace_to_date, out["expected_pace"], elapsed_possessions)
+    out["pace_surprise"] = T.pace_surprise(
+        out["pace_last_10_possessions"], pace_to_date,
+        out["expected_pace"], elapsed_possessions,
+    )
+
+    # ── Shot quality ──────────────────────────────────────────────────────────
+    out["xppp_edge"] = T.xppp_edge(out["home_xPPP_last_5"], out["away_xPPP_last_5"])
+    out["luck_edge"] = T.luck_edge(
+        out["home_actual_vs_expected_PPP"], out["away_actual_vs_expected_PPP"]
+    )
+    home_trend, away_trend = _xppp_trend_windows(out)
+    out["quality_trend_edge"] = T.edge(home_trend, away_trend)
+
+    # ── Foul state ────────────────────────────────────────────────────────────
+    out["team_foul_edge"] = T.edge(out["home_team_fouls_q"], out["away_team_fouls_q"])
+    out["home_fouls_until_bonus"] = T.fouls_until_bonus(out["home_team_fouls_q"])
+    out["away_fouls_until_bonus"] = T.fouls_until_bonus(out["away_team_fouls_q"])
+    # All edges are home-minus-away. Positive means "more of this on the home
+    # side", including when that is bad for home (foul trouble). The sign is a
+    # single linear term the model resolves trivially; consistency matters more.
+    out["star_trouble_edge"] = T.edge(
+        out["home_trouble_star_tier"] > 0, out["away_trouble_star_tier"] > 0
+    )
+    out["star_on_court_edge"] = T.edge(out["home_star_on_court"], out["away_star_on_court"])
+
+    # ── Event context ─────────────────────────────────────────────────────────
+    out["sub_count_edge"] = T.edge(out["home_sub_count"], out["away_sub_count"])
+
+    # ── Timeouts ──────────────────────────────────────────────────────────────
+    # A missing value here means the pipeline never saw a timeout for the row, which
+    # is the sentinel case — not "a timeout just happened". Filling with 0 downstream
+    # would say the opposite of the truth on those rows.
+    poss_since_to = out["possessions_since_last_timeout"].fillna(T.NO_TIMEOUT_SENTINEL)
+    out["poss_since_timeout"] = T.timeout_possessions_bounded(poss_since_to)
+    out["no_timeout_yet"] = T.no_timeout_yet(poss_since_to)
+    out["timeout_called_edge"] = T.edge(
+        out["home_called_timeout_in_last_3_poss"], out["away_called_timeout_in_last_3_poss"]
+    )
+    out["timeouts_remaining_edge"] = T.edge(
+        T.full_timeouts_remaining(out["home_timeouts_used"]),
+        T.full_timeouts_remaining(out["away_timeouts_used"]),
+    )
+
+    # ── Lineup ────────────────────────────────────────────────────────────────
+    out["lineup_confidence"] = T.lineup_confidence(
+        out["home_lineup_sample_size"], out["away_lineup_sample_size"]
+    )
+    out["lineup_changed_edge"] = T.edge(
+        out["home_lineup_just_changed"], out["away_lineup_just_changed"]
+    )
+    out["lineup_changed_any"] = T.any_flag(
+        out["home_lineup_just_changed"], out["away_lineup_just_changed"]
+    )
 
     return out
 
@@ -560,7 +786,7 @@ def _split_joint(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
 @dataclass
 class MMoEBatch:
     """Container for target tensors with masks."""
-    X:                torch.Tensor  # (N, 83) float32
+    X:                torch.Tensor  # (N, 58) float32
     target_run:       torch.Tensor  # (N,)    float32  — binary
     target_trajectory: torch.Tensor # (N, 10) float32  — logit deltas (NaN for non-joint)
     target_hazard:    torch.Tensor  # (N, 10) float32  — binary survival
@@ -671,6 +897,7 @@ def build_dataloaders(
     sl: float = 3.0,
     num_workers: int = 0,
     feed_delay_seconds: int = FEED_DELAY_SECONDS_NBA,
+    horizon_seconds: int = 120,
 ) -> tuple[DataLoader, DataLoader, StandardScaler]:
     """
     Full data pipeline: load → feature engineer → targets → split → DataLoaders.
@@ -688,8 +915,15 @@ def build_dataloaders(
     conn.close()
 
     # Basketball feature engineering
-    possessions = _add_derived_features(possessions)
+    # Order matters: the pace shrinkage in _add_derived_features blends toward
+    # `expected_pace`, which only exists after the pregame join.
     possessions = _join_pregame(possessions, pregame)
+    possessions = _add_derived_features(possessions)
+
+    # Restrict to the regime the agent will actually trade. Runs after the derived
+    # features so the rolling windows are still built from the complete possession
+    # sequence — filtering earlier would corrupt every within-game rolling column.
+    possessions = _filter_to_traded_regime(possessions)
 
     # Tick parsing + home-contract selection
     ticks = _select_home_best_contract(ticks_raw, possessions)
@@ -709,7 +943,7 @@ def build_dataloaders(
         joint_df = _add_run_target(joint_df)
         joint_df = _add_hazard_targets_all_games(joint_df)
 
-        logger.info("Computing trajectory targets (exit simulator) for joint rows...")
+        logger.info("Computing trajectory targets (exit simulator, horizon=%ds) for joint rows...", horizon_seconds)
         # For exit simulator we also need the full possession history per game
         # (to detect momentum flips and garbage time)
         joint_df = build_trajectory_targets(
@@ -718,6 +952,7 @@ def build_dataloaders(
             all_possessions=possessions,
             tp=tp,
             sl=sl,
+            horizon_seconds=horizon_seconds,
         )
 
         # Ensure market feature columns exist on bball_only (filled with 0)

@@ -22,11 +22,15 @@ func newBacktestBandit() *Bandit {
 
 func resp(opts ...func(*PossessionResponse)) *PossessionResponse {
 	r := &PossessionResponse{
-		YesBid:        50,
-		YesAsk:        51,
-		IsGarbageTime: false,
-		IsBlowout:     false,
-		Features:      map[string]float32{"current_run_length": 0},
+		YesBid:           50,
+		YesAsk:           51,
+		IsGarbageTime:    false,
+		IsBlowout:        false,
+		IsOvertime:       false,
+		CurrentRunLength: 0,
+		// Deliberately empty: no gate may read from Features. If a gate ever
+		// regresses to a Features lookup, these tests fail instead of a live game.
+		Features: map[string]float32{},
 	}
 	for _, o := range opts {
 		o(r)
@@ -52,18 +56,12 @@ func withBlowout() func(*PossessionResponse) {
 }
 func withRunLen(v float32) func(*PossessionResponse) {
 	return func(r *PossessionResponse) {
-		if r.Features == nil {
-			r.Features = map[string]float32{}
-		}
-		r.Features["current_run_length"] = v
+		r.CurrentRunLength = v
 	}
 }
 func withPeriod(v float32) func(*PossessionResponse) {
 	return func(r *PossessionResponse) {
-		if r.Features == nil {
-			r.Features = map[string]float32{}
-		}
-		r.Features["period"] = v
+		r.IsOvertime = v >= 5
 	}
 }
 

@@ -1,0 +1,11 @@
+# General Rules
+- Limit extensive code comments, reserve comments for important aspects of the code
+- Add type hinting always
+- Prioritize readability over compacted 1 liners that take up less lines
+- I prefer flat over nested — refactor deeply nested logic into early returns
+- Small focused functions over large ones
+- When giving me options, give me 2-3 max with a clear recommendation, not 6 possibilities
+- Always consider race conditions and thread safety in concurrent code
+- When I ask what's wrong, diagnose first. Don't start rewriting until I confirm the approach
+- Before making changes to existing code, read the relevant files first. Double check if necessary.
+- Prefer explicit error messages that tell me what failed and why, not just `raise Exception("error")`

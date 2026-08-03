@@ -513,8 +513,11 @@ function upd(d){
   document.getElementById('rpF').style.width=(rp*100)+'%';
   document.getElementById('rpF').style.background=rp>=.10?'#22c55e':rp>=.05?'#eab308':'#3b82f6';
 
-  // Who's running
-  const rt=f.current_run_team_encoded||0, rl=f.current_run_length||0, rpts=f.current_run_points||0;
+  // Who's running. run_signed_points is +points when home is on the run and
+  // -points when away is, so its sign gives the team and its magnitude the points.
+  const rsp=f.run_signed_points||0;
+  const rt=Math.sign(rsp), rpts=Math.abs(rsp);
+  const rl=rpts>0?Math.round(rpts/(f.run_efficiency||1)):0;
   const rtE=document.getElementById('runTeam');
   if(rl>0){
     const who=rt>0?homeTeam:awayTeam;

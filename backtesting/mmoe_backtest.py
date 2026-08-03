@@ -282,8 +282,11 @@ def _run_game(
         if use_traj_for_side:
             entry_side = 1 if traj_used >= 0 else -1
         else:
-            run_team_encoded = fd.get("current_run_team_encoded", 0.0)
-            entry_side = 1 if run_team_encoded >= 0 else -1
+            # run_signed_points carries the run direction in its sign (it is
+            # encoded_team * points, and points is non-negative), so this is
+            # equivalent to the old current_run_team_encoded test.
+            run_signed = fd.get("run_signed_points", 0.0)
+            entry_side = 1 if run_signed >= 0 else -1
 
         # Simulate exit from entry point
         future_ticks = enriched_ticks[enriched_ticks["ts"] > wct]

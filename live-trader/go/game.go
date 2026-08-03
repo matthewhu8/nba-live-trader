@@ -514,28 +514,52 @@ func (g *GameEngine) Run(ctx context.Context) {
 				positionsClosed++
 				if !g.cfg.Trading.PaperMode {
 					// Best-effort emergency close — use a fresh context since engineCtx is cancelled.
-					// MarketSnapshot.Features[0]=YesBid, Features[1]=YesAsk (cents as float32).
-					snap := ringBuffer.Snapshot()
-					yesBid := int(snap.Features[0])
-					yesAsk := int(snap.Features[1])
-					emergencyPrice := yesBid
-					if openPosition.Direction == "NO" {
-						emergencyPrice = 100 - yesAsk
-						if yesAsk == 0 {
-							emergencyPrice = 100 - yesBid
-						}
-					}
 					exitCtx, exitCancel := context.WithTimeout(context.Background(), 5*time.Second)
-					// Shutdown: cross more aggressively to guarantee we're flat.
-					emergencyBudget := g.cfg.Agent.ExitSlippageBudgetCents + 3
-					ok := router.PlaceExit(exitCtx, openPosition, emergencyPrice, emergencyBudget)
-					exitCancel()
-					g.jsonLog.Emit("emergency_exit", g.gameID, map[string]interface{}{
-						"direction":    openPosition.Direction,
-						"entry_ticker": openPosition.EntryTicker,
-						"exit_price":   emergencyPrice,
-						"sent":         ok,
-					})
+
+					// Cancel the resting maker TP FIRST. Otherwise shutdown leaves an
+					// orphan sell on the book that can later fill into an unmanaged
+					// short with nothing watching it. If the cancel reports the TP
+					// already executed (race), the position is already flat at TP
+					// price — skip the crossing exit so we don't double-close.
+					tpStatus, tpErr := router.CancelRestingTP(exitCtx, openPosition)
+					if tpErr != nil {
+						zlog.Warn().Err(tpErr).
+							Str("order_id", openPosition.RestingTPOrderID).
+							Msg("emergency resting TP cancel failed — placing crossing exit anyway")
+					}
+
+					if tpStatus == "executed" {
+						exitCancel()
+						g.jsonLog.Emit("emergency_exit", g.gameID, map[string]interface{}{
+							"direction":    openPosition.Direction,
+							"entry_ticker": openPosition.EntryTicker,
+							"exit_price":   openPosition.RestingTPPrice,
+							"sent":         true,
+							"reason":       "tp_filled_during_cancel",
+						})
+					} else {
+						// MarketSnapshot.Features[0]=YesBid, Features[1]=YesAsk (cents as float32).
+						snap := ringBuffer.Snapshot()
+						yesBid := int(snap.Features[0])
+						yesAsk := int(snap.Features[1])
+						emergencyPrice := yesBid
+						if openPosition.Direction == "NO" {
+							emergencyPrice = 100 - yesAsk
+							if yesAsk == 0 {
+								emergencyPrice = 100 - yesBid
+							}
+						}
+						// Shutdown: cross more aggressively to guarantee we're flat.
+						emergencyBudget := g.cfg.Agent.ExitSlippageBudgetCents + 3
+						ok := router.PlaceExit(exitCtx, openPosition, emergencyPrice, emergencyBudget)
+						exitCancel()
+						g.jsonLog.Emit("emergency_exit", g.gameID, map[string]interface{}{
+							"direction":    openPosition.Direction,
+							"entry_ticker": openPosition.EntryTicker,
+							"exit_price":   emergencyPrice,
+							"sent":         ok,
+						})
+					}
 				}
 			}
 

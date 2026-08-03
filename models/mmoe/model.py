@@ -15,9 +15,19 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
-from models.mmoe.feature_config import ALL_FEATURE_COLS
+from models.mmoe.feature_config import (
+    ALL_FEATURE_COLS,
+    MARKET_COLS,
+    MARKET_END,
+    MARKET_START,
+)
 
-INPUT_DIM    = len(ALL_FEATURE_COLS)   # 83
+RAW_INPUT_DIM   = len(ALL_FEATURE_COLS)   # 58 = 33 physics + 11 pregame + 14 market
+MARKET_DIM      = len(MARKET_COLS)        # 14
+MARKET_EMBED_DIM = 4
+# What the experts actually see: everything except the market block, plus the
+# market block's learned embedding.
+INPUT_DIM    = RAW_INPUT_DIM - MARKET_DIM + MARKET_EMBED_DIM   # 48
 EXPERT_DIM   = 64
 N_EXPERTS    = 3
 N_TRAJ       = 10
@@ -100,8 +110,25 @@ class MMoEModel(nn.Module):
         head_hidden: int   = HEAD_HIDDEN,
         expert_dropout: float = 0.3,
         head_dropout:   float = 0.2,
+        use_market_encoder: bool = True,
     ) -> None:
         super().__init__()
+
+        # The 33 physics features are consolidated by hand in transforms.py, where
+        # the domain priors are strong. The 14 market features are compressed by a
+        # learned projection instead: we have no comparable prior about how LOB
+        # microstructure should combine, so spend the parameters here rather than
+        # guessing a formula.
+        #
+        # use_market_encoder=False passes the market block through untouched. That
+        # is the attribution baseline: train once without it to isolate what the
+        # physics consolidation bought, then once with it to price the encoder.
+        self.use_market_encoder = use_market_encoder
+        self.market_encoder = (
+            nn.Linear(MARKET_DIM, MARKET_EMBED_DIM) if use_market_encoder else None
+        )
+        if not use_market_encoder and input_dim == INPUT_DIM:
+            input_dim = RAW_INPUT_DIM
 
         self.experts = nn.ModuleList([
             Expert(input_dim, expert_dim, dropout=expert_dropout)
@@ -116,16 +143,37 @@ class MMoEModel(nn.Module):
         self.head_b = TaskHead(expert_dim, head_hidden, N_TRAJ,   dropout=head_dropout, use_sigmoid=False)
         self.head_c = TaskHead(expert_dim, head_hidden, N_HAZARD, dropout=head_dropout, use_sigmoid=True)
 
-    def _mix_experts(self, x: Tensor, gate: Gate) -> Tensor:
+    def encode_input(self, x: Tensor) -> Tensor:
+        """
+        Map the raw (B, 58) feature vector to the (B, 48) expert input by replacing
+        the 14-column market block with its learned 4-dim embedding.
+
+        Callers always pass the raw vector in ALL_FEATURE_COLS order; every entry
+        point below routes through here so the encoder can never be bypassed.
+        """
+        if x.size(-1) != RAW_INPUT_DIM:
+            raise ValueError(
+                f"MMoEModel expects {RAW_INPUT_DIM} raw features in ALL_FEATURE_COLS "
+                f"order, got {x.size(-1)}. If this is a checkpoint trained on the "
+                f"pre-consolidation 83-column layout, it must be retrained."
+            )
+        if self.market_encoder is None:
+            return x
+        non_market = x[:, :MARKET_START]
+        market     = x[:, MARKET_START:MARKET_END]
+        return torch.cat([non_market, self.market_encoder(market)], dim=-1)
+
+    def _mix_experts(self, z: Tensor, gate: Gate) -> Tensor:
         """Compute gate-weighted sum of all expert outputs. Returns (B, expert_dim)."""
-        expert_outs = torch.stack([e(x) for e in self.experts], dim=1)  # (B, n_experts, expert_dim)
-        weights = gate(x).unsqueeze(-1)                                   # (B, n_experts, 1)
+        expert_outs = torch.stack([e(z) for e in self.experts], dim=1)  # (B, n_experts, expert_dim)
+        weights = gate(z).unsqueeze(-1)                                   # (B, n_experts, 1)
         return (expert_outs * weights).sum(dim=1)                         # (B, expert_dim)
 
     def forward(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-        mixed_a = self._mix_experts(x, self.gate_a)
-        mixed_b = self._mix_experts(x, self.gate_b)
-        mixed_c = self._mix_experts(x, self.gate_c)
+        z = self.encode_input(x)
+        mixed_a = self._mix_experts(z, self.gate_a)
+        mixed_b = self._mix_experts(z, self.gate_b)
+        mixed_c = self._mix_experts(z, self.gate_c)
 
         return self.head_a(mixed_a), self.head_b(mixed_b), self.head_c(mixed_c)
 
@@ -143,10 +191,11 @@ class MMoEModel(nn.Module):
         Returns: (head_a, head_b, head_c, gate_a_weights, gate_b_weights, gate_c_weights)
         Gate weight tensors are shape (B, n_experts) — already softmaxed.
         """
-        expert_outs = torch.stack([e(x) for e in self.experts], dim=1)
-        gate_a_w = self.gate_a(x)
-        gate_b_w = self.gate_b(x)
-        gate_c_w = self.gate_c(x)
+        z = self.encode_input(x)
+        expert_outs = torch.stack([e(z) for e in self.experts], dim=1)
+        gate_a_w = self.gate_a(z)
+        gate_b_w = self.gate_b(z)
+        gate_c_w = self.gate_c(z)
         mixed_a = (expert_outs * gate_a_w.unsqueeze(-1)).sum(dim=1)
         mixed_b = (expert_outs * gate_b_w.unsqueeze(-1)).sum(dim=1)
         mixed_c = (expert_outs * gate_c_w.unsqueeze(-1)).sum(dim=1)
@@ -177,12 +226,13 @@ class MMoEModel(nn.Module):
         """
         # Compute every expert once and reuse for both gating and per-expert
         # opinions. (B, n_experts, expert_dim)
-        expert_outs = torch.stack([e(x) for e in self.experts], dim=1)
+        z = self.encode_input(x)
+        expert_outs = torch.stack([e(z) for e in self.experts], dim=1)
 
         # Gating softmax weights (B, n_experts) per head
-        gate_a_w = self.gate_a(x)
-        gate_b_w = self.gate_b(x)
-        gate_c_w = self.gate_c(x)
+        gate_a_w = self.gate_a(z)
+        gate_b_w = self.gate_b(z)
+        gate_c_w = self.gate_c(z)
 
         # Gated outputs — same math as forward(), just sharing expert_outs.
         mixed_a = (expert_outs * gate_a_w.unsqueeze(-1)).sum(dim=1)
