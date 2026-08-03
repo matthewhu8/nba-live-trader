@@ -195,6 +195,63 @@ break-even = 5.19/9.31 = 55.7%). The doc and the backtest had disagreed by 100×
 The live Go trader is rigorously in cents (`max_total_exposure_cents: 7000 # $70`) and was
 never affected.
 
+### Train/serve drift — the corrected picture (2026-08-03)
+
+**⚠️ If you compute a z-score against this scaler, use `scale_`, NOT `sqrt(var_)`.**
+`models/mmoe/dataset.py:608-609` overwrites `mean_` and `scale_` with joint-row statistics for
+the 13 market features but never updates `var_`. `StandardScaler.transform` divides by
+`scale_` (`predictor.py:136`), so `sqrt(var_)` is stale global variance and inflates market
+z-scores by 2.4-4.2x. Verified: `sqrt(var_)`/`scale_` for `time_since_last_trade_ms` is
+32.10 vs 134.99; for non-market features the two agree exactly. Also note the market block
+is **already conditional** on `has_market_data == 1` (`mean_[yes_bid]` = 53.74c, not ~3c), so
+do not "correct" it for zero-fill a second time.
+
+Corrected live drift, post-2026-05-13, `has_market_data == 1`, sentinel excluded:
+
+| feature | train mean | train `scale_` | backtest | z | live | z | affects backtest? |
+|---|---|---|---|---|---|---|---|
+| `time_since_last_trade_ms` | 0.959 | 134.99 | 0.000 | −0.01 | 1164.8 | **+8.62** | **no — live only** |
+| `trade_volume_60s` | 6.94e6 | 1.50e7 | 1.79e7 | +0.73 | 7.84e7 | **+4.76** | yes, milder |
+| `open_interest` | 141,647 | 312,525 | 330,871 | +0.61 | 1.32e6 | **+3.76** | yes, milder |
+| `has_market_data` | 0.057 | 0.231 | 1.000 | **+4.09** | 1.000 | **+4.09** | yes, by design |
+| `home/away_sub_count` | 0.117 | 0.448 | **0.000** | −0.26 | 0.385 | +0.60 | three-way divergence |
+| worst of the 18 "dead" features | — | — | — | — | — | 0.88 | — |
+
+`spread`, `bid_velocity_30s` and the other velocity/divergence features are **well aligned**
+(|z| <= 0.39 in both backtest and live). The kept features do matter more than the dropped
+ones, but not by the margin a `var_`-based calculation suggests.
+
+**`time_since_last_trade_ms` is identically 0.0 in training AND backtest.** The tick store's
+`volume` column is cumulative, so `dataset.py:267-271`'s `volume > 0` mask is always true and
+`last_trade_ts` is always the current row — measured 0.0 in 770,054/770,054 local ticks. Live
+(`live-trader/go/ring_buffer.go:93-100`) scans back for `Volume > 0` on the same cumulative
+field, so it computes **feed staleness** (~643 ms median). The `// contracts traded this
+update` comment at `kalshi_feed.go:28` is wrong. Also `ring_buffer.go:93` initialises to
+`float32(999999)`; 20 of 3,131 live rows carry that sentinel and contribute 86% of the raw
+mean. Cheapest correct action: zero the feature in live to match training, since training
+taught the model nothing about it. The honest fix (difference `volume` per tick on both
+sides) requires a retrain.
+
+**Head B's market pathway trained on 19,810 rows, not 42K.** Derived from the scaler:
+`mean_[has_market_data] x 350,449` = 19,811. Three documented figures disagree with each
+other and with this — `49,576` (line ~167), `~42K` (line ~407), `24K` (AGENTS.md). If the
+total joint set is 49,576, the `HEADB_SPLIT_DATE` split is **40/60, not the "~80/20" claimed
+at `dataset.py:50`**, and the reported 61.1% Dir Acc was measured on a val set larger than
+the train set — 55% of which was timestamp-corrupt.
+
+**The backtest has never evaluated on the era the scaler describes.** `feature_config.py:96`
+says market coverage is Mar 23 – Apr 12; the local `kalshi_ticks.parquet` spans **Apr 17 –
+May 18**, entirely after the scaler's fit window and entirely inside the Head B val period.
+That is the mechanism behind the `open_interest` / `trade_volume_60s` liquidity drift.
+
+**The local cache silently drops substitution and foul context.** `sub_count`,
+`home/away_sub_count`, `was_sub`, `was_foul`, `was_timeout`, `timeout_teams`, `foul_types`
+and `players_in_ids` are all-NaN or 0.0 for all 14,239 rows of
+`data/feature_store/possession_flat.parquet`, so since `312ad5b` the backtest is blind to
+them. **This also undercuts the event-trigger experiment**: it fires the model at subs and
+fouls while the features that say "a sub just happened" read 0.0. Re-export the cache with
+the event-parsing stage restored before drawing any conclusion about event triggers.
+
 **Known remaining bias (not fixed, smaller, and deliberate):** `simulate_exit` evaluates
 momentum-flip and garbage-time exits at each possession's `wall_clock_ts`, with no feed
 delay, so those exits fire ~20s earlier than a live trader could act. Fixing it means
