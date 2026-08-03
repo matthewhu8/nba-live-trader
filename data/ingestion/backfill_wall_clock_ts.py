@@ -210,26 +210,40 @@ def _parse_period_start_et(
     """
     Parse 'HH:MM AM/PM' into an ET-aware datetime on the correct date.
 
-    Handles midnight crossover: if the parsed time is earlier than the
-    previous period's time, assume the game crossed midnight and add 1 day.
+    Handles midnight crossover. A game tipping late (e.g. 22:49 ET on the west
+    coast) has its second half on the FOLLOWING calendar day, so the date has to
+    advance partway through the game.
+
+    The date is anchored to the previous period rather than to game_date, and the
+    decision compares full datetimes. The earlier version compared bare hours:
+
+        if naive.hour < prev_naive.hour or (naive.hour == 0 and prev_naive.hour == 23):
+
+    which silently broke once TWO consecutive periods started after midnight. For
+    a 22:49 tip, period 3 at 00:16 crossed correctly, but period 4 at 00:52 hit
+    `0 < 0` -> False and fell back to game_date, landing 24h BEFORE period 3.
+    That is what produced the impossible 00:39-00:53 first-possession times.
     """
     try:
         naive = datetime.strptime(time_str.strip(), "%I:%M %p")
     except ValueError:
         return None
 
-    # Determine the calendar date (may be game_date or game_date+1 for late PT games)
-    base_date = game_date
-    if prev_dt is not None:
-        prev_naive = prev_dt.astimezone(ET).replace(tzinfo=None)
-        # If this period's hour is earlier than the previous, we crossed midnight
-        if naive.hour < prev_naive.hour or (naive.hour == 0 and prev_naive.hour == 23):
-            base_date = (prev_dt.astimezone(ET).date() + timedelta(days=1))
+    def _at(d: date) -> datetime:
+        return ET.localize(datetime(d.year, d.month, d.day,
+                                    naive.hour, naive.minute, naive.second))
 
-    candidate = datetime(base_date.year, base_date.month, base_date.day,
-                         naive.hour, naive.minute, naive.second)
-    # Localize to ET (pytz handles DST — March games are EDT = UTC-4)
-    return ET.localize(candidate)
+    if prev_dt is None:
+        return _at(game_date)
+
+    # Anchor to the previous period's date, then roll forward only if this period
+    # would otherwise be at or before it. Periods are strictly increasing in real
+    # time, so this cannot go backwards regardless of how many cross midnight.
+    prev_et = prev_dt.astimezone(ET)
+    candidate = _at(prev_et.date())
+    if candidate <= prev_et:
+        candidate = _at(prev_et.date() + timedelta(days=1))
+    return candidate
 
 
 def _extract_period_anchors(
@@ -333,10 +347,115 @@ def _compute_event_timestamps(
 # Core backfill function (importable by post_game_pipeline)
 # ---------------------------------------------------------------------------
 
+# Plausible NBA tip-off window in ET. Earliest regular tips are ~12:00 (holiday
+# afternoon games); nothing legitimately tips at/after midnight ET.
+_MIN_TIPOFF_HOUR_ET = 12
+_MAX_TIPOFF_HOUR_ET = 23
+
+# Period-1 start to final-period start. A regulation game is ~1.5 h; several OTs
+# and long stoppages could stretch it, so 6 h is a generous ceiling that still
+# catches a whole day being applied to the wrong period.
+_MAX_GAME_SPAN_HOURS = 6.0
+
+
+def _as_date(value) -> date:
+    """
+    Coerce a game_date to datetime.date.
+
+    dim_games queries go through DuckDB's .df(), which yields pandas Timestamps.
+    Comparing `some_date != Timestamp` is always True, so without this coercion a
+    date equality check silently fails for every game.
+    """
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    if isinstance(value, datetime):
+        return value.date()
+    ts = pd.Timestamp(value)          # handles numpy datetime64, str, Timestamp
+    return ts.to_pydatetime().date()
+
+
+def _validate_anchors(
+    game_id: str,
+    game_date: date,
+    anchors: dict[int, datetime],
+) -> bool:
+    """
+    Sanity-check computed period anchors before they are written.
+
+    This guard exists because a wrong `game_date` silently produces timestamps
+    with the correct time-of-day on the wrong calendar day. Downstream,
+    pd.merge_asof never errors — it just matches the last (settled) tick — so the
+    corruption is invisible until you audit prices. 36 of 71 games were written
+    one day late this way, which contaminated Head B's training rows and every
+    backtest measured through the tick join.
+
+    Two invariants, both cheap:
+      1. The period-1 anchor's ET calendar date must equal `game_date`.
+         Catches the UTC-vs-ET date bug (games tipping >= 20:00 ET cross 00:00 UTC).
+      2. The period-1 anchor's ET hour must be a plausible tip-off time.
+         Catches anchors misparsed from an OT start line (e.g. "12:12 AM").
+
+    Returns True if the anchors look sane; logs an error and returns False if not,
+    so the caller skips the game rather than writing bad data.
+    """
+    first_period = min(anchors)
+    anchor_et = anchors[first_period].astimezone(ET)
+    game_date = _as_date(game_date)
+
+    if anchor_et.date() != game_date:
+        logger.error(
+            "game %s: period-%d anchor resolves to %s ET but dim_games.game_date is %s "
+            "(off by %+d day(s)). This is the UTC-vs-ET date bug — refusing to write. "
+            "Verify dim_games.game_date is the EASTERN game date, not a UTC-derived one.",
+            game_id, first_period, anchor_et.isoformat(), game_date.isoformat(),
+            (anchor_et.date() - game_date).days,
+        )
+        return False
+
+    if not (_MIN_TIPOFF_HOUR_ET <= anchor_et.hour <= _MAX_TIPOFF_HOUR_ET):
+        logger.error(
+            "game %s: period-%d anchor is %s ET — implausible tip-off hour (%d). "
+            "The anchor was likely parsed from the wrong PBP line (e.g. an OT start "
+            "such as '12:12 AM'). Refusing to write.",
+            game_id, first_period, anchor_et.isoformat(), anchor_et.hour,
+        )
+        return False
+
+    # Invariant 3: periods must advance in real time. Checking only period 1 is not
+    # enough -- the midnight-crossover path previously sent period 4 a full day
+    # BACKWARDS while period 1 stayed correct, so a first-period-only check passed
+    # games that were badly broken later in the game.
+    ordered = sorted(anchors)
+    for prev_p, next_p in zip(ordered, ordered[1:]):
+        prev_dt, next_dt = anchors[prev_p], anchors[next_p]
+        if next_dt <= prev_dt:
+            logger.error(
+                "game %s: period-%d anchor (%s ET) is not after period-%d (%s ET) — "
+                "anchors go backwards in time. Refusing to write.",
+                game_id, next_p, next_dt.astimezone(ET).isoformat(),
+                prev_p, prev_dt.astimezone(ET).isoformat(),
+            )
+            return False
+
+    # A regulation period should follow the previous one by roughly 30-45 min of
+    # real time. A gap of many hours means a date was applied to the wrong period.
+    total_span_h = (anchors[ordered[-1]] - anchors[ordered[0]]).total_seconds() / 3600
+    if total_span_h > _MAX_GAME_SPAN_HOURS:
+        logger.error(
+            "game %s: anchors span %.1f h from period %d to period %d — implausible "
+            "for a single game. Refusing to write.",
+            game_id, total_span_h, ordered[0], ordered[-1],
+        )
+        return False
+
+    return True
+
+
 def _compute_timestamps_for_game(
     game_id: str,
     game_date: date,
     conn: duckdb.DuckDBPyConnection,
+    force: bool = False,
 ) -> Optional[pd.DataFrame]:
     """
     Compute wall_clock_ts for all possession_flat rows of one game.
@@ -344,8 +463,12 @@ def _compute_timestamps_for_game(
     Returns a DataFrame with columns [game_id, period, game_clock_secs, wall_clock_ts],
     or None if the game cannot be processed (missing anchors, empty PBP, etc.).
     Does NOT write anything — callers handle the write.
+
+    force=True recomputes games that ALREADY have wall_clock_ts, which is required
+    to repair the 85 games written with a one-day date offset (see _validate_anchors).
+    Without it this function is fill-in-the-blanks only and skips them.
     """
-    if _is_already_populated(game_id, conn):
+    if not force and _is_already_populated(game_id, conn):
         logger.debug("game %s: wall_clock_ts already fully populated — skipping", game_id)
         return None
 
@@ -364,17 +487,22 @@ def _compute_timestamps_for_game(
         )
         return None
 
+    if not _validate_anchors(game_id, game_date, anchors):
+        return None
+
     logger.debug("game %s: found anchors for periods %s", game_id, sorted(anchors.keys()))
     ts_map = _compute_event_timestamps(pbp, anchors)
     if not ts_map:
         return None
 
-    # Load possession_flat rows for this game that still need wall_clock_ts
+    # Load the possession_flat rows to timestamp. Normally only rows still missing
+    # wall_clock_ts; under --force, ALL rows for the game, since the existing values
+    # are the ones being replaced.
     pf = conn.execute(
-        """
+        f"""
         SELECT event_id, period, game_clock_secs
         FROM features.possession_flat
-        WHERE game_id = ? AND wall_clock_ts IS NULL
+        WHERE game_id = ?{"" if force else " AND wall_clock_ts IS NULL"}
         """,
         [game_id],
     ).df()
@@ -436,7 +564,8 @@ def _apply_timestamps(
       2. CTAS to atomically rebuild features.possession_flat with the new values
       3. DROP the staging table
 
-    This is safe — possession_flat is rebuilt atomically by DuckDB/MotherDuck.
+    possession_flat is rebuilt atomically by DuckDB/MotherDuck, and the row count
+    is asserted afterwards (see below) because the join key is not unique.
     """
     conn.execute("""
         CREATE TABLE IF NOT EXISTS features.wcts_backfill (
@@ -447,6 +576,35 @@ def _apply_timestamps(
         )
     """)
 
+    # The staging table MUST be unique on the join key. (game_id, period,
+    # game_clock_secs) is NOT unique in possession_flat -- 18,975 keys repeat,
+    # up to 9 times each -- so leaving duplicates here makes the LEFT JOIN below
+    # fan out n*n rows per key and silently inflates the table.
+    #
+    # Dedup is lossless: a computed timestamp is a pure function of
+    # (period, game_clock_secs) via ts_map, so every duplicate key carries an
+    # identical wall_clock_ts. Verified on real data (48 duplicate keys in a
+    # 6-game sample, 0 with more than one distinct value).
+    key = ["game_id", "period", "game_clock_secs"]
+    n_before = len(all_updates)
+    conflicting = all_updates.groupby(key)["wall_clock_ts"].nunique()
+    if (conflicting > 1).any():
+        bad = conflicting[conflicting > 1]
+        raise ValueError(
+            f"{len(bad)} join keys map to more than one timestamp — dedup would be "
+            f"lossy, refusing to write. First few: {bad.head().to_dict()}"
+        )
+    all_updates = all_updates.drop_duplicates(subset=key)
+    if len(all_updates) != n_before:
+        logger.info(
+            "Deduplicated staging rows on %s: %d -> %d (identical timestamps)",
+            key, n_before, len(all_updates),
+        )
+
+    rows_before = conn.execute(
+        "SELECT COUNT(*) FROM features.possession_flat"
+    ).fetchone()[0]
+
     # Wipe and reload the staging table
     conn.execute("DELETE FROM features.wcts_backfill")
     conn.register("_wcts_new", all_updates)
@@ -454,8 +612,9 @@ def _apply_timestamps(
     conn.unregister("_wcts_new")
 
     logger.info(
-        "Inserted %d rows into wcts_backfill — rebuilding possession_flat via CTAS",
-        len(all_updates),
+        "Inserted %d rows into wcts_backfill — rebuilding possession_flat via CTAS "
+        "(%d rows before)",
+        len(all_updates), rows_before,
     )
 
     # Atomic rebuild: swap wall_clock_ts values where we have a match.
@@ -475,7 +634,25 @@ def _apply_timestamps(
                 = ROUND(wb.game_clock_secs, 2)
     """)
 
-    logger.info("CTAS rebuild complete — dropping wcts_backfill")
+    # The rebuild must preserve row count exactly. A mismatch means the join
+    # fanned out (duplicate staging keys) and the table is now corrupt, so fail
+    # loudly rather than leaving it silently wrong. Staging is kept on failure so
+    # the write can be diagnosed.
+    rows_after = conn.execute(
+        "SELECT COUNT(*) FROM features.possession_flat"
+    ).fetchone()[0]
+    if rows_after != rows_before:
+        raise RuntimeError(
+            f"possession_flat row count changed during rebuild: {rows_before:,} -> "
+            f"{rows_after:,} ({rows_after - rows_before:+,}). The join fanned out. "
+            f"features.wcts_backfill has been left in place for inspection; restore "
+            f"wall_clock_ts from the --backup parquet."
+        )
+
+    logger.info(
+        "CTAS rebuild complete — row count preserved (%d) — dropping wcts_backfill",
+        rows_after,
+    )
     conn.execute("DROP TABLE features.wcts_backfill")
 
 
@@ -525,11 +702,81 @@ def _parse_args() -> argparse.Namespace:
     group.add_argument("--date",  help="Backfill all games on this date (YYYY-MM-DD)")
     group.add_argument("--since", help="Backfill all games on or after this date (YYYY-MM-DD)")
     group.add_argument("--game",  help="Backfill a single game by game_id")
+    group.add_argument(
+        "--games-file",
+        help="Backfill exactly the game_ids listed in this file (one per line). "
+             "Required when using --force.",
+    )
     parser.add_argument(
         "--dry-run", action="store_true",
         help="Compute timestamps but do not write to MotherDuck",
     )
+    parser.add_argument(
+        "--force", action="store_true",
+        help="Overwrite wall_clock_ts on games that already have it. Requires "
+             "--games-file (or --game) plus --backup so the operation is scoped "
+             "and reversible. Needed to repair the one-day date offset.",
+    )
+    parser.add_argument(
+        "--backup",
+        help="Path to write a parquet backup of the CURRENT wall_clock_ts values "
+             "for the targeted games before any write. Mandatory with --force.",
+    )
     return parser.parse_args()
+
+
+def _read_games_file(path: Path, conn: duckdb.DuckDBPyConnection) -> list[tuple[str, date]]:
+    """Load an explicit game_id list and resolve each one's ET game_date."""
+    ids = [
+        line.strip() for line in path.read_text().splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if not ids:
+        raise SystemExit(f"{path} contains no game_ids")
+
+    placeholders = ", ".join(["?"] * len(ids))
+    df = conn.execute(
+        f"SELECT game_id, game_date FROM dim_games WHERE game_id IN ({placeholders}) "
+        f"ORDER BY game_date, game_id",
+        ids,
+    ).df()
+
+    missing = set(ids) - set(df["game_id"])
+    if missing:
+        raise SystemExit(f"game_ids not found in dim_games: {sorted(missing)}")
+    return [(r.game_id, r.game_date) for r in df.itertuples(index=False)]
+
+
+def _write_backup(
+    games: list[tuple[str, date]],
+    dest: Path,
+    conn: duckdb.DuckDBPyConnection,
+) -> int:
+    """
+    Snapshot the CURRENT wall_clock_ts for the targeted games to local parquet.
+
+    Written locally on purpose: the failsafe should live outside the system being
+    mutated, so a mistake against MotherDuck cannot take the backup with it.
+    """
+    ids = [g for g, _ in games]
+    placeholders = ", ".join(["?"] * len(ids))
+    df = conn.execute(
+        f"""
+        SELECT game_id, event_id, period, game_clock_secs, wall_clock_ts
+        FROM features.possession_flat
+        WHERE game_id IN ({placeholders})
+        ORDER BY game_id, period, game_clock_secs
+        """,
+        ids,
+    ).df()
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(dest, index=False)
+    logger.info(
+        "Backup written: %s (%d rows across %d games, %.2f MB)",
+        dest, len(df), df["game_id"].nunique(), dest.stat().st_size / 1e6,
+    )
+    return len(df)
 
 
 if __name__ == "__main__":
@@ -541,10 +788,29 @@ if __name__ == "__main__":
     load_dotenv()
 
     args = _parse_args()
+
+    # --force rails, checked BEFORE opening a connection: it must be scoped to an
+    # explicit game list and must have somewhere to put the undo data. A bare
+    # --force across the whole table is refused outright.
+    if args.force:
+        if not (args.games_file or args.game):
+            raise SystemExit(
+                "--force requires --games-file (or --game). Refusing to overwrite "
+                "wall_clock_ts across an unbounded set of games."
+            )
+        if not args.backup and not args.dry_run:
+            raise SystemExit(
+                "--force requires --backup <path> so the write is reversible "
+                "(or --dry-run to preview without writing)."
+            )
+
     conn = _md_connect()
 
     try:
-        if args.game:
+        if args.games_file:
+            games = _read_games_file(Path(args.games_file), conn)
+
+        elif args.game:
             game_date_row = conn.execute(
                 "SELECT game_date FROM dim_games WHERE game_id = ?", [args.game]
             ).fetchone()
@@ -568,16 +834,22 @@ if __name__ == "__main__":
             raise SystemExit(0)
 
         logger.info(
-            "Backfilling wall_clock_ts for %d game(s)%s",
+            "Backfilling wall_clock_ts for %d game(s)%s%s",
             len(games),
+            " [FORCE — overwriting existing values]" if args.force else "",
             " [DRY RUN]" if args.dry_run else "",
         )
+
+        # Snapshot current values before computing anything, so the undo file
+        # exists even if the run dies partway through.
+        if args.force and args.backup and not args.dry_run:
+            _write_backup(games, Path(args.backup), conn)
 
         # Compute timestamps for all games (read-only phase)
         all_frames: list[pd.DataFrame] = []
         for game_id, game_date in games:
             try:
-                df = _compute_timestamps_for_game(game_id, game_date, conn)
+                df = _compute_timestamps_for_game(game_id, game_date, conn, force=args.force)
                 if df is not None:
                     all_frames.append(df)
             except Exception:

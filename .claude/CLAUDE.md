@@ -48,7 +48,7 @@ divide by 100. A 100-contract position cannot swing more than $100 total.
   - Backtest: 207 trades, 47.8% win rate, +$37,409 net
   - Entry gates: `|traj_final| ≥ 0.08`, `run_length ≥ 2`, price 30-70¢, no garbage time
 
-**Test set (2024-25 season):** Sacred. Never touch during dev.
+**Test set (2024-26 season):** Sacred. Never touch during dev.
 
 ---
 
