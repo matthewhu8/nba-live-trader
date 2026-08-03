@@ -14,6 +14,7 @@ Usage:
 
 import argparse
 import logging
+import math
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -101,6 +102,8 @@ class ClosedPosition:
     quarter:         int
     score_diff:      int
     run_length:      int
+    fees:            float = 0.0   # round-trip fees actually charged (maker entry + reason-based exit)
+    entry_tick_age_s: float = 0.0  # how stale the entry tick was vs wct + feed_delay_s
 
 
 TRAJ_AGGREGATORS = ("final", "mean", "mean_3_to_9", "max_abs")
@@ -148,6 +151,28 @@ class BacktestSummary:
 
 # ── Market feature helpers ───────────────────────────────────────────────────
 
+def _tick_at_delay(
+    enriched_game_ticks: pd.DataFrame,
+    wall_clock_ts: pd.Timestamp,
+    delay_s: int,
+) -> tuple[Optional[pd.Series], pd.Timestamp]:
+    """The tick a trader could actually act on for a possession ending at wall_clock_ts.
+
+    Returns (tick, entry_anchor_ts) where entry_anchor_ts is wall_clock_ts + delay_s —
+    the earliest moment the position can exist. The tick itself is the most recent one
+    at or before that anchor (a backward asof, matching the training-time join), so it
+    may be older than the anchor; `tick["ts"]` vs the anchor is the entry staleness.
+
+    Single source of truth for the delay: the exit window must start at the anchor this
+    returns, or the simulation can exit before it entered.
+    """
+    entry_anchor_ts = wall_clock_ts + pd.Timedelta(seconds=delay_s)
+    candidates = enriched_game_ticks[enriched_game_ticks["ts"] <= entry_anchor_ts]
+    if candidates.empty:
+        return None, entry_anchor_ts
+    return candidates.iloc[-1], entry_anchor_ts
+
+
 def _get_market_features_at_delay(
     enriched_game_ticks: pd.DataFrame,
     wall_clock_ts: pd.Timestamp,
@@ -165,13 +190,10 @@ def _get_market_features_at_delay(
     prev_yes_bid and prev_spread are the values from the previous possession's tick,
     used to compute d_yes_bid and d_spread — matching the diff() logic in training.
     """
-    lookup_ts = wall_clock_ts + pd.Timedelta(seconds=delay_s)
-
-    candidates = enriched_game_ticks[enriched_game_ticks["ts"] <= lookup_ts]
-    if candidates.empty:
+    tick, _ = _tick_at_delay(enriched_game_ticks, wall_clock_ts, delay_s)
+    if tick is None:
         return {col: 0.0 for col in MARKET_COLS}
 
-    tick = candidates.iloc[-1]
     current_bid    = float(tick["yes_bid"])
     current_spread = float(tick["spread"])
 
@@ -213,11 +235,42 @@ def _build_feature_dict(
     return fd
 
 
-def _compute_maker_fees(entry_price: float, exit_price: float, contracts: int) -> float:
-    """Maker fees for both entry and exit legs.
-    Kalshi charges $0 for resting (maker) orders on standard markets.
+MAKER_FEE_RATE = 0.0175
+TAKER_FEE_RATE = 0.07
+
+# Exits that rest a limit order and therefore pay the maker rate. Every other exit
+# reason crosses the book to get out now, so it pays taker — see CLAUDE.md Phase 6:
+# resting maker take-profits (PR #50), stops cross the book.
+_MAKER_EXIT_REASONS = frozenset({"take_profit"})
+
+
+def _fee_one_leg(rate: float, price_cents: float, contracts: int) -> float:
+    """Kalshi fee for a single leg: rate x C x P x (1-P), rounded up to the cent.
+
+    The P(1-P) term is part of Kalshi's published formula; CLAUDE.md's fee table
+    omits it in the expression but its worked example ("~$0.44 per 100 at 50c")
+    assumes it. This matches live-trader/inference/dashboard.py.
     """
-    return 0.0
+    p = price_cents / 100.0
+    return math.ceil(rate * contracts * p * (1.0 - p) * 100.0) / 100.0
+
+
+def _compute_fees(
+    entry_price: float,
+    exit_price: float,
+    contracts: int,
+    exit_reason: str,
+) -> float:
+    """Round-trip fees. Entry is always a resting limit (maker); the exit leg's rate
+    depends on how we got out.
+
+    Previously returned 0.0 unconditionally, which silently zeroed the taker cost on
+    every stop-out — i.e. on the losers.
+    """
+    entry_fee = _fee_one_leg(MAKER_FEE_RATE, entry_price, contracts)
+    exit_rate = MAKER_FEE_RATE if exit_reason in _MAKER_EXIT_REASONS else TAKER_FEE_RATE
+    exit_fee  = _fee_one_leg(exit_rate, exit_price, contracts)
+    return entry_fee + exit_fee
 
 
 # ── Per-game replay ──────────────────────────────────────────────────────────
@@ -314,12 +367,22 @@ def _run_game(
             run_team_encoded = fd.get("current_run_team_encoded", 0.0)
             entry_side = 1 if run_team_encoded >= 0 else -1
 
-        # Simulate exit from entry point
-        future_ticks = enriched_ticks[enriched_ticks["ts"] > wct]
-        future_poss  = game_poss[game_poss["wall_clock_ts"] > wct]
+        # Simulate exit from the moment the position can actually exist.
+        #
+        # The entry price was read at wct + feed_delay_s, so the exit search must start
+        # there too. Anchoring it at wct let a position exit up to feed_delay_s BEFORE
+        # it entered, harvesting price movement that had already happened — which was
+        # the entire measured "edge" (see CLAUDE.md).
+        entry_tick, entry_anchor_ts = _tick_at_delay(enriched_ticks, wct, feed_delay_s)
+        entry_tick_age_s = (
+            (entry_anchor_ts - entry_tick["ts"]).total_seconds() if entry_tick is not None else 0.0
+        )
+
+        future_ticks = enriched_ticks[enriched_ticks["ts"] > entry_anchor_ts]
+        future_poss  = game_poss[game_poss["wall_clock_ts"] > entry_anchor_ts]
 
         sim = simulate_exit(
-            entry_wall_clock=wct,
+            entry_wall_clock=entry_anchor_ts,
             entry_yes_bid=yes_bid,
             entry_run_team=row.get("current_run_team", None),
             future_ticks=future_ticks,
@@ -330,8 +393,27 @@ def _run_game(
             max_seconds=hold_seconds,
         )
 
-        gross = entry_side * (sim.exit_price - yes_bid)
-        fees  = _compute_maker_fees(yes_bid, sim.exit_price, contracts)
+        # Take-profits rest a maker limit at entry + TP (PR #50), so the fill cannot be
+        # better than that limit. simulate_exit reports the price of the tick that
+        # breached the threshold, which overshot the limit by up to 19c on this sample
+        # and booked the overshoot as profit we could never have collected.
+        exit_price = sim.exit_price
+        if sim.exit_reason == "take_profit":
+            exit_price = yes_bid + entry_side * tp
+
+        # Invariant: a position cannot exit before it existed. Stated against wct (not
+        # entry_anchor_ts) so that re-anchoring the exit window to wct fails loudly here
+        # instead of silently reinflating results.
+        exit_abs_ts = entry_anchor_ts + pd.Timedelta(seconds=sim.exit_time_offset_s)
+        if sim.exit_time_offset_s < 0 or exit_abs_ts < wct + pd.Timedelta(seconds=feed_delay_s):
+            raise RuntimeError(
+                f"exit-before-entry in game {game_id} @ {wct}: "
+                f"hold={sim.exit_time_offset_s}s, exit_ts={exit_abs_ts}, "
+                f"entry_anchor={entry_anchor_ts} (feed_delay={feed_delay_s}s)"
+            )
+
+        gross = entry_side * (exit_price - yes_bid)
+        fees  = _compute_fees(yes_bid, exit_price, contracts, sim.exit_reason)
         net   = gross * contracts - fees
 
         positions.append(ClosedPosition(
@@ -339,7 +421,7 @@ def _run_game(
             possession_id = int(row.get("possession_id", row.get("event_id", 0))),
             wall_clock_ts = wct,
             entry_price   = yes_bid,
-            exit_price    = sim.exit_price,
+            exit_price    = exit_price,
             exit_reason   = sim.exit_reason,
             entry_side    = entry_side,
             hold_time_s   = sim.exit_time_offset_s,
@@ -353,10 +435,14 @@ def _run_game(
             quarter         = int(row.get("period", 0)),
             score_diff      = int(row.get("score_diff", 0)),
             run_length      = int(row.get("current_run_length", 0)),
+            fees            = fees,
+            entry_tick_age_s = entry_tick_age_s,
         ))
 
-        # Block new entries until exit time
-        position_exit_ts = wct + pd.Timedelta(seconds=sim.exit_time_offset_s)
+        # Block new entries until exit time. Measured from the entry anchor, not wct —
+        # otherwise the guard clears feed_delay_s early and lets the next position open
+        # while this one is still open.
+        position_exit_ts = exit_abs_ts
 
     logger.info("Game %s: %d trades", game_id, len(positions))
     return positions
@@ -536,7 +622,15 @@ def _print_summary(
     print(f"  Win rate:        {summary.win_rate:.1%}")
     print(f"  Avg hold time:   {summary.avg_hold_time_s:.1f}s")
     print(f"  Total gross PnL: ${summary.total_gross_pnl:+.2f}  (per {contracts} contracts)")
-    print(f"  Total net PnL:   ${summary.total_net_pnl:+.2f}  (after maker fees)")
+    print(f"  Total fees:      ${sum(p.fees for p in summary.positions):.2f}  "
+          f"(maker entry + maker TP / taker stop)")
+    print(f"  Total net PnL:   ${summary.total_net_pnl:+.2f}  (after fees)")
+    if summary.positions:
+        ages = [p.entry_tick_age_s for p in summary.positions]
+        print(f"  Entry tick age:  median {float(np.median(ages)):.1f}s | "
+              f"p90 {float(np.percentile(ages, 90)):.1f}s | max {max(ages):.1f}s")
+        print(f"  Min hold time:   {min(p.hold_time_s for p in summary.positions):.2f}s "
+              f"(must be >= 0; exit-before-entry raises)")
     print(f"\n  Exit reasons:")
     for reason, count in sorted(summary.exit_reasons.items(), key=lambda x: -x[1]):
         pct = count / summary.n_trades * 100
