@@ -529,6 +529,114 @@ def _compute_market_features_for_game(game_ticks: pd.DataFrame) -> pd.DataFrame:
     return out.reset_index()
 
 
+def validate_possession_tick_overlap(
+    possessions: pd.DataFrame,
+    ticks: pd.DataFrame,
+    tolerance_minutes: float = 5.0,
+    min_coverage_pct: float = 15.0,
+    raise_on_fail: bool = False,
+) -> pd.DataFrame:
+    """
+    Assert that each game's possession times actually overlap its Kalshi ticks.
+
+    Why this exists: pd.merge_asof(direction="backward") NEVER fails. If a game's
+    wall_clock_ts is wrong — e.g. off by a day — every possession silently matches
+    the LAST recorded tick, which for a finished market is the settled price
+    (bid=1 or 99). Those rows look populated, carry has_market_data=1, and then get
+    quietly discarded downstream by the 30-70c band, so the corruption is invisible
+    in aggregate metrics while roughly halving the effective sample.
+
+    That is exactly what happened: 36 of 71 games had wall_clock_ts one day late
+    (games tipping after 20:00 ET, i.e. crossing 00:00 UTC), and it went unnoticed
+    through a model retrain and a full backtest sweep.
+
+    The invariant checked is that the FIRST possession falls inside the recording
+    window: tick_start - tolerance <= poss_start <= tick_end.
+
+    Deliberately not a lead-time window and not full containment — both were tried
+    against real data and both produced false failures:
+
+      * "first possession within +-60 min of first tick" fails whenever Kalshi opens
+        a market early, which it routinely does (a Finals market opened 3 days ahead;
+        many open the prior evening). 10 of 85 games failed this way.
+      * "possession window fully inside tick window" fails whenever the recorder
+        stops before the final buzzer, which is normal once a market settles — 56 of
+        83 games ran 5-57 min past their last tick.
+
+    Anchoring on poss_start still catches both real corruptions, because both move
+    the start out of the window: a game written one day late starts long after the
+    ticks end, and a game whose later periods lost a day starts before they begin.
+
+    A start-of-game check alone is not sufficient, so `tick_coverage_pct` (the share
+    of the possession window the recorder actually covered) is a second criterion.
+    When only the LATER periods of a game carry a wrong date, the minimum timestamp
+    can still land inside the tick window and slip past a start-only check, while
+    most of the game sits a day away. Measured on the real corrupt data the split is
+    unambiguous: corrupt games score 0.0-2.7% coverage, legitimate games 26.6-100%
+    (median 90.4%), so the 15% default separates them with roughly 10x margin.
+
+    Returns a per-game report; callers should log it and act on `ok`.
+    """
+    poss = possessions.dropna(subset=["wall_clock_ts"]).copy()
+    poss["wall_clock_ts"] = pd.to_datetime(poss["wall_clock_ts"], utc=True)
+    tk = ticks.copy()
+    tk["ts"] = pd.to_datetime(tk["ts"], utc=True)
+
+    p_agg = poss.groupby("game_id")["wall_clock_ts"].agg(poss_start="min", poss_end="max")
+    t_agg = tk.groupby("game_id")["ts"].agg(tick_start="min", tick_end="max")
+    rep = p_agg.join(t_agg, how="inner").reset_index()
+    if rep.empty:
+        return rep
+
+    tol = pd.Timedelta(minutes=tolerance_minutes)
+    rep["lead_minutes"] = (rep["poss_start"] - rep["tick_start"]).dt.total_seconds() / 60.0
+
+    # Minutes the first possession sits outside the recording window, either side.
+    before = ((rep["tick_start"] - tol) - rep["poss_start"]).dt.total_seconds() / 60.0
+    after = (rep["poss_start"] - rep["tick_end"]).dt.total_seconds() / 60.0
+    # No leading underscore: DataFrame.itertuples() renames such columns.
+    rep["start_outside_min"] = pd.concat([before, after], axis=1).max(axis=1).clip(lower=0)
+
+    # Informational: how much of the game the recorder actually covered.
+    overlap = (
+        rep[["poss_end", "tick_end"]].min(axis=1) - rep[["poss_start", "tick_start"]].max(axis=1)
+    ).dt.total_seconds() / 60.0
+    span = (rep["poss_end"] - rep["poss_start"]).dt.total_seconds() / 60.0
+    rep["tick_coverage_pct"] = (overlap.clip(lower=0) / span.where(span > 0)) * 100.0
+
+    rep["start_ok"] = (
+        (rep["poss_start"] >= rep["tick_start"] - tol)
+        & (rep["poss_start"] <= rep["tick_end"])
+    )
+    rep["coverage_ok"] = rep["tick_coverage_pct"] >= min_coverage_pct
+    rep["ok"] = rep["start_ok"] & rep["coverage_ok"]
+
+    n_bad = int((~rep["ok"]).sum())
+    if n_bad:
+        worst = rep.loc[~rep["ok"]].nsmallest(5, "tick_coverage_pct", keep="all").head(5)
+        n_start = int((~rep["start_ok"]).sum())
+        n_cov = int((~rep["coverage_ok"]).sum())
+        msg = (
+            f"{n_bad} of {len(rep)} games do not line up with their tick recording "
+            f"window — the asof join will silently return settled end-of-game prices "
+            f"for these ({n_start} first possession outside the window, "
+            f"{n_cov} below {min_coverage_pct:.0f}% tick coverage). "
+            f"Worst (game_id, coverage): "
+            + ", ".join(f"({r.game_id}, {r.tick_coverage_pct:.1f}%)" for r in worst.itertuples())
+        )
+        if raise_on_fail:
+            raise ValueError(msg)
+        logger.error(msg)
+    else:
+        logger.info(
+            "Tick window OK for all %d games (first possession %.0f..%.0f min after "
+            "first tick — wide is normal, markets open early; median tick coverage %.0f%%)",
+            len(rep), rep["lead_minutes"].min(), rep["lead_minutes"].max(),
+            rep["tick_coverage_pct"].median(),
+        )
+    return rep
+
+
 def _join_ticks_to_possessions(
     possessions: pd.DataFrame,
     ticks: pd.DataFrame,
@@ -551,6 +659,10 @@ def _join_ticks_to_possessions(
     # Shift lookup window forward by feed delay to match live entry conditions
     delay = pd.Timedelta(seconds=feed_delay_seconds)
     possessions["_join_ts"] = possessions["wall_clock_ts"] + delay
+
+    # Fail loudly on wrong-day / non-overlapping timestamps before the asof join
+    # silently substitutes settled prices for them.
+    validate_possession_tick_overlap(possessions, ticks)
 
     joint_parts: list[pd.DataFrame] = []
     games_with_ticks = set(ticks["game_id"].unique())

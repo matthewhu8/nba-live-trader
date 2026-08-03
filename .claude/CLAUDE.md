@@ -37,7 +37,7 @@ All prices in cents (1–99), never floats. YES @ 60¢ = 60% implied probability
   - Backtest: 207 trades, 47.8% win rate, +$37,409 net
   - Entry gates: `|traj_final| ≥ 0.08`, `run_length ≥ 2`, price 30-70¢, no garbage time
 
-**Test set (2024-25 season):** Sacred. Never touch during dev.
+**Test set (2024-26 season):** Sacred. Never touch during dev.
 
 ---
 
