@@ -306,8 +306,8 @@ def _compute_market_features_for_game(game_ticks: pd.DataFrame) -> pd.DataFrame:
 def validate_possession_tick_overlap(
     possessions: pd.DataFrame,
     ticks: pd.DataFrame,
-    min_lead_minutes: float = -60.0,
-    max_lead_minutes: float = 60.0,
+    tolerance_minutes: float = 5.0,
+    min_coverage_pct: float = 15.0,
     raise_on_fail: bool = False,
 ) -> pd.DataFrame:
     """
@@ -324,11 +324,30 @@ def validate_possession_tick_overlap(
     (games tipping after 20:00 ET, i.e. crossing 00:00 UTC), and it went unnoticed
     through a model retrain and a full backtest sweep.
 
-    A healthy game has its first possession shortly AFTER the first tick, because
-    the recorder starts ~15 min pre-tip. Measured across 69 recorded games, healthy
-    lead times cluster tightly in +9..+17 min, while corrupt games sit at +132 min
-    (misparsed period anchor) or +1462 min (the one-day offset) — so the default
-    +-60 min bound separates them with roughly 4x margin in both directions.
+    The invariant checked is that the FIRST possession falls inside the recording
+    window: tick_start - tolerance <= poss_start <= tick_end.
+
+    Deliberately not a lead-time window and not full containment — both were tried
+    against real data and both produced false failures:
+
+      * "first possession within +-60 min of first tick" fails whenever Kalshi opens
+        a market early, which it routinely does (a Finals market opened 3 days ahead;
+        many open the prior evening). 10 of 85 games failed this way.
+      * "possession window fully inside tick window" fails whenever the recorder
+        stops before the final buzzer, which is normal once a market settles — 56 of
+        83 games ran 5-57 min past their last tick.
+
+    Anchoring on poss_start still catches both real corruptions, because both move
+    the start out of the window: a game written one day late starts long after the
+    ticks end, and a game whose later periods lost a day starts before they begin.
+
+    A start-of-game check alone is not sufficient, so `tick_coverage_pct` (the share
+    of the possession window the recorder actually covered) is a second criterion.
+    When only the LATER periods of a game carry a wrong date, the minimum timestamp
+    can still land inside the tick window and slip past a start-only check, while
+    most of the game sits a day away. Measured on the real corrupt data the split is
+    unambiguous: corrupt games score 0.0-2.7% coverage, legitimate games 26.6-100%
+    (median 90.4%), so the 15% default separates them with roughly 10x margin.
 
     Returns a per-game report; callers should log it and act on `ok`.
     """
@@ -343,32 +362,51 @@ def validate_possession_tick_overlap(
     if rep.empty:
         return rep
 
-    # Minutes from first tick to first possession. Healthy ≈ +9..+17.
+    tol = pd.Timedelta(minutes=tolerance_minutes)
     rep["lead_minutes"] = (rep["poss_start"] - rep["tick_start"]).dt.total_seconds() / 60.0
-    rep["ok"] = (
-        rep["lead_minutes"].between(min_lead_minutes, max_lead_minutes)
+
+    # Minutes the first possession sits outside the recording window, either side.
+    before = ((rep["tick_start"] - tol) - rep["poss_start"]).dt.total_seconds() / 60.0
+    after = (rep["poss_start"] - rep["tick_end"]).dt.total_seconds() / 60.0
+    # No leading underscore: DataFrame.itertuples() renames such columns.
+    rep["start_outside_min"] = pd.concat([before, after], axis=1).max(axis=1).clip(lower=0)
+
+    # Informational: how much of the game the recorder actually covered.
+    overlap = (
+        rep[["poss_end", "tick_end"]].min(axis=1) - rep[["poss_start", "tick_start"]].max(axis=1)
+    ).dt.total_seconds() / 60.0
+    span = (rep["poss_end"] - rep["poss_start"]).dt.total_seconds() / 60.0
+    rep["tick_coverage_pct"] = (overlap.clip(lower=0) / span.where(span > 0)) * 100.0
+
+    rep["start_ok"] = (
+        (rep["poss_start"] >= rep["tick_start"] - tol)
         & (rep["poss_start"] <= rep["tick_end"])
     )
+    rep["coverage_ok"] = rep["tick_coverage_pct"] >= min_coverage_pct
+    rep["ok"] = rep["start_ok"] & rep["coverage_ok"]
 
     n_bad = int((~rep["ok"]).sum())
     if n_bad:
-        worst = rep.loc[~rep["ok"]].reindex(
-            rep.loc[~rep["ok"], "lead_minutes"].abs().sort_values(ascending=False).index
-        ).head(5)
+        worst = rep.loc[~rep["ok"]].nsmallest(5, "tick_coverage_pct", keep="all").head(5)
+        n_start = int((~rep["start_ok"]).sum())
+        n_cov = int((~rep["coverage_ok"]).sum())
         msg = (
-            f"{n_bad} of {len(rep)} games have possession times outside their tick window — "
-            f"the asof join will silently return settled end-of-game prices for these. "
-            f"Expected first possession {min_lead_minutes:+.0f}..{max_lead_minutes:+.0f} min "
-            f"from first tick. Worst (game_id, lead_minutes): "
-            + ", ".join(f"({r.game_id}, {r.lead_minutes:+.0f}m)" for r in worst.itertuples())
+            f"{n_bad} of {len(rep)} games do not line up with their tick recording "
+            f"window — the asof join will silently return settled end-of-game prices "
+            f"for these ({n_start} first possession outside the window, "
+            f"{n_cov} below {min_coverage_pct:.0f}% tick coverage). "
+            f"Worst (game_id, coverage): "
+            + ", ".join(f"({r.game_id}, {r.tick_coverage_pct:.1f}%)" for r in worst.itertuples())
         )
         if raise_on_fail:
             raise ValueError(msg)
         logger.error(msg)
     else:
         logger.info(
-            "Tick overlap OK for all %d games (first possession %.1f-%.1f min after first tick)",
+            "Tick window OK for all %d games (first possession %.0f..%.0f min after "
+            "first tick — wide is normal, markets open early; median tick coverage %.0f%%)",
             len(rep), rep["lead_minutes"].min(), rep["lead_minutes"].max(),
+            rep["tick_coverage_pct"].median(),
         )
     return rep
 

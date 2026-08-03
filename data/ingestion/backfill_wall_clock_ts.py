@@ -210,26 +210,40 @@ def _parse_period_start_et(
     """
     Parse 'HH:MM AM/PM' into an ET-aware datetime on the correct date.
 
-    Handles midnight crossover: if the parsed time is earlier than the
-    previous period's time, assume the game crossed midnight and add 1 day.
+    Handles midnight crossover. A game tipping late (e.g. 22:49 ET on the west
+    coast) has its second half on the FOLLOWING calendar day, so the date has to
+    advance partway through the game.
+
+    The date is anchored to the previous period rather than to game_date, and the
+    decision compares full datetimes. The earlier version compared bare hours:
+
+        if naive.hour < prev_naive.hour or (naive.hour == 0 and prev_naive.hour == 23):
+
+    which silently broke once TWO consecutive periods started after midnight. For
+    a 22:49 tip, period 3 at 00:16 crossed correctly, but period 4 at 00:52 hit
+    `0 < 0` -> False and fell back to game_date, landing 24h BEFORE period 3.
+    That is what produced the impossible 00:39-00:53 first-possession times.
     """
     try:
         naive = datetime.strptime(time_str.strip(), "%I:%M %p")
     except ValueError:
         return None
 
-    # Determine the calendar date (may be game_date or game_date+1 for late PT games)
-    base_date = game_date
-    if prev_dt is not None:
-        prev_naive = prev_dt.astimezone(ET).replace(tzinfo=None)
-        # If this period's hour is earlier than the previous, we crossed midnight
-        if naive.hour < prev_naive.hour or (naive.hour == 0 and prev_naive.hour == 23):
-            base_date = (prev_dt.astimezone(ET).date() + timedelta(days=1))
+    def _at(d: date) -> datetime:
+        return ET.localize(datetime(d.year, d.month, d.day,
+                                    naive.hour, naive.minute, naive.second))
 
-    candidate = datetime(base_date.year, base_date.month, base_date.day,
-                         naive.hour, naive.minute, naive.second)
-    # Localize to ET (pytz handles DST — March games are EDT = UTC-4)
-    return ET.localize(candidate)
+    if prev_dt is None:
+        return _at(game_date)
+
+    # Anchor to the previous period's date, then roll forward only if this period
+    # would otherwise be at or before it. Periods are strictly increasing in real
+    # time, so this cannot go backwards regardless of how many cross midnight.
+    prev_et = prev_dt.astimezone(ET)
+    candidate = _at(prev_et.date())
+    if candidate <= prev_et:
+        candidate = _at(prev_et.date() + timedelta(days=1))
+    return candidate
 
 
 def _extract_period_anchors(
@@ -338,6 +352,11 @@ def _compute_event_timestamps(
 _MIN_TIPOFF_HOUR_ET = 12
 _MAX_TIPOFF_HOUR_ET = 23
 
+# Period-1 start to final-period start. A regulation game is ~1.5 h; several OTs
+# and long stoppages could stretch it, so 6 h is a generous ceiling that still
+# catches a whole day being applied to the wrong period.
+_MAX_GAME_SPAN_HOURS = 6.0
+
 
 def _as_date(value) -> date:
     """
@@ -399,6 +418,33 @@ def _validate_anchors(
             "The anchor was likely parsed from the wrong PBP line (e.g. an OT start "
             "such as '12:12 AM'). Refusing to write.",
             game_id, first_period, anchor_et.isoformat(), anchor_et.hour,
+        )
+        return False
+
+    # Invariant 3: periods must advance in real time. Checking only period 1 is not
+    # enough -- the midnight-crossover path previously sent period 4 a full day
+    # BACKWARDS while period 1 stayed correct, so a first-period-only check passed
+    # games that were badly broken later in the game.
+    ordered = sorted(anchors)
+    for prev_p, next_p in zip(ordered, ordered[1:]):
+        prev_dt, next_dt = anchors[prev_p], anchors[next_p]
+        if next_dt <= prev_dt:
+            logger.error(
+                "game %s: period-%d anchor (%s ET) is not after period-%d (%s ET) — "
+                "anchors go backwards in time. Refusing to write.",
+                game_id, next_p, next_dt.astimezone(ET).isoformat(),
+                prev_p, prev_dt.astimezone(ET).isoformat(),
+            )
+            return False
+
+    # A regulation period should follow the previous one by roughly 30-45 min of
+    # real time. A gap of many hours means a date was applied to the wrong period.
+    total_span_h = (anchors[ordered[-1]] - anchors[ordered[0]]).total_seconds() / 3600
+    if total_span_h > _MAX_GAME_SPAN_HOURS:
+        logger.error(
+            "game %s: anchors span %.1f h from period %d to period %d — implausible "
+            "for a single game. Refusing to write.",
+            game_id, total_span_h, ordered[0], ordered[-1],
         )
         return False
 
