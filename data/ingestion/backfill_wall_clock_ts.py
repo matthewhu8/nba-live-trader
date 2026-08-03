@@ -339,6 +339,22 @@ _MIN_TIPOFF_HOUR_ET = 12
 _MAX_TIPOFF_HOUR_ET = 23
 
 
+def _as_date(value) -> date:
+    """
+    Coerce a game_date to datetime.date.
+
+    dim_games queries go through DuckDB's .df(), which yields pandas Timestamps.
+    Comparing `some_date != Timestamp` is always True, so without this coercion a
+    date equality check silently fails for every game.
+    """
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    if isinstance(value, datetime):
+        return value.date()
+    ts = pd.Timestamp(value)          # handles numpy datetime64, str, Timestamp
+    return ts.to_pydatetime().date()
+
+
 def _validate_anchors(
     game_id: str,
     game_date: date,
@@ -365,6 +381,7 @@ def _validate_anchors(
     """
     first_period = min(anchors)
     anchor_et = anchors[first_period].astimezone(ET)
+    game_date = _as_date(game_date)
 
     if anchor_et.date() != game_date:
         logger.error(
@@ -392,6 +409,7 @@ def _compute_timestamps_for_game(
     game_id: str,
     game_date: date,
     conn: duckdb.DuckDBPyConnection,
+    force: bool = False,
 ) -> Optional[pd.DataFrame]:
     """
     Compute wall_clock_ts for all possession_flat rows of one game.
@@ -399,8 +417,12 @@ def _compute_timestamps_for_game(
     Returns a DataFrame with columns [game_id, period, game_clock_secs, wall_clock_ts],
     or None if the game cannot be processed (missing anchors, empty PBP, etc.).
     Does NOT write anything — callers handle the write.
+
+    force=True recomputes games that ALREADY have wall_clock_ts, which is required
+    to repair the 85 games written with a one-day date offset (see _validate_anchors).
+    Without it this function is fill-in-the-blanks only and skips them.
     """
-    if _is_already_populated(game_id, conn):
+    if not force and _is_already_populated(game_id, conn):
         logger.debug("game %s: wall_clock_ts already fully populated — skipping", game_id)
         return None
 
@@ -427,12 +449,14 @@ def _compute_timestamps_for_game(
     if not ts_map:
         return None
 
-    # Load possession_flat rows for this game that still need wall_clock_ts
+    # Load the possession_flat rows to timestamp. Normally only rows still missing
+    # wall_clock_ts; under --force, ALL rows for the game, since the existing values
+    # are the ones being replaced.
     pf = conn.execute(
-        """
+        f"""
         SELECT event_id, period, game_clock_secs
         FROM features.possession_flat
-        WHERE game_id = ? AND wall_clock_ts IS NULL
+        WHERE game_id = ?{"" if force else " AND wall_clock_ts IS NULL"}
         """,
         [game_id],
     ).df()
@@ -583,11 +607,81 @@ def _parse_args() -> argparse.Namespace:
     group.add_argument("--date",  help="Backfill all games on this date (YYYY-MM-DD)")
     group.add_argument("--since", help="Backfill all games on or after this date (YYYY-MM-DD)")
     group.add_argument("--game",  help="Backfill a single game by game_id")
+    group.add_argument(
+        "--games-file",
+        help="Backfill exactly the game_ids listed in this file (one per line). "
+             "Required when using --force.",
+    )
     parser.add_argument(
         "--dry-run", action="store_true",
         help="Compute timestamps but do not write to MotherDuck",
     )
+    parser.add_argument(
+        "--force", action="store_true",
+        help="Overwrite wall_clock_ts on games that already have it. Requires "
+             "--games-file (or --game) plus --backup so the operation is scoped "
+             "and reversible. Needed to repair the one-day date offset.",
+    )
+    parser.add_argument(
+        "--backup",
+        help="Path to write a parquet backup of the CURRENT wall_clock_ts values "
+             "for the targeted games before any write. Mandatory with --force.",
+    )
     return parser.parse_args()
+
+
+def _read_games_file(path: Path, conn: duckdb.DuckDBPyConnection) -> list[tuple[str, date]]:
+    """Load an explicit game_id list and resolve each one's ET game_date."""
+    ids = [
+        line.strip() for line in path.read_text().splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if not ids:
+        raise SystemExit(f"{path} contains no game_ids")
+
+    placeholders = ", ".join(["?"] * len(ids))
+    df = conn.execute(
+        f"SELECT game_id, game_date FROM dim_games WHERE game_id IN ({placeholders}) "
+        f"ORDER BY game_date, game_id",
+        ids,
+    ).df()
+
+    missing = set(ids) - set(df["game_id"])
+    if missing:
+        raise SystemExit(f"game_ids not found in dim_games: {sorted(missing)}")
+    return [(r.game_id, r.game_date) for r in df.itertuples(index=False)]
+
+
+def _write_backup(
+    games: list[tuple[str, date]],
+    dest: Path,
+    conn: duckdb.DuckDBPyConnection,
+) -> int:
+    """
+    Snapshot the CURRENT wall_clock_ts for the targeted games to local parquet.
+
+    Written locally on purpose: the failsafe should live outside the system being
+    mutated, so a mistake against MotherDuck cannot take the backup with it.
+    """
+    ids = [g for g, _ in games]
+    placeholders = ", ".join(["?"] * len(ids))
+    df = conn.execute(
+        f"""
+        SELECT game_id, event_id, period, game_clock_secs, wall_clock_ts
+        FROM features.possession_flat
+        WHERE game_id IN ({placeholders})
+        ORDER BY game_id, period, game_clock_secs
+        """,
+        ids,
+    ).df()
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(dest, index=False)
+    logger.info(
+        "Backup written: %s (%d rows across %d games, %.2f MB)",
+        dest, len(df), df["game_id"].nunique(), dest.stat().st_size / 1e6,
+    )
+    return len(df)
 
 
 if __name__ == "__main__":
@@ -599,10 +693,29 @@ if __name__ == "__main__":
     load_dotenv()
 
     args = _parse_args()
+
+    # --force rails, checked BEFORE opening a connection: it must be scoped to an
+    # explicit game list and must have somewhere to put the undo data. A bare
+    # --force across the whole table is refused outright.
+    if args.force:
+        if not (args.games_file or args.game):
+            raise SystemExit(
+                "--force requires --games-file (or --game). Refusing to overwrite "
+                "wall_clock_ts across an unbounded set of games."
+            )
+        if not args.backup and not args.dry_run:
+            raise SystemExit(
+                "--force requires --backup <path> so the write is reversible "
+                "(or --dry-run to preview without writing)."
+            )
+
     conn = _md_connect()
 
     try:
-        if args.game:
+        if args.games_file:
+            games = _read_games_file(Path(args.games_file), conn)
+
+        elif args.game:
             game_date_row = conn.execute(
                 "SELECT game_date FROM dim_games WHERE game_id = ?", [args.game]
             ).fetchone()
@@ -626,16 +739,22 @@ if __name__ == "__main__":
             raise SystemExit(0)
 
         logger.info(
-            "Backfilling wall_clock_ts for %d game(s)%s",
+            "Backfilling wall_clock_ts for %d game(s)%s%s",
             len(games),
+            " [FORCE — overwriting existing values]" if args.force else "",
             " [DRY RUN]" if args.dry_run else "",
         )
+
+        # Snapshot current values before computing anything, so the undo file
+        # exists even if the run dies partway through.
+        if args.force and args.backup and not args.dry_run:
+            _write_backup(games, Path(args.backup), conn)
 
         # Compute timestamps for all games (read-only phase)
         all_frames: list[pd.DataFrame] = []
         for game_id, game_date in games:
             try:
-                df = _compute_timestamps_for_game(game_id, game_date, conn)
+                df = _compute_timestamps_for_game(game_id, game_date, conn, force=args.force)
                 if df is not None:
                     all_frames.append(df)
             except Exception:
