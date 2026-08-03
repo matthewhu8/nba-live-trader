@@ -93,7 +93,7 @@ class ClosedPosition:
     entry_side:    int          # +1 BUY_YES | -1 BUY_NO
     hold_time_s:   float
     gross_pnl:     float        # entry_side * (exit_price - entry_price)
-    net_pnl:       float        # gross_pnl * contracts - fees
+    net_pnl:       float        # DOLLARS: pnl_dollars(gross_pnl, contracts) - fees
     run_prob:        float
     traj_final:      float      # trajectory[-1] at entry (legacy column, kept for backward compat)
     traj_used:       float      # aggregated trajectory actually consulted for entry gate
@@ -237,6 +237,19 @@ def _build_feature_dict(
 
 MAKER_FEE_RATE = 0.0175
 TAKER_FEE_RATE = 0.07
+
+
+def pnl_dollars(price_move_cents: float, contracts: int) -> float:
+    """Convert a price move in cents into dollars for `contracts` contracts.
+
+    A Kalshi contract settles at $1, quoted 1-99c, so one contract moving 1c is $0.01:
+    100 contracts x 5c = $5.00, NOT $500. Fees are computed in dollars, so P&L must be
+    too -- `gross_cents * contracts - fees_dollars` silently mixes the two and makes the
+    fee look 100x smaller than it is. That mix is why the old backtests reported figures
+    like "+$16,100" (really 16,100 cents = $161) while CLAUDE.md's break-even win rate of
+    55-56% was derived with correct units.
+    """
+    return price_move_cents * contracts / 100.0
 
 # Exits that rest a limit order and therefore pay the maker rate. Every other exit
 # reason crosses the book to get out now, so it pays taker — see CLAUDE.md Phase 6:
@@ -414,7 +427,7 @@ def _run_game(
 
         gross = entry_side * (exit_price - yes_bid)
         fees  = _compute_fees(yes_bid, exit_price, contracts, sim.exit_reason)
-        net   = gross * contracts - fees
+        net   = pnl_dollars(gross, contracts) - fees
 
         positions.append(ClosedPosition(
             game_id       = game_id,
@@ -587,7 +600,7 @@ def run_backtest(
             exit_reasons={}, by_quarter={}, by_score_bucket={}, by_run_length={},
         )
 
-    total_gross = sum(p.gross_pnl * contracts for p in all_positions)
+    total_gross = sum(pnl_dollars(p.gross_pnl, contracts) for p in all_positions)
     total_net   = sum(p.net_pnl for p in all_positions)
     win_rate    = sum(1 for p in all_positions if p.net_pnl > 0) / len(all_positions)
     avg_hold    = np.mean([p.hold_time_s for p in all_positions])

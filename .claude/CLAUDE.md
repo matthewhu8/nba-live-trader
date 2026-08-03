@@ -111,13 +111,19 @@ Head B's Apr 7–12 val window), the Phase 6 config
 
 | | trades | win rate | net P&L |
 |---|---|---|---|
-| as previously reported | 81 | 51.9% | **+$16,100** |
-| corrected | 80 | 37.5% | **+$61.58** (gross +$200, fees $138) |
+| as previously reported | 81 | 51.9% | **+$16,100** (really +$161 — see defect 4) |
+| corrected | 80 | 30.0% | **−$136.42** (gross **+$2.00**, fees **$138.42**) |
 
-**The measured edge is zero.** +$61.58 over 80 trades is $0.77/trade on 100-contract
-positions; remove the single best trade and it is **−$438**. 37.5% win rate against a
-55–56% break-even at TP=5/SL=3. 70% of exits are stop-outs or momentum flips.
-Treat live trading as blocked on a real edge, not on tuning.
+**The strategy loses money, and fees are the reason.** Gross edge over 80 trades is
+**+$2.00**; fees are **$138.42** — a 69× drag. Net-of-fee win rate 30.0% against a
+55–56% break-even; fees alone flip 6 gross-positive trades into losses. 70% of exits
+are stop-outs or momentum flips.
+
+This is not a tuning problem. A 5¢ take-profit cannot clear a $2.19 round trip on 100
+contracts: you need ~55.7% accuracy and the model delivers ~37% on gross moves.
+Either the edge per trade gets much larger (wider TP, better signal) or the fee per
+trade gets much smaller (maker on both legs, i.e. never stopping out at market) —
+tightening `min_abs_traj` cannot fix a 69× cost ratio.
 
 **1. Exit-window lookahead — FIXED 2026-08-03** (`mmoe_backtest.py`, commit `92ebc6c`).
 Entry price is read at `wall_clock_ts + feed_delay_s` (20s) but the exit search started at
@@ -134,8 +140,18 @@ anchor cannot drift apart again. A runtime invariant raises on any exit earlier 
 re-anchoring fails loudly instead of silently reinflating results. **Verified in both
 directions** — it fires when the bug is reintroduced.
 
-⚠️ `backtesting/event_trigger_backtest.py` has the same pattern and is **still unfixed**
-(it lives on `event_triggers`).
+`backtesting/event_trigger_backtest.py` had the same pattern — **also fixed 2026-08-03**,
+on `event_triggers` after merging. Corrected event-trigger result on the same 69-game cache:
+**118 trades, 36.4% win rate, −$200.91**, versus its internal possession-close baseline of
+208 trades / 33.2% / −$342.75. **Per trade the two are indistinguishable: −$1.70 vs −$1.65.**
+Firing at subs/fouls/timeouts is not better; it just trades less. By trigger type:
+`sub` −$29.13 at 44.1% wr (n=34), `timeout` −$20.68 at 35.3% (n=17), `foul` −$151.10 at
+32.8% (n=67). The sub-vs-foul win-rate gap (44% vs 33%) is the only thing here worth a
+second look, and n=34 cannot support a conclusion.
+
+Why event triggers can't help much: mean earliness vs possession close is **2.4s**, against
+a 20s feed delay. You cannot buy a timing edge measured in seconds when you are 20 seconds
+behind the feed.
 
 **Do not "filter" the bug out of old results.** Dropping sub-20s trades from a biased run
 gave an estimate of −$2,600; actually re-running gave +$62. The corrected run re-simulates
@@ -162,12 +178,55 @@ Replaced by `_compute_fees(entry, exit, contracts, exit_reason)`: maker entry al
 exit only on `take_profit`, taker otherwise. Worth $138 on the 80-trade corrected run —
 more than twice the run's entire net P&L.
 
+**4. P&L was reported in cents but labelled dollars — FIXED 2026-08-03.** Both backtests
+computed `net = gross_cents * contracts - fees_dollars`, mixing units, then printed the
+result with a `$`. A Kalshi contract settles at $1, so 100 contracts moving 5¢ is **$5.00,
+not $500** — every historical figure in this file is **100× too large** (Phase 3's
+`+$37,409` was $374; the sweep's `+$39.3K` was $393). Worse, because fees were computed in
+real dollars and subtracted from a cents quantity, the fee looked **100× smaller than it
+is** — which is exactly why the fee bug in defect 3 went unnoticed and why the corrected
+baseline flips from +$62 to −$136. Fixed via `mmoe_backtest.pnl_dollars()`, now used
+everywhere P&L is summed (both backtests plus `tools/sweep_dynamic_exit.py` and
+`tools/sweep_traj_aggregator.py`).
+
+Note the giveaway that resolved it: CLAUDE.md's own **55–56% break-even** for TP=5/SL=3 was
+derived with *correct* units (win $5.00 − $0.88 = +$4.12; loss −$3.00 − $2.19 = −$5.19;
+break-even = 5.19/9.31 = 55.7%). The doc and the backtest had disagreed by 100× all along.
+The live Go trader is rigorously in cents (`max_total_exposure_cents: 7000 # $70`) and was
+never affected.
+
 **Known remaining bias (not fixed, smaller, and deliberate):** `simulate_exit` evaluates
 momentum-flip and garbage-time exits at each possession's `wall_clock_ts`, with no feed
 delay, so those exits fire ~20s earlier than a live trader could act. Fixing it means
 changing `models/targets/exit_simulator.py`, which also generates Head B/C **training
 labels** — so it would require a retrain and must not be done casually. 27.5% of corrected
 exits are momentum flips, so this is material; scope it as its own task.
+
+**⚠️ Separate finding, arguably bigger than any of the above: 18 of the 83 features are dead
+in production.** To re-measure the event-trigger backtest, `models/mmoe/feature_config.py`
+was restored to `main`'s 83-feature version on `event_triggers` — the branch's 65-feature
+slim config cannot load `models/saved/mmoe_delay20.pt` (shape mismatch, 83 vs 65). But the
+slimming commit (`cce25f8`, 2026-06-10) documents *why* those 18 were dropped, and the reason
+is train/serve skew, not tidiness:
+
+- **11 pregame features** — `has_pregame_data` was 0.0 across 1,605 live possessions
+  (2026-05-25 → 06-09). The pregame join never populates in live.
+- **5 lineup features** — `home/away_lineup_net_rating`, `lineup_net_rating_delta`,
+  `home/away_lineup_sample_size` all 0.0 in live over the same window.
+- **2 event flags** (`was_foul`, `was_sub`) — `train_std = 0` across 70k+ rows.
+
+So the deployed 83-feature model is fed real pregame and lineup values in backtest and
+**zeros in production**. Every backtest number, including the corrected ones above, is
+optimistic relative to live for this additional reason. And the 5 dead lineup features are
+the direct expression of the Core Thesis at the top of this file ("we predict runs using
+lineup matchup data… they underreact to lineup changes they didn't notice") — the project's
+central hypothesis is currently not wired up in production at all.
+
+Resolving this means retraining a 65-feature model on the repaired timestamps, or fixing the
+live lineup/pregame pipeline so the 83-feature model gets what it was trained on. Until then
+the 83-feature config is a measurement convenience, not a decision.
+⚠️ The supporting analysis (`scratch/feature_audit.csv`, `scratch/feature_audit_v2.py`) is
+**untracked** — it exists only on the dev machine. Commit it before relying on it.
 
 **Fixed and verified on 2026-08-03** (branch `fix/wall-clock-ts-date`, merged into `event_triggers`):
 - 86 games' `wall_clock_ts` repaired in MotherDuck; all 2,127 timestamped games now at day-offset 0, no backwards periods, no implausible tip hours, row count preserved at 449,274. Backups in `data/backups/`.

@@ -37,6 +37,7 @@ from backtesting.mmoe_backtest import (
     _add_derived_features,
     _build_feature_dict,
     _compute_fees,
+    pnl_dollars,
     _compute_market_features_for_game,
     _connect_motherduck,
     _get_market_features_at_delay,
@@ -185,7 +186,7 @@ def _run_one_variant(
 
             gross = entry_side * (sim.exit_price - yes_bid)
             fees = _compute_fees(yes_bid, sim.exit_price, contracts, sim.exit_reason)
-            net = gross * contracts - fees
+            net = pnl_dollars(gross, contracts) - fees
 
             trades.append(Trade(
                 game_id=str(game_id),
