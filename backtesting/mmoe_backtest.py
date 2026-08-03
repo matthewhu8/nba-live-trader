@@ -215,6 +215,43 @@ def _get_market_features_at_delay(
     }
 
 
+# Features that production does NOT actually deliver to the model, as measured from
+# 3,131 recorded possessions across 27 sessions in live-trader/go/logs/runs/ (2026-08-03).
+# The backtest reads these from the feature store, so it trades a strategy production
+# cannot run. `--prod-features` zeroes them to measure what live would really have done.
+#
+# Sources of each gap:
+#   11 pregame  — features.pregame has no row at tip-off (3 AM ET prefill runs after the
+#                 day's games), so live-trader/inference/pregame.py:137 zero-fills. 0.0 in
+#                 100% of recorded prod possessions.
+#   2 lineup sample_size — hardcoded `0.0  # TODO` at inference/features.py:228-229.
+#   3 lineup net_rating  — non-zero in only 1.8-8.8% of prod possessions vs 31-41% here,
+#                 because game_state.py:129-131 never seeds starters so the lineup hash
+#                 rarely matches. Zeroing slightly OVERSHOOTS the real gap.
+_PROD_ZERO_FEATURES = tuple(PREGAME_COLS) + (
+    "home_lineup_sample_size", "away_lineup_sample_size",
+    "home_lineup_net_rating",  "away_lineup_net_rating", "lineup_net_rating_delta",
+)
+# Losing expected_pace also pins this constant in prod (inference/pregame.py:95).
+_PROD_PINNED_FEATURES = {"pace_season_baseline": 14.0}
+
+# NOT masked, deliberately: was_foul / was_sub are populated in prod (20.2% / 16.5%) but
+# are all-NaN in the local cache, so this backtest already understates them. That skew
+# runs the opposite way and cannot be corrected from the cache.
+
+
+def _apply_prod_feature_gaps(fd: dict[str, float]) -> dict[str, float]:
+    """Degrade a feature dict to what production actually supplies. See _PROD_ZERO_FEATURES."""
+    out = dict(fd)
+    for col in _PROD_ZERO_FEATURES:
+        if col in out:
+            out[col] = 0.0
+    for col, val in _PROD_PINNED_FEATURES.items():
+        if col in out:
+            out[col] = val
+    return out
+
+
 def _build_feature_dict(
     poss_row: pd.Series,
     market_features: dict[str, float],
@@ -303,6 +340,7 @@ def _run_game(
     min_run_length: int = 1,
     hold_seconds: int = 120,
     traj_aggregator: str = "final",
+    prod_features: bool = False,
 ) -> list[ClosedPosition]:
     """Replay one game and return all closed positions."""
     if game_ticks.empty:
@@ -354,6 +392,8 @@ def _run_game(
 
         # Build 83-dim feature vector and run inference
         fd = _build_feature_dict(row, market_feats)
+        if prod_features:
+            fd = _apply_prod_feature_gaps(fd)
         output = predictor.predict(fd)
 
         # Entry filter: Head A gate
@@ -516,6 +556,7 @@ def run_backtest(
     hold_seconds: int = 120,
     only_game: str | None = None,
     traj_aggregator: str = "final",
+    prod_features: bool = False,
 ) -> BacktestSummary:
     logger.info("Loading data...")
     all_poss, all_ticks, pregame = _load_data()
@@ -588,6 +629,7 @@ def run_backtest(
             min_run_length=min_run_length,
             hold_seconds=hold_seconds,
             traj_aggregator=traj_aggregator,
+            prod_features=prod_features,
         )
         all_positions.extend(positions)
 
@@ -686,6 +728,10 @@ if __name__ == "__main__":
         help="path to scaler pickle",
     )
     parser.add_argument("--save-csv", action="store_true", help="save positions to CSV")
+    parser.add_argument("--prod-features", action="store_true",
+                        help="zero the pregame/lineup features production does not actually "
+                             "deliver, to measure what live would really have traded "
+                             "(see _PROD_ZERO_FEATURES)")
     parser.add_argument("--game",     type=str, default=None,
                         help="run backtest on a single game_id only (e.g. 0042500311)")
     args = parser.parse_args()
@@ -704,6 +750,7 @@ if __name__ == "__main__":
         hold_seconds       = args.hold_seconds,
         only_game          = args.game,
         traj_aggregator    = args.traj_aggregator,
+        prod_features      = args.prod_features,
     )
 
     label = (

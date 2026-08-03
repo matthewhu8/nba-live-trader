@@ -206,7 +206,9 @@ exits are momentum flips, so this is material; scope it as its own task.
 in production.** To re-measure the event-trigger backtest, `models/mmoe/feature_config.py`
 was restored to `main`'s 83-feature version on `event_triggers` — the branch's 65-feature
 slim config cannot load `models/saved/mmoe_delay20.pt` (shape mismatch, 83 vs 65). But the
-slimming commit (`cce25f8`, 2026-06-10) documents *why* those 18 were dropped, and the reason
+slimming commit (`cce25f8`, **2026-08-03** — the docstring inside that commit misdates itself as
+2026-06-10; don't let the wrong date make it look contemporaneous with PR #50's ablation study)
+documents *why* those 18 were dropped, and the reason
 is train/serve skew, not tidiness:
 
 - **11 pregame features** — `has_pregame_data` was 0.0 across 1,605 live possessions
