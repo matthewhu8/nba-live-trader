@@ -333,6 +333,61 @@ def _compute_event_timestamps(
 # Core backfill function (importable by post_game_pipeline)
 # ---------------------------------------------------------------------------
 
+# Plausible NBA tip-off window in ET. Earliest regular tips are ~12:00 (holiday
+# afternoon games); nothing legitimately tips at/after midnight ET.
+_MIN_TIPOFF_HOUR_ET = 12
+_MAX_TIPOFF_HOUR_ET = 23
+
+
+def _validate_anchors(
+    game_id: str,
+    game_date: date,
+    anchors: dict[int, datetime],
+) -> bool:
+    """
+    Sanity-check computed period anchors before they are written.
+
+    This guard exists because a wrong `game_date` silently produces timestamps
+    with the correct time-of-day on the wrong calendar day. Downstream,
+    pd.merge_asof never errors — it just matches the last (settled) tick — so the
+    corruption is invisible until you audit prices. 36 of 71 games were written
+    one day late this way, which contaminated Head B's training rows and every
+    backtest measured through the tick join.
+
+    Two invariants, both cheap:
+      1. The period-1 anchor's ET calendar date must equal `game_date`.
+         Catches the UTC-vs-ET date bug (games tipping >= 20:00 ET cross 00:00 UTC).
+      2. The period-1 anchor's ET hour must be a plausible tip-off time.
+         Catches anchors misparsed from an OT start line (e.g. "12:12 AM").
+
+    Returns True if the anchors look sane; logs an error and returns False if not,
+    so the caller skips the game rather than writing bad data.
+    """
+    first_period = min(anchors)
+    anchor_et = anchors[first_period].astimezone(ET)
+
+    if anchor_et.date() != game_date:
+        logger.error(
+            "game %s: period-%d anchor resolves to %s ET but dim_games.game_date is %s "
+            "(off by %+d day(s)). This is the UTC-vs-ET date bug — refusing to write. "
+            "Verify dim_games.game_date is the EASTERN game date, not a UTC-derived one.",
+            game_id, first_period, anchor_et.isoformat(), game_date.isoformat(),
+            (anchor_et.date() - game_date).days,
+        )
+        return False
+
+    if not (_MIN_TIPOFF_HOUR_ET <= anchor_et.hour <= _MAX_TIPOFF_HOUR_ET):
+        logger.error(
+            "game %s: period-%d anchor is %s ET — implausible tip-off hour (%d). "
+            "The anchor was likely parsed from the wrong PBP line (e.g. an OT start "
+            "such as '12:12 AM'). Refusing to write.",
+            game_id, first_period, anchor_et.isoformat(), anchor_et.hour,
+        )
+        return False
+
+    return True
+
+
 def _compute_timestamps_for_game(
     game_id: str,
     game_date: date,
@@ -362,6 +417,9 @@ def _compute_timestamps_for_game(
             "cannot compute wall_clock_ts. Skipping.",
             game_id,
         )
+        return None
+
+    if not _validate_anchors(game_id, game_date, anchors):
         return None
 
     logger.debug("game %s: found anchors for periods %s", game_id, sorted(anchors.keys()))

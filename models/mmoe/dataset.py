@@ -303,6 +303,76 @@ def _compute_market_features_for_game(game_ticks: pd.DataFrame) -> pd.DataFrame:
     return out.reset_index()
 
 
+def validate_possession_tick_overlap(
+    possessions: pd.DataFrame,
+    ticks: pd.DataFrame,
+    min_lead_minutes: float = -60.0,
+    max_lead_minutes: float = 60.0,
+    raise_on_fail: bool = False,
+) -> pd.DataFrame:
+    """
+    Assert that each game's possession times actually overlap its Kalshi ticks.
+
+    Why this exists: pd.merge_asof(direction="backward") NEVER fails. If a game's
+    wall_clock_ts is wrong — e.g. off by a day — every possession silently matches
+    the LAST recorded tick, which for a finished market is the settled price
+    (bid=1 or 99). Those rows look populated, carry has_market_data=1, and then get
+    quietly discarded downstream by the 30-70c band, so the corruption is invisible
+    in aggregate metrics while roughly halving the effective sample.
+
+    That is exactly what happened: 36 of 71 games had wall_clock_ts one day late
+    (games tipping after 20:00 ET, i.e. crossing 00:00 UTC), and it went unnoticed
+    through a model retrain and a full backtest sweep.
+
+    A healthy game has its first possession shortly AFTER the first tick, because
+    the recorder starts ~15 min pre-tip. Measured across 69 recorded games, healthy
+    lead times cluster tightly in +9..+17 min, while corrupt games sit at +132 min
+    (misparsed period anchor) or +1462 min (the one-day offset) — so the default
+    +-60 min bound separates them with roughly 4x margin in both directions.
+
+    Returns a per-game report; callers should log it and act on `ok`.
+    """
+    poss = possessions.dropna(subset=["wall_clock_ts"]).copy()
+    poss["wall_clock_ts"] = pd.to_datetime(poss["wall_clock_ts"], utc=True)
+    tk = ticks.copy()
+    tk["ts"] = pd.to_datetime(tk["ts"], utc=True)
+
+    p_agg = poss.groupby("game_id")["wall_clock_ts"].agg(poss_start="min", poss_end="max")
+    t_agg = tk.groupby("game_id")["ts"].agg(tick_start="min", tick_end="max")
+    rep = p_agg.join(t_agg, how="inner").reset_index()
+    if rep.empty:
+        return rep
+
+    # Minutes from first tick to first possession. Healthy ≈ +9..+17.
+    rep["lead_minutes"] = (rep["poss_start"] - rep["tick_start"]).dt.total_seconds() / 60.0
+    rep["ok"] = (
+        rep["lead_minutes"].between(min_lead_minutes, max_lead_minutes)
+        & (rep["poss_start"] <= rep["tick_end"])
+    )
+
+    n_bad = int((~rep["ok"]).sum())
+    if n_bad:
+        worst = rep.loc[~rep["ok"]].reindex(
+            rep.loc[~rep["ok"], "lead_minutes"].abs().sort_values(ascending=False).index
+        ).head(5)
+        msg = (
+            f"{n_bad} of {len(rep)} games have possession times outside their tick window — "
+            f"the asof join will silently return settled end-of-game prices for these. "
+            f"Expected first possession {min_lead_minutes:+.0f}..{max_lead_minutes:+.0f} min "
+            f"from first tick. Worst (game_id, lead_minutes): "
+            + ", ".join(f"({r.game_id}, {r.lead_minutes:+.0f}m)" for r in worst.itertuples())
+        )
+        if raise_on_fail:
+            raise ValueError(msg)
+        logger.error(msg)
+    else:
+        logger.info(
+            "Tick overlap OK for all %d games (first possession %.1f-%.1f min after first tick)",
+            len(rep), rep["lead_minutes"].min(), rep["lead_minutes"].max(),
+        )
+    return rep
+
+
 def _join_ticks_to_possessions(
     possessions: pd.DataFrame,
     ticks: pd.DataFrame,
@@ -325,6 +395,10 @@ def _join_ticks_to_possessions(
     # Shift lookup window forward by feed delay to match live entry conditions
     delay = pd.Timedelta(seconds=feed_delay_seconds)
     possessions["_join_ts"] = possessions["wall_clock_ts"] + delay
+
+    # Fail loudly on wrong-day / non-overlapping timestamps before the asof join
+    # silently substitutes settled prices for them.
+    validate_possession_tick_overlap(possessions, ticks)
 
     joint_parts: list[pd.DataFrame] = []
     games_with_ticks = set(ticks["game_id"].unique())
