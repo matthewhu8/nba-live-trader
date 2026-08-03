@@ -59,16 +59,21 @@ _service_info_emitted_for_runs: set[str] = set()
 # mean+std. We just slice out the columns we care about at startup, no
 # separate stats file needed.
 
+# NBA regulation is 4 periods; anything beyond is overtime. The Go agent hard-skips
+# OT (scanner thrash and a 50c scanner-vs-WebSocket disagreement observed 2026-05-13),
+# and training now excludes OT rows entirely, so the model is never fit on the regime.
+OVERTIME_FIRST_PERIOD = 5
+
 _ZSCORE_FEATURES: list[str] = [
     "score_diff",
+    "lead_z",
+    "time_leverage",
     "lineup_net_rating_delta",
-    "current_run_length",
-    "current_run_points",
-    "home_points_last_5_poss",
-    "away_points_last_5_poss",
-    "pace_last_10_possessions",
-    "home_xPPP_last_5",
-    "away_xPPP_last_5",
+    "run_signed_points",
+    "swing_5",
+    "pace_surprise",
+    "xppp_edge",
+    "luck_edge",
     "garbage_time_risk",
 ]
 
@@ -234,6 +239,11 @@ class PossessionResponse(BaseModel):
     yes_ask:         int          # from kalshi_snapshot[1] (cents)
     is_garbage_time: bool
     is_blowout:      bool
+    # Agent gate inputs. First-class fields, not entries in `features`, because the
+    # Go agent gates on them and must not be coupled to the model's feature set.
+    is_overtime:        bool  = False
+    current_run_length: float = 0.0
+    # Model inputs — consumed by the Go side for logging only.
     features:        dict[str, float]
     pipeline_ms:     int
 
@@ -290,7 +300,8 @@ async def game_start(game_id: str, request: GameStartRequest):
         "form_delta", "has_pregame_data",
     }
     state.pregame      = {k: v for k, v in pregame.items() if k in pregame_float_keys}
-    state.lineup_ratings = pregame["lineup_ratings"]
+    state.lineup_ratings      = pregame["lineup_ratings"]
+    state.lineup_sample_sizes = pregame.get("lineup_sample_sizes", {})
     state.player_apm     = pregame["player_apm"]
     state.star_players   = pregame["star_players"]
     state.home_b2b       = pregame["home_b2b"]
@@ -373,6 +384,15 @@ async def game_possession(game_id: str, request: PossessionRequest):
     # Build features BEFORE advancing state — preserves shift(1) invariant
     features = FeatureComputer.compute(row, state, request.kalshi_snapshot)
 
+    # Agent gate inputs, captured in the same pre-advance window as the features so
+    # the gate sees exactly the state the model saw. These are NOT model inputs and
+    # deliberately do not live in `features`: the Go agent used to read `period` and
+    # `current_run_length` out of that dict, so consolidating the feature set
+    # silently disabled the overtime skip and blocked every entry. Anything the
+    # agent gates on belongs here, where a feature change cannot reach it.
+    gate_is_overtime = row.period >= OVERTIME_FIRST_PERIOD
+    gate_run_length  = float(state.run_length)
+
     if _predictor is not None:
         output = _predictor.predict(features)
     else:
@@ -432,6 +452,8 @@ async def game_possession(game_id: str, request: PossessionRequest):
         yes_ask         = yes_ask,
         is_garbage_time = is_garbage_time,
         is_blowout      = is_blowout,
+        is_overtime        = gate_is_overtime,
+        current_run_length = gate_run_length,
         features        = features,
         pipeline_ms     = pipeline_ms,
     )

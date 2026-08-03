@@ -1,32 +1,14 @@
-<title>MMoE — The Actual Math</title>
-<meta name="description" content="Equation-level walkthrough of the Kalshi trading system's MMoE model: forward pass, losses, and the optimizer step, checked against a real training log.">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
-<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
-<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"
-  onload="renderMathInElement(document.body, {
-    delimiters: [
-      {left: '$$', right: '$$', display: true},
-      {left: '\\\\(', right: '\\\\)', display: false}
-    ],
-    throwOnError: false
-  });"></script>
+<title>MMoE — All 83 Inputs, One Real Mid-Game Possession</title>
+<meta name="description" content="Every one of the 83 input features for a real mid-game possession, which ones are actually zero, and whether the model 'sees' all of them.">
 <style>
   :root{
-    --bg:#eef1f5;
-    --surface:#ffffff;
-    --ink:#141a24;
-    --ink-dim:#57626f;
-    --rule:rgba(20,26,36,0.11);
-    --accent:#b8490a;
-    --accent-soft:#f2ddc8;
-    --good:#1f8f5f;
-    --bad:#c23b3b;
-    --head-a:#b8490a;
-    --head-a-soft:#f5e2d2;
-    --head-b:#2b608f;
-    --head-b-soft:#dbe7f0;
-    --head-c:#6d4e9c;
-    --head-c-soft:#e6dff2;
+    --bg:#eef1f5; --surface:#ffffff; --ink:#141a24; --ink-dim:#57626f;
+    --rule:rgba(20,26,36,0.11); --accent:#b8490a; --accent-soft:#f2ddc8;
+    --good:#1f8f5f; --bad:#c23b3b;
+    --head-a:#b8490a; --head-a-soft:#f5e2d2;
+    --head-b:#2b608f; --head-b-soft:#dbe7f0;
+    --head-c:#6d4e9c; --head-c-soft:#e6dff2;
+    --zero-bg: rgba(87,98,111,0.06);
     --shadow: 0 1px 2px rgba(20,26,36,0.06), 0 8px 24px rgba(20,26,36,0.05);
   }
   @media (prefers-color-scheme: dark){
@@ -37,6 +19,7 @@
       --head-a:#ff9d52; --head-a-soft:rgba(255,157,82,0.14);
       --head-b:#6faee0; --head-b-soft:rgba(111,174,224,0.14);
       --head-c:#b79eef; --head-c-soft:rgba(183,158,239,0.14);
+      --zero-bg: rgba(255,255,255,0.03);
       --shadow: 0 1px 2px rgba(0,0,0,0.4), 0 8px 28px rgba(0,0,0,0.35);
     }
   }
@@ -47,6 +30,7 @@
     --head-a:#ff9d52; --head-a-soft:rgba(255,157,82,0.14);
     --head-b:#6faee0; --head-b-soft:rgba(111,174,224,0.14);
     --head-c:#b79eef; --head-c-soft:rgba(183,158,239,0.14);
+    --zero-bg: rgba(255,255,255,0.03);
     --shadow: 0 1px 2px rgba(0,0,0,0.4), 0 8px 28px rgba(0,0,0,0.35);
   }
   :root[data-theme="light"]{
@@ -56,116 +40,75 @@
     --head-a:#b8490a; --head-a-soft:#f5e2d2;
     --head-b:#2b608f; --head-b-soft:#dbe7f0;
     --head-c:#6d4e9c; --head-c-soft:#e6dff2;
+    --zero-bg: rgba(87,98,111,0.06);
     --shadow: 0 1px 2px rgba(20,26,36,0.06), 0 8px 24px rgba(20,26,36,0.05);
   }
 
   *{box-sizing:border-box;}
   html,body{margin:0;padding:0;}
   body{
-    background:var(--bg);
-    color:var(--ink);
+    background:var(--bg); color:var(--ink);
     font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-    line-height:1.6;
-    -webkit-font-smoothing:antialiased;
-    overflow-x:hidden;
+    line-height:1.6; -webkit-font-smoothing:antialiased; overflow-x:hidden;
   }
   ::selection{ background:var(--accent-soft); }
-
   .mono{ font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }
-  .katex{ font-size:1.04em; }
-  .katex-display{ margin:0.6em 0; overflow-x:auto; overflow-y:hidden; }
-  .katex { color: var(--ink); }
-
   h1,h2,h3{ font-family: ui-serif, "Iowan Old Style", "Palatino Linotype", Georgia, serif; font-weight:600; text-wrap:balance; color:var(--ink); }
   a{ color:var(--accent); }
+  .page{ max-width:880px; margin:0 auto; padding: 4rem 1.5rem 6rem; }
 
-  .page{ max-width:800px; margin:0 auto; padding: 4rem 1.5rem 6rem; }
-
-  header.hero{ margin-bottom:3rem; padding-bottom:1.8rem; border-bottom:1px solid var(--rule); }
+  header.hero{ margin-bottom:2.6rem; padding-bottom:1.8rem; border-bottom:1px solid var(--rule); }
   .eyebrow{ font-family: ui-monospace, monospace; font-size:0.78rem; letter-spacing:0.08em; text-transform:uppercase; color:var(--accent); margin:0 0 0.9rem; }
-  h1{ font-size:clamp(1.9rem, 4vw, 2.4rem); margin:0 0 0.6rem; letter-spacing:-0.01em; }
-  .subtitle{ color:var(--ink-dim); font-size:1.02rem; max-width:60ch; margin:0 0 1.4rem; }
+  h1{ font-size:clamp(1.8rem, 4vw, 2.3rem); margin:0 0 0.6rem; letter-spacing:-0.01em; }
+  .subtitle{ color:var(--ink-dim); font-size:1.0rem; max-width:68ch; margin:0 0 1.2rem; }
   .meta-row{ display:flex; flex-wrap:wrap; gap:0.5rem 1.4rem; font-size:0.83rem; color:var(--ink-dim); }
   .meta-row strong{ color:var(--ink); font-weight:600; }
 
-  section{ margin-bottom:3rem; }
+  section{ margin-bottom:2.6rem; }
   .section-label{ display:flex; align-items:baseline; gap:0.7rem; margin-bottom:1rem; }
   .section-label .num{ font-family: ui-monospace, monospace; font-size:0.78rem; color:var(--ink-dim); }
-  .section-label h2{ font-size:1.4rem; margin:0; }
-  p{ margin:0.85rem 0; max-width:70ch; }
+  .section-label h2{ font-size:1.35rem; margin:0; }
+  p{ margin:0.85rem 0; max-width:76ch; }
   .lead{ color:var(--ink-dim); }
-
-  .math-card{
-    background:var(--surface);
-    border:1px solid var(--rule);
-    border-radius:10px;
-    padding:1.3rem 1.4rem;
-    box-shadow:var(--shadow);
-    margin:1rem 0;
-  }
-  .math-card .label{
-    font-family: ui-monospace, monospace;
-    font-size:0.72rem;
-    letter-spacing:0.05em;
-    text-transform:uppercase;
-    color:var(--ink-dim);
-    margin-bottom:0.7rem;
-  }
-  .math-card.head-a{ border-left:3px solid var(--head-a); }
-  .math-card.head-b{ border-left:3px solid var(--head-b); }
-  .math-card.head-c{ border-left:3px solid var(--head-c); }
-
-  .var-table{ width:100%; border-collapse:collapse; font-size:0.87rem; margin:0.8rem 0 0.2rem; }
-  .var-table td{ padding:0.35rem 0.6rem 0.35rem 0; border-bottom:1px solid var(--rule); vertical-align:top; }
-  .var-table td:first-child{ white-space:nowrap; width:1%; }
-  .var-table tr:last-child td{ border-bottom:none; }
-  .var-table td.desc{ color:var(--ink-dim); }
-
-  ol.loop{ list-style:none; counter-reset:step; margin:0; padding:0; display:flex; flex-direction:column; border:1px solid var(--rule); border-radius:10px; overflow:hidden; background:var(--surface); box-shadow:var(--shadow); }
-  ol.loop li{ counter-increment:step; display:grid; grid-template-columns:2.6rem 1fr; padding:1rem 1.2rem; border-bottom:1px solid var(--rule); gap:0.9rem; }
-  ol.loop li:last-child{ border-bottom:none; }
-  ol.loop li::before{ content: counter(step); font-family: ui-monospace, monospace; font-size:0.95rem; color:var(--accent); font-weight:700; }
-  ol.loop li .step-title{ font-weight:600; margin-bottom:0.15rem; }
-  ol.loop li .step-body{ color:var(--ink-dim); font-size:0.92rem; }
 
   code{ font-family: ui-monospace, monospace; font-size:0.85em; background:var(--accent-soft); padding:0.05em 0.35em; border-radius:4px; }
 
-  .callout{ border-left:3px solid var(--accent); background:var(--accent-soft); border-radius:0 8px 8px 0; padding:1rem 1.2rem; font-size:0.92rem; color:var(--ink); }
-  .callout strong{ color:var(--accent); }
-  .callout .katex-display{ margin:0.5em 0; }
+  .card{ background:var(--surface); border:1px solid var(--rule); border-radius:10px; padding:1.2rem 1.3rem; box-shadow:var(--shadow); margin:1rem 0; }
+  .card .label{ font-family: ui-monospace, monospace; font-size:0.72rem; letter-spacing:0.05em; text-transform:uppercase; color:var(--ink-dim); margin-bottom:0.7rem; }
+  .card.head-a{ border-left:3px solid var(--head-a); }
 
-  .worked{
-    background:var(--surface);
-    border:1px solid var(--rule);
-    border-radius:10px;
-    padding:1.3rem 1.4rem;
-    box-shadow:var(--shadow);
-  }
-  .worked .step{ display:flex; justify-content:space-between; gap:1rem; padding:0.45rem 0; border-bottom:1px dashed var(--rule); font-size:0.9rem; flex-wrap:wrap; }
-  .worked .step:last-child{ border-bottom:none; }
-  .worked .step .lhs{ color:var(--ink-dim); }
-  .worked .step .rhs{ font-family: ui-monospace, monospace; font-weight:600; }
-  .worked .conclusion{ margin-top:0.9rem; padding-top:0.9rem; border-top:1px solid var(--rule); font-size:0.92rem; }
+  .table-wrap{ overflow-x:auto; border:1px solid var(--rule); border-radius:10px; background:var(--surface); box-shadow:var(--shadow); max-height:640px; overflow-y:auto; }
+  table.full{ border-collapse:collapse; width:100%; font-size:0.8rem; min-width:520px; }
+  table.full th, table.full td{ padding:0.4rem 0.7rem; text-align:right; border-bottom:1px solid var(--rule); white-space:nowrap; }
+  table.full th:first-child, table.full td:first-child{ text-align:left; }
+  table.full th{ font-family: ui-monospace, monospace; font-size:0.66rem; letter-spacing:0.04em; text-transform:uppercase; color:var(--ink-dim); font-weight:600; position:sticky; top:0; background:var(--surface); }
+  table.full td{ font-family: ui-monospace, monospace; }
+  table.full tr.zero{ background:var(--zero-bg); color:var(--ink-dim); }
+  table.full tr.zero td.rowlabel{ color:var(--ink-dim); }
+  table.full td.block{ font-family: ui-sans-serif, system-ui, sans-serif; font-size:0.7rem; text-align:left; }
+  .rowlabel{ font-family: ui-sans-serif, system-ui, sans-serif !important; font-weight:600; text-align:left !important; }
+  .tag{ display:inline-block; font-size:0.65rem; padding:0.1rem 0.4rem; border-radius:4px; font-weight:600; }
+  .tag.physics{ background:var(--head-a-soft); color:var(--head-a); }
+  .tag.pregame{ background:var(--head-c-soft); color:var(--head-c); }
+  .tag.market{ background:var(--head-b-soft); color:var(--head-b); }
 
-  .run-banner{ display:flex; flex-wrap:wrap; gap:0.4rem 1.4rem; background:var(--surface); border:1px solid var(--rule); border-radius:10px; padding:1rem 1.2rem; font-size:0.84rem; color:var(--ink-dim); margin-bottom:1.4rem; }
-  .run-banner strong{ color:var(--ink); }
-  .run-banner .flag{ color:var(--good); font-weight:600; }
-
-  .table-wrap{ overflow-x:auto; border:1px solid var(--rule); border-radius:10px; background:var(--surface); box-shadow:var(--shadow); }
-  table.data{ border-collapse:collapse; width:100%; font-size:0.86rem; min-width:640px; }
-  table.data th, table.data td{ padding:0.6rem 0.8rem; text-align:right; border-bottom:1px solid var(--rule); white-space:nowrap; }
+  table.data{ border-collapse:collapse; width:100%; font-size:0.84rem; min-width:520px; }
+  table.data th, table.data td{ padding:0.5rem 0.7rem; text-align:right; border-bottom:1px solid var(--rule); white-space:nowrap; }
   table.data th:first-child, table.data td:first-child{ text-align:left; }
-  table.data th{ font-family: ui-monospace, monospace; font-size:0.72rem; letter-spacing:0.04em; text-transform:uppercase; color:var(--ink-dim); font-weight:600; }
+  table.data th{ font-family: ui-monospace, monospace; font-size:0.68rem; letter-spacing:0.04em; text-transform:uppercase; color:var(--ink-dim); font-weight:600; }
   table.data td{ font-family: ui-monospace, monospace; }
   table.data tr:last-child td{ border-bottom:none; }
-  table.data tr.best td{ background:var(--accent-soft); font-weight:600; }
-  .rowlabel{ font-family: ui-sans-serif, system-ui, sans-serif !important; font-weight:600; }
+  .dim{ color:var(--ink-dim); }
 
-  .stat-grid{ display:grid; grid-template-columns:repeat(auto-fit, minmax(140px,1fr)); gap:0.9rem; margin:1.2rem 0; }
-  .stat{ background:var(--surface); border:1px solid var(--rule); border-radius:10px; padding:0.9rem 1rem; }
-  .stat .val{ font-family: ui-monospace, monospace; font-size:1.3rem; font-weight:600; }
-  .stat .lbl{ font-size:0.76rem; color:var(--ink-dim); margin-top:0.2rem; }
-  .stat .val.good{ color:var(--good); }
+  .vec{ font-family: ui-monospace, monospace; font-size:0.84rem; background:var(--bg); border:1px solid var(--rule); border-radius:8px; padding:0.7rem 0.9rem; overflow-x:auto; white-space:nowrap; }
+  .vec .idx{ color:var(--ink-dim); }
+
+  .callout{ border-left:3px solid var(--accent); background:var(--accent-soft); border-radius:0 8px 8px 0; padding:1rem 1.2rem; font-size:0.92rem; color:var(--ink); }
+  .callout strong{ color:var(--accent); }
+  .checkmark{ color:var(--good); font-weight:700; }
+
+  .legend{ display:flex; gap:1.2rem; flex-wrap:wrap; font-size:0.8rem; color:var(--ink-dim); margin:0.6rem 0 1rem; align-items:center; }
+  .legend .swatch{ display:inline-block; width:0.9rem; height:0.9rem; border-radius:3px; vertical-align:-2px; margin-right:0.4rem; }
 
   footer{ margin-top:3rem; padding-top:1.6rem; border-top:1px solid var(--rule); font-size:0.82rem; color:var(--ink-dim); }
 </style>
@@ -173,213 +116,255 @@
 <div class="page">
 
   <header class="hero">
-    <p class="eyebrow">models/mmoe/ · equation-level walkthrough</p>
-    <h1>The actual math</h1>
+    <p class="eyebrow">models/mmoe/ · all 83 inputs, one real mid-game possession</p>
+    <h1>All 83, shown honestly</h1>
     <p class="subtitle">
-      Every equation the MMoE model runs, from input vector to parameter update — with the loss
-      formula checked, term by term, against a real logged training line so you can see the numbers
-      actually satisfy the math.
+      A different real possession — mid-game this time, from a different logged session, chosen
+      because most of its 83 features are actually populated. Every single one is listed below,
+      including the ones that are genuinely zero, followed by the honest answer to "does the model
+      actually see all of them?"
     </p>
     <div class="meta-row">
-      <span><strong>83</strong>-dim input, <strong>512</strong>-row batches</span>
-      <span><strong>3</strong> experts, <strong>64</strong>-dim each</span>
-      <span>AdamW, lr <strong>1e-3</strong></span>
+      <span>Game <strong>2026-05-29 session</strong>, possession 76</span>
+      <span>Period 2 · 6:05 remaining · home 49 – away 41</span>
+      <span>Home scores 2 · yes_bid 59¢ / yes_ask 60¢</span>
     </div>
   </header>
 
-  <section id="notation">
-    <div class="section-label"><span class="num">01</span><h2>Notation</h2></div>
-    <table class="var-table">
-      <tr><td>$$x \in \mathbb{R}^{83}$$</td><td class="desc">one scaled feature row (a possession)</td></tr>
-      <tr><td>$$W, b$$</td><td class="desc">a layer's weight matrix and bias — every layer has its own, learned independently</td></tr>
-      <tr><td>$$\mathrm{ReLU}(z) = \max(0, z)$$</td><td class="desc">elementwise</td></tr>
-      <tr><td>$$\sigma(z) = \dfrac{1}{1+e^{-z}}$$</td><td class="desc">sigmoid, elementwise</td></tr>
-      <tr><td>$$e \in \{1,2,3\}$$</td><td class="desc">index over the 3 shared experts</td></tr>
-      <tr><td>$$t \in \{A, B, C\}$$</td><td class="desc">index over the 3 task heads</td></tr>
-    </table>
-  </section>
-
-  <section id="expert">
-    <div class="section-label"><span class="num">02</span><h2>Forward pass — one expert</h2></div>
-    <p class="lead">All 3 experts share this exact structure with independent weights. Each maps the 83-dim input down to a 64-dim representation.</p>
-    <div class="math-card">
-      <div class="label">expert e — layer 1 (83 → 64)</div>
-      $$z_1 = W_1^{(e)} x + b_1^{(e)} \qquad a_1 = \mathrm{ReLU}\big(\mathrm{BN}(z_1)\big) \qquad d_1 = \mathrm{Dropout}_{0.3}(a_1)$$
-      <div class="label" style="margin-top:1rem">expert e — layer 2 (64 → 64)</div>
-      $$z_2 = W_2^{(e)} d_1 + b_2^{(e)} \qquad h^{(e)} = \mathrm{Dropout}_{0.3}\big(\mathrm{ReLU}(\mathrm{BN}(z_2))\big) \in \mathbb{R}^{64}$$
-      <div class="label" style="margin-top:1rem">batchnorm, per feature j (batch statistics μ, σ²; learned scale γ, shift β)</div>
-      $$\mathrm{BN}(z)_j = \gamma_j \cdot \frac{z_j - \mu_j}{\sqrt{\sigma_j^2 + \varepsilon}} + \beta_j$$
-    </div>
-    <p>Dropout is only active in training — at inference it's the identity, so the two forward passes (train vs. serve) differ only in that one respect.</p>
-  </section>
-
-  <section id="gates">
-    <div class="section-label"><span class="num">03</span><h2>Gates and the mixture</h2></div>
-    <p class="lead">Each head owns its own gate — a single linear layer over the raw input, softmaxed into a 3-way weighting over the experts.</p>
-    <div class="math-card">
-      <div class="label">gate for task t (83 → 3, softmax)</div>
-      $$g^{(t)} = \mathrm{softmax}\big(W_g^{(t)} x + b_g^{(t)}\big), \qquad \mathrm{softmax}(z)_i = \frac{e^{z_i}}{\sum_{j=1}^{3} e^{z_j}}, \qquad \sum_{e=1}^{3} g_e^{(t)} = 1$$
-      <div class="label" style="margin-top:1rem">mixture fed into head t</div>
-      $$m^{(t)} = \sum_{e=1}^{3} g_e^{(t)} \, h^{(e)} \in \mathbb{R}^{64}$$
-    </div>
-    <p>
-      The 3 experts are computed <em>once</em> per row and reused by all 3 gates — Head A, B, and C each
-      get their own weighted blend of the same 3 vectors, not 3 independent networks.
-    </p>
-  </section>
-
-  <section id="heads">
-    <div class="section-label"><span class="num">04</span><h2>The three heads</h2></div>
-    <p class="lead">Same two-layer shape for all three (64 → 32 → out); only the output dimension and final activation differ.</p>
-    <div class="math-card">
-      <div class="label">shared head structure</div>
-      $$u^{(t)} = \mathrm{Dropout}_{0.2}\Big(\mathrm{ReLU}\big(W_{h1}^{(t)} m^{(t)} + b_{h1}^{(t)}\big)\Big) \in \mathbb{R}^{32}, \qquad o^{(t)} = W_{h2}^{(t)} u^{(t)} + b_{h2}^{(t)}$$
-    </div>
-    <div class="math-card head-a">
-      <div class="label">Head A — run classifier</div>
-      $$\hat y_A = \sigma\big(o^{(A)}\big) \in (0,1) \quad\text{— } P(\text{a 5-pt run starts})$$
-    </div>
-    <div class="math-card head-b">
-      <div class="label">Head B — price trajectory (the live entry signal)</div>
-      $$\hat y_B = o^{(B)} \in \mathbb{R}^{10} \quad\text{— raw log-odds delta at each of 10 checkpoints over the next 120s}$$
-    </div>
-    <div class="math-card head-c">
-      <div class="label">Head C — survival hazard</div>
-      $$\hat y_C = \sigma\big(o^{(C)}\big) \in (0,1)^{10} \quad\text{— } P(\text{run breaks}) \text{ at each of 10 horizons, elementwise } \sigma$$
-    </div>
-  </section>
-
-  <section id="loss">
-    <div class="section-label"><span class="num">05</span><h2>The loss — and checking it against a real log line</h2></div>
-
-    <div class="math-card">
-      <div class="label">binary cross-entropy (heads A, C)</div>
-      $$\mathrm{BCE}(\hat y, y) = -\big[y \ln \hat y + (1-y)\ln(1-\hat y)\big]$$
-      <div class="label" style="margin-top:1rem">Huber, δ=1 (head B — robust to a few extreme price moves)</div>
-      $$\mathrm{Huber}(\hat y, y) = \begin{cases} \tfrac12(\hat y-y)^2 & |\hat y-y| \le 1 \\[4pt] |\hat y-y|-\tfrac12 & \text{otherwise} \end{cases}$$
-    </div>
-
-    <p>
-      Each head only sees rows where it has a real target — a per-row <strong>mask</strong>, not a
-      separate dataset. Basketball-only rows (94% of training data, no Kalshi tick) skip Head B entirely;
-      rows whose true trajectory is near-zero (|Δ|≤0.02, ~42% of joint rows — a flat exit) skip it too:
-    </p>
-    <div class="math-card">
-      $$L_A = \frac{1}{|M_A|}\sum_{i \in M_A} \mathrm{BCE}(\hat y_{A,i}, y_{A,i}) \qquad
-        L_B = \frac{1}{10\,|M_B|}\sum_{i \in M_B}\sum_{k=1}^{10} \mathrm{Huber}(\hat y_{B,i,k}, y_{B,i,k}) \qquad
-        L_C = \frac{1}{10\,|M_A|}\sum_{i \in M_A}\sum_{k=1}^{10} \mathrm{BCE}(\hat y_{C,i,k}, y_{C,i,k})$$
-    </div>
-
-    <p>
-      A gate-entropy term is <em>subtracted</em> so the optimizer is rewarded for spreading routing
-      weight across all 3 experts — unopposed, gates tend to collapse onto one expert early and starve
-      the other two of gradient:
-    </p>
-    <div class="math-card">
-      $$H(g) = -\sum_{e=1}^{3} g_e \ln(g_e + 10^{-8}) \qquad
-        \bar H = \mathbb{E}_{\text{batch}}\big[H(g^{(A)}) + H(g^{(B)}) + H(g^{(C)})\big]$$
-      <div class="label" style="margin-top:1rem">total, per batch — weights from <code>train_mmoe.py</code>: <span class="mono">w_a=1.0, w_b=1.0, w_c=0.3, λ=0.02</span></div>
-      $$L = w_A L_A + w_B L_B + w_C L_C - \lambda \bar H$$
-    </div>
-
-    <p class="lead">Epoch 1 of the live run I did earlier logged this exact line:</p>
-    <p class="callout mono" style="font-size:0.85rem">
-      train_loss=0.4370 (A=0.3270 B=0.0597 C=0.3842)
-    </p>
-
-    <div class="worked">
-      <div class="step"><span class="lhs">$$w_A L_A + w_B L_B + w_C L_C$$</span><span class="rhs">1.0(0.3270) + 1.0(0.0597) + 0.3(0.3842) = 0.50196</span></div>
-      <div class="step"><span class="lhs">logged total</span><span class="rhs">0.4370</span></div>
-      <div class="step"><span class="lhs">$$\lambda \bar H = 0.50196 - 0.4370$$</span><span class="rhs">0.06496</span></div>
-      <div class="step"><span class="lhs">$$\bar H = 0.06496 / 0.02$$</span><span class="rhs">≈ 3.25</span></div>
-      <div class="conclusion">
-        The theoretical ceiling is $$3 \ln 3 \approx 3.296$$ (each of 3 gates fully uniform,
-        $$g_e = \tfrac13$$). 3.25 sits right up against that ceiling — exactly what you'd expect at
-        epoch 1: the gate weights start close to uniform from random init, so entropy is already near
-        maximal before the network has learned any real routing preference. Watching $$\bar H$$ fall
-        over subsequent epochs is literally watching the gates specialize.
-      </div>
-    </div>
-  </section>
-
-  <section id="optimizer">
-    <div class="section-label"><span class="num">06</span><h2>Backward pass and the parameter update</h2></div>
+  <section id="answer-first">
+    <div class="section-label"><span class="num">00</span><h2>The direct answer</h2></div>
     <p class="lead">
-      $$L$$ is a single scalar built from every head, so <code>total.backward()</code> back-propagates
-      through all three heads, all three gates, and all three experts in one pass — gradients for a
-      shared expert accumulate contributions from whichever heads used it that batch.
+      <strong>The model sees all 83, every time, on every forward pass — including the zeros.</strong>
+      There is no feature selection or masking of the <em>input</em> at inference. <code>x</code> is
+      always a dense 83-length vector; every one of those 83 numbers gets multiplied by its own weight
+      column in every linear layer. A zero isn't "skipped" — it's a real value that happens to
+      contribute nothing to that particular dot product (<code>weight × 0 = 0</code>), exactly the way
+      any other number would contribute <code>weight × value</code>.
     </p>
-    <div class="math-card">
-      <div class="label">gradient clipping (applied once, over the concatenated gradient of every parameter)</div>
-      $$g_t \leftarrow g_t \cdot \min\!\left(1,\ \frac{1.0}{\lVert g_t \rVert_2}\right)$$
-      <div class="label" style="margin-top:1rem">AdamW step, per parameter θ (β₁=0.9, β₂=0.999, ε=1e-8, weight decay 1e-4, lr η=1e-3)</div>
-      $$m_t = \beta_1 m_{t-1} + (1-\beta_1) g_t \qquad v_t = \beta_2 v_{t-1} + (1-\beta_2) g_t^2$$
-      $$\hat m_t = \frac{m_t}{1-\beta_1^{\,t}} \qquad \hat v_t = \frac{v_t}{1-\beta_2^{\,t}}$$
-      $$\theta_t = \theta_{t-1} - \eta\left(\frac{\hat m_t}{\sqrt{\hat v_t} + \varepsilon} + \lambda_{wd}\,\theta_{t-1}\right)$$
-    </div>
     <p>
-      Weight decay is applied directly to the parameter (the "decoupled" in AdamW), not folded into the
-      gradient the way plain Adam + L2 would do it — the two are mathematically different, and this is
-      the one PyTorch's <code>optim.AdamW</code> implements.
+      What <em>is</em> masked is target data during <strong>training</strong>, not input features during
+      inference — a completely different mechanism, covered in section 09.
     </p>
   </section>
 
-  <section id="loop">
-    <div class="section-label"><span class="num">07</span><h2>One iteration, end to end</h2></div>
-    <ol class="loop">
-      <li><div class="step-title">Batch</div><div class="step-body">512 rows sampled, mixing basketball-only and joint rows.</div></li>
-      <li><div class="step-title">Forward</div><div class="step-body">Compute $$h^{(1)}, h^{(2)}, h^{(3)}$$ once; mix into $$m^{(A)}, m^{(B)}, m^{(C)}$$ via each head's gate; produce $$\hat y_A, \hat y_B, \hat y_C$$.</div></li>
-      <li><div class="step-title">Loss</div><div class="step-body">Apply the three per-head masks, compute $$L_A, L_B, L_C, \bar H$$, combine into scalar $$L$$.</div></li>
-      <li><div class="step-title">Backward</div><div class="step-body"><code>L.backward()</code> populates $$g_t = \nabla_\theta L$$ for every parameter via autodiff.</div></li>
-      <li><div class="step-title">Clip + step</div><div class="step-body">Clip $$g_t$$ to norm 1.0, then apply the AdamW update above to every $$\theta$$.</div></li>
-      <li><div class="step-title">End of epoch</div><div class="step-body">Evaluate on held-out val split, step <code>ReduceLROnPlateau</code>, checkpoint if val loss improved.</div></li>
-    </ol>
-  </section>
-
-  <section id="live-run">
-    <div class="section-label"><span class="num">08</span><h2>Five real epochs</h2></div>
-    <p class="lead">Same run as before — <span class="mono">train_mmoe.py --smoke-test</span> against current MotherDuck data — kept here so the loss numbers above have somewhere to live.</p>
-    <div class="run-banner">
-      <span><strong>350,449</strong> train rows <span class="mono">(330,638 bball + 19,811 joint)</span></span>
-      <span><strong>685</strong> train batches / epoch, batch size 512</span>
-      <span class="flag">checkpoint restored via git after — production weights untouched</span>
+  <section id="full-table">
+    <div class="section-label"><span class="num">01</span><h2>All 83 inputs, none hidden</h2></div>
+    <p class="lead">This possession has 56 non-zero and 27 zero features. Zero rows are greyed, not removed:</p>
+    <div class="legend">
+      <span><span class="tag physics">physics</span> 58 features</span>
+      <span><span class="tag pregame">pregame</span> 11 features</span>
+      <span><span class="tag market">market</span> 14 features</span>
     </div>
     <div class="table-wrap">
-      <table class="data">
-        <thead>
-          <tr><th>epoch</th><th>L_A</th><th>L_B</th><th>L_C</th><th>total L</th><th>val loss</th><th>AUCPR (A)</th><th>dir acc (B)</th></tr>
-        </thead>
+      <table class="full">
+        <thead><tr><th>idx</th><th class="rowlabel" style="text-align:left">feature</th><th style="text-align:left">block</th><th>value</th></tr></thead>
         <tbody>
-          <tr><td class="rowlabel">1</td><td>0.3270</td><td>0.0597</td><td>0.3842</td><td>0.4370</td><td>0.4327</td><td>0.1445</td><td>0.578</td></tr>
-          <tr><td class="rowlabel">2</td><td>0.3118</td><td>0.0532</td><td>0.3457</td><td>0.4035</td><td>0.4258</td><td>0.1448</td><td>0.626</td></tr>
-          <tr class="best"><td class="rowlabel">3 ★ best</td><td>0.3103</td><td>0.0510</td><td>0.3425</td><td>0.3987</td><td>0.4230</td><td>0.1543</td><td>0.618</td></tr>
-          <tr><td class="rowlabel">4</td><td>0.3095</td><td>0.0506</td><td>0.3411</td><td>0.3971</td><td>0.4253</td><td>0.1536</td><td>0.614</td></tr>
-          <tr><td class="rowlabel">5</td><td>0.3088</td><td>0.0481</td><td>0.3398</td><td>0.3935</td><td>0.4328</td><td>0.1553</td><td>0.601</td></tr>
+          <tr><td>0</td><td class="rowlabel">score_diff</td><td class="block"><span class="tag physics">physics</span></td><td>8.000000</td></tr>
+          <tr><td>1</td><td class="rowlabel">period</td><td class="block"><span class="tag physics">physics</span></td><td>2.000000</td></tr>
+          <tr><td>2</td><td class="rowlabel">minutes_into_game</td><td class="block"><span class="tag physics">physics</span></td><td>17.916666</td></tr>
+          <tr><td>3</td><td class="rowlabel">trailing_team_urgency</td><td class="block"><span class="tag physics">physics</span></td><td>0.265928</td></tr>
+          <tr><td>4</td><td class="rowlabel">comeback_probability_proxy</td><td class="block"><span class="tag physics">physics</span></td><td>2.127424</td></tr>
+          <tr class="zero"><td>5</td><td class="rowlabel">q4_close_game</td><td class="block"><span class="tag physics">physics</span></td><td>0.000000</td></tr>
+          <tr class="zero"><td>6</td><td class="rowlabel">garbage_time_risk</td><td class="block"><span class="tag physics">physics</span></td><td>0.000000</td></tr>
+          <tr><td>7</td><td class="rowlabel">shot_value</td><td class="block"><span class="tag physics">physics</span></td><td>2.000000</td></tr>
+          <tr><td>8</td><td class="rowlabel">shot_distance</td><td class="block"><span class="tag physics">physics</span></td><td>1.370000</td></tr>
+          <tr><td>9</td><td class="rowlabel">home_points_last_5_poss</td><td class="block"><span class="tag physics">physics</span></td><td>3.000000</td></tr>
+          <tr><td>10</td><td class="rowlabel">away_points_last_5_poss</td><td class="block"><span class="tag physics">physics</span></td><td>5.000000</td></tr>
+          <tr><td>11</td><td class="rowlabel">home_points_last_10_poss</td><td class="block"><span class="tag physics">physics</span></td><td>5.000000</td></tr>
+          <tr><td>12</td><td class="rowlabel">away_points_last_10_poss</td><td class="block"><span class="tag physics">physics</span></td><td>10.000000</td></tr>
+          <tr><td>13</td><td class="rowlabel">current_run_team_encoded</td><td class="block"><span class="tag physics">physics</span></td><td>−1.000000</td></tr>
+          <tr><td>14</td><td class="rowlabel">current_run_length</td><td class="block"><span class="tag physics">physics</span></td><td>1.000000</td></tr>
+          <tr><td>15</td><td class="rowlabel">current_run_points</td><td class="block"><span class="tag physics">physics</span></td><td>3.000000</td></tr>
+          <tr><td>16</td><td class="rowlabel">current_run_3pt_pct</td><td class="block"><span class="tag physics">physics</span></td><td>0.333333</td></tr>
+          <tr class="zero"><td>17</td><td class="rowlabel">current_run_paint_pct</td><td class="block"><span class="tag physics">physics</span></td><td>0.000000</td></tr>
+          <tr><td>18</td><td class="rowlabel">pace_last_10_possessions</td><td class="block"><span class="tag physics">physics</span></td><td>15.400000</td></tr>
+          <tr><td>19</td><td class="rowlabel">pace_season_baseline</td><td class="block"><span class="tag physics">physics</span></td><td>14.000000</td></tr>
+          <tr><td>20</td><td class="rowlabel">home_scoring_sustainable</td><td class="block"><span class="tag physics">physics</span></td><td>1.000000</td></tr>
+          <tr><td>21</td><td class="rowlabel">away_scoring_sustainable</td><td class="block"><span class="tag physics">physics</span></td><td>1.000000</td></tr>
+          <tr><td>22</td><td class="rowlabel">home_xPPP_last_5</td><td class="block"><span class="tag physics">physics</span></td><td>0.970000</td></tr>
+          <tr><td>23</td><td class="rowlabel">away_xPPP_last_5</td><td class="block"><span class="tag physics">physics</span></td><td>1.060000</td></tr>
+          <tr><td>24</td><td class="rowlabel">home_actual_vs_expected_PPP</td><td class="block"><span class="tag physics">physics</span></td><td>1.430000</td></tr>
+          <tr><td>25</td><td class="rowlabel">away_actual_vs_expected_PPP</td><td class="block"><span class="tag physics">physics</span></td><td>1.340000</td></tr>
+          <tr><td>26</td><td class="rowlabel">home_shot_quality_trend</td><td class="block"><span class="tag physics">physics</span></td><td>0.050000</td></tr>
+          <tr><td>27</td><td class="rowlabel">away_shot_quality_trend</td><td class="block"><span class="tag physics">physics</span></td><td>−0.030000</td></tr>
+          <tr class="zero"><td>28</td><td class="rowlabel">home_team_fouls_q</td><td class="block"><span class="tag physics">physics</span></td><td>0.000000</td></tr>
+          <tr><td>29</td><td class="rowlabel">away_team_fouls_q</td><td class="block"><span class="tag physics">physics</span></td><td>4.000000</td></tr>
+          <tr><td>30</td><td class="rowlabel">home_cum_fouls</td><td class="block"><span class="tag physics">physics</span></td><td>3.000000</td></tr>
+          <tr><td>31</td><td class="rowlabel">away_cum_fouls</td><td class="block"><span class="tag physics">physics</span></td><td>7.000000</td></tr>
+          <tr class="zero"><td>32</td><td class="rowlabel">home_in_bonus</td><td class="block"><span class="tag physics">physics</span></td><td>0.000000</td></tr>
+          <tr class="zero"><td>33</td><td class="rowlabel">away_in_bonus</td><td class="block"><span class="tag physics">physics</span></td><td>0.000000</td></tr>
+          <tr><td>34</td><td class="rowlabel">home_fouls_until_bonus</td><td class="block"><span class="tag physics">physics</span></td><td>5.000000</td></tr>
+          <tr><td>35</td><td class="rowlabel">away_fouls_until_bonus</td><td class="block"><span class="tag physics">physics</span></td><td>1.000000</td></tr>
+          <tr class="zero"><td>36</td><td class="rowlabel">home_star_in_foul_trouble</td><td class="block"><span class="tag physics">physics</span></td><td>0.000000</td></tr>
+          <tr class="zero"><td>37</td><td class="rowlabel">away_star_in_foul_trouble</td><td class="block"><span class="tag physics">physics</span></td><td>0.000000</td></tr>
+          <tr><td>38</td><td class="rowlabel">home_star_on_court</td><td class="block"><span class="tag physics">physics</span></td><td>1.000000</td></tr>
+          <tr><td>39</td><td class="rowlabel">away_star_on_court</td><td class="block"><span class="tag physics">physics</span></td><td>1.000000</td></tr>
+          <tr><td>40</td><td class="rowlabel">was_foul</td><td class="block"><span class="tag physics">physics</span></td><td>1.000000</td></tr>
+          <tr><td>41</td><td class="rowlabel">was_sub</td><td class="block"><span class="tag physics">physics</span></td><td>1.000000</td></tr>
+          <tr class="zero"><td>42</td><td class="rowlabel">had_shooting_foul</td><td class="block"><span class="tag physics">physics</span></td><td>0.000000</td></tr>
+          <tr><td>43</td><td class="rowlabel">had_personal_foul</td><td class="block"><span class="tag physics">physics</span></td><td>1.000000</td></tr>
+          <tr><td>44</td><td class="rowlabel">home_sub_count</td><td class="block"><span class="tag physics">physics</span></td><td>6.000000</td></tr>
+          <tr><td>45</td><td class="rowlabel">away_sub_count</td><td class="block"><span class="tag physics">physics</span></td><td>6.000000</td></tr>
+          <tr><td>46</td><td class="rowlabel">possessions_since_last_timeout</td><td class="block"><span class="tag physics">physics</span></td><td>12.000000</td></tr>
+          <tr class="zero"><td>47</td><td class="rowlabel">home_called_timeout_in_last_3_poss</td><td class="block"><span class="tag physics">physics</span></td><td>0.000000</td></tr>
+          <tr class="zero"><td>48</td><td class="rowlabel">away_called_timeout_in_last_3_poss</td><td class="block"><span class="tag physics">physics</span></td><td>0.000000</td></tr>
+          <tr><td>49</td><td class="rowlabel">home_full_timeouts_remaining</td><td class="block"><span class="tag physics">physics</span></td><td>2.000000</td></tr>
+          <tr><td>50</td><td class="rowlabel">away_full_timeouts_remaining</td><td class="block"><span class="tag physics">physics</span></td><td>3.000000</td></tr>
+          <tr class="zero"><td>51</td><td class="rowlabel">home_lineup_net_rating</td><td class="block"><span class="tag physics">physics</span></td><td>0.000000</td></tr>
+          <tr class="zero"><td>52</td><td class="rowlabel">away_lineup_net_rating</td><td class="block"><span class="tag physics">physics</span></td><td>0.000000</td></tr>
+          <tr class="zero"><td>53</td><td class="rowlabel">lineup_net_rating_delta</td><td class="block"><span class="tag physics">physics</span></td><td>0.000000</td></tr>
+          <tr class="zero"><td>54</td><td class="rowlabel">home_lineup_sample_size</td><td class="block"><span class="tag physics">physics</span></td><td>0.000000</td></tr>
+          <tr class="zero"><td>55</td><td class="rowlabel">away_lineup_sample_size</td><td class="block"><span class="tag physics">physics</span></td><td>0.000000</td></tr>
+          <tr><td>56</td><td class="rowlabel">home_lineup_just_changed</td><td class="block"><span class="tag physics">physics</span></td><td>1.000000</td></tr>
+          <tr><td>57</td><td class="rowlabel">away_lineup_just_changed</td><td class="block"><span class="tag physics">physics</span></td><td>1.000000</td></tr>
+          <tr class="zero"><td>58</td><td class="rowlabel">team_net_rating_delta</td><td class="block"><span class="tag pregame">pregame</span></td><td>0.000000</td></tr>
+          <tr class="zero"><td>59</td><td class="rowlabel">home_off_rating</td><td class="block"><span class="tag pregame">pregame</span></td><td>0.000000</td></tr>
+          <tr class="zero"><td>60</td><td class="rowlabel">away_off_rating</td><td class="block"><span class="tag pregame">pregame</span></td><td>0.000000</td></tr>
+          <tr class="zero"><td>61</td><td class="rowlabel">home_def_rating</td><td class="block"><span class="tag pregame">pregame</span></td><td>0.000000</td></tr>
+          <tr class="zero"><td>62</td><td class="rowlabel">away_def_rating</td><td class="block"><span class="tag pregame">pregame</span></td><td>0.000000</td></tr>
+          <tr class="zero"><td>63</td><td class="rowlabel">roster_rapm_gap</td><td class="block"><span class="tag pregame">pregame</span></td><td>0.000000</td></tr>
+          <tr class="zero"><td>64</td><td class="rowlabel">missing_rapm_impact</td><td class="block"><span class="tag pregame">pregame</span></td><td>0.000000</td></tr>
+          <tr class="zero"><td>65</td><td class="rowlabel">rest_advantage</td><td class="block"><span class="tag pregame">pregame</span></td><td>0.000000</td></tr>
+          <tr class="zero"><td>66</td><td class="rowlabel">expected_pace</td><td class="block"><span class="tag pregame">pregame</span></td><td>0.000000</td></tr>
+          <tr class="zero"><td>67</td><td class="rowlabel">form_delta</td><td class="block"><span class="tag pregame">pregame</span></td><td>0.000000</td></tr>
+          <tr class="zero"><td>68</td><td class="rowlabel">has_pregame_data</td><td class="block"><span class="tag pregame">pregame</span></td><td>0.000000</td></tr>
+          <tr><td>69</td><td class="rowlabel">yes_bid</td><td class="block"><span class="tag market">market</span></td><td>59.000000</td></tr>
+          <tr><td>70</td><td class="rowlabel">yes_ask</td><td class="block"><span class="tag market">market</span></td><td>60.000000</td></tr>
+          <tr><td>71</td><td class="rowlabel">spread</td><td class="block"><span class="tag market">market</span></td><td>1.000000</td></tr>
+          <tr><td>72</td><td class="rowlabel">yes_last</td><td class="block"><span class="tag market">market</span></td><td>60.000000</td></tr>
+          <tr><td>73</td><td class="rowlabel">open_interest</td><td class="block"><span class="tag market">market</span></td><td>4,557,067</td></tr>
+          <tr><td>74</td><td class="rowlabel">trade_volume_60s</td><td class="block"><span class="tag market">market</span></td><td>333,949,536</td></tr>
+          <tr><td>75</td><td class="rowlabel">time_since_last_trade_ms</td><td class="block"><span class="tag market">market</span></td><td>641.000000</td></tr>
+          <tr><td>76</td><td class="rowlabel">open_interest_change_60s</td><td class="block"><span class="tag market">market</span></td><td>−8.000000</td></tr>
+          <tr><td>77</td><td class="rowlabel">d_yes_bid</td><td class="block"><span class="tag market">market</span></td><td>1.000000</td></tr>
+          <tr><td>78</td><td class="rowlabel">d_spread</td><td class="block"><span class="tag market">market</span></td><td>−1.000000</td></tr>
+          <tr><td>79</td><td class="rowlabel">bid_velocity_30s</td><td class="block"><span class="tag market">market</span></td><td>0.033333</td></tr>
+          <tr><td>80</td><td class="rowlabel">bid_acceleration_30s</td><td class="block"><span class="tag market">market</span></td><td>0.033333</td></tr>
+          <tr><td>81</td><td class="rowlabel">bid_vs_last_divergence</td><td class="block"><span class="tag market">market</span></td><td>−1.000000</td></tr>
+          <tr><td>82</td><td class="rowlabel">has_market_data</td><td class="block"><span class="tag market">market</span></td><td>1.000000</td></tr>
         </tbody>
       </table>
     </div>
     <p>
-      Val loss bottoms at epoch 3, then rises — the model is already starting to overfit, which is what
-      the 15-epoch patience window exists to catch on the full run.
+      Notice the zero rows cluster: <strong>all 11 pregame features are zero as a block</strong>
+      (including the <code>has_pregame_data=0</code> flag itself) — this particular game simply has no
+      entry in the 2025-26 pregame ratings table. Same story for the 5 lineup-rating features. These
+      aren't scattered missing values; they're two entire, known-unavailable feature groups, and the
+      network is told exactly that via the flag columns.
     </p>
   </section>
 
-  <section id="production">
-    <div class="section-label"><span class="num">09</span><h2>Where the full training run landed</h2></div>
-    <div class="stat-grid">
-      <div class="stat"><div class="val good">0.1593</div><div class="lbl">Head A AUCPR <span class="mono">(baseline 0.084)</span></div></div>
-      <div class="stat"><div class="val good">61.1%</div><div class="lbl">Head B directional accuracy</div></div>
-      <div class="stat"><div class="val">0.0860</div><div class="lbl">Head C Brier score</div></div>
+  <section id="crosscheck">
+    <div class="section-label"><span class="num">02</span><h2>Ground truth: matched against production's own log</h2></div>
+    <p class="lead">Same discipline as before — recomputing today reproduces exactly what live-trader logged in production on 2026-05-29:</p>
+    <div class="table-wrap">
+      <table class="data">
+        <thead><tr><th class="rowlabel" style="text-align:left">quantity</th><th>logged</th><th>recomputed</th></tr></thead>
+        <tbody>
+          <tr><td class="rowlabel">run_prob (Head A)</td><td>0.02024881</td><td>0.02024881</td></tr>
+          <tr><td class="rowlabel">trajectory[9] (Head B)</td><td>−0.06757559</td><td>−0.06757559</td></tr>
+        </tbody>
+      </table>
     </div>
   </section>
 
+  <section id="scaling">
+    <div class="section-label"><span class="num">03</span><h2>Scaling a few of these, including a wild one</h2></div>
+    <div class="table-wrap">
+      <table class="data">
+        <thead><tr><th class="rowlabel" style="text-align:left">feature</th><th>x</th><th>mean</th><th>std</th><th>x′</th></tr></thead>
+        <tbody>
+          <tr><td class="rowlabel">score_diff</td><td>8.0000</td><td class="dim">0.9463</td><td class="dim">11.8755</td><td>0.5940</td></tr>
+          <tr><td class="rowlabel">period</td><td>2.0000</td><td class="dim">2.5032</td><td class="dim">1.1268</td><td>−0.4466</td></tr>
+          <tr><td class="rowlabel">home_cum_fouls</td><td>3.0000</td><td class="dim">9.0198</td><td class="dim">6.5307</td><td>−0.9218</td></tr>
+          <tr><td class="rowlabel">yes_bid</td><td>59.0000</td><td class="dim">53.7402</td><td class="dim">35.9231</td><td>0.1464</td></tr>
+          <tr><td class="rowlabel">has_pregame_data</td><td>0.0000</td><td class="dim">0.4356</td><td class="dim">0.4958</td><td>−0.8785</td></tr>
+          <tr><td class="rowlabel">open_interest</td><td>4,557,067</td><td class="dim">141,647</td><td class="dim">312,525</td><td><strong>14.1282</strong></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="callout">
+      <strong>open_interest lands at z ≈ 14.1</strong> — 14 standard deviations from its training mean,
+      even after the market-feature refit that's supposed to keep live values centered. Most Kalshi
+      markets in the training window had modest open interest; this one happened to be unusually
+      liquid. The network never sees a value this extreme flagged as "wrong" — it's just an
+      unusually large number in that column, and whatever the downstream weights do with it is
+      whatever they learned to do with large numbers there. This is a real weak spot in the current
+      scaling approach, not a hidden or synthetic example.
+    </p>
+  </section>
+
+  <section id="expert1">
+    <div class="section-label"><span class="num">04</span><h2>Expert 1 forward — same mechanics, new numbers</h2></div>
+    <div class="vec"><span class="idx">z₁[:8] = </span>[ 2.7920, −0.8709, −5.0866, 1.6968, −4.4053, −11.2230, −2.2161, −3.6022 ]</div>
+    <div class="card">
+      <div class="label">BatchNorm + ReLU on z₁[0]</div>
+      <div class="vec">BN(z₁)[0] = 0.9150 · (2.7920 − 0.2559) / √(0.7561+1e−5) + (−0.0738) = <strong>+2.5949</strong> → ReLU → <strong>2.5949</strong> (survives)</div>
+    </div>
+    <div class="vec"><span class="idx">a₁[:8] = </span>[ 2.5949, 0, 0, 2.4423, 0, 0, 0, 0 ]</div>
+    <div class="vec"><span class="idx">h⁽¹⁾[:8] (after layer 2) = </span>[ 0, 1.3892, 1.1753, 0, 0, 0.7867, 0, 3.1293 ]</div>
+    <p class="callout"><span class="checkmark">✓</span> Matches <code>model.experts[0](x)</code> exactly.</p>
+  </section>
+
+  <section id="gates">
+    <div class="section-label"><span class="num">05</span><h2>The gates — a much sharper decision this time</h2></div>
+    <div class="vec">g_A = [ <strong>0.9918</strong>, 0.0074, 0.0008 ]&nbsp;&nbsp;&nbsp;g_B = [ 0.5961, 0.0000, 0.4039 ]&nbsp;&nbsp;&nbsp;g_C = [ 0.2100, 0.4764, 0.3136 ]</div>
+    <p>
+      Compare to the earlier tip-off possession, where Gate A split 17/83/~0 across the experts. Here
+      it puts <strong>99.2% of its trust in Expert 1 alone</strong>. Same gate network, same weights —
+      completely different routing decision, because the input is completely different. This is the
+      mechanism working as designed: gates specialize per-input, not per-head-in-general.
+    </p>
+  </section>
+
+  <section id="mixture">
+    <div class="section-label"><span class="num">06</span><h2>Mixture and Head A</h2></div>
+    <div class="table-wrap">
+      <table class="data">
+        <thead><tr><th class="rowlabel" style="text-align:left"></th><th>[0]</th><th>[1]</th><th>[2]</th><th>[3]</th><th>[4]</th><th>[5]</th><th>[6]</th><th>[7]</th></tr></thead>
+        <tbody>
+          <tr><td class="rowlabel">h⁽¹⁾ (w 0.9918)</td><td>0</td><td>1.3892</td><td>1.1753</td><td>0</td><td>0</td><td>0.7867</td><td>0</td><td>3.1293</td></tr>
+          <tr><td class="rowlabel">h⁽²⁾ (w 0.0074)</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0.5039</td><td>0</td><td>4.5633</td><td>0</td></tr>
+          <tr><td class="rowlabel">h⁽³⁾ (w 0.0008)</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0.6963</td><td>0</td><td>0.5100</td><td>0</td></tr>
+          <tr><td class="rowlabel"><strong>m⁽ᴬ⁾</strong></td><td><strong>0</strong></td><td><strong>1.3777</strong></td><td><strong>1.1656</strong></td><td><strong>0</strong></td><td><strong>0.0043</strong></td><td><strong>0.7802</strong></td><td><strong>0.0344</strong></td><td><strong>3.1034</strong></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="card head-a">
+      <div class="label">Head A: 64→32→1→sigmoid</div>
+      <div class="vec">u[:8] = [ 1.7084, 2.2031, 0, 2.5569, 0, 2.7531, 0, 1.4008 ]</div>
+      <div class="vec">o = <strong>−3.8792026</strong></div>
+      <div class="vec">P(run) = σ(o) = <strong>0.02024881</strong></div>
+    </div>
+    <p class="callout"><span class="checkmark">✓</span> <strong>Production logged 0.02024881</strong> for this exact row.</p>
+  </section>
+
+  <section id="masking">
+    <div class="section-label"><span class="num">07</span><h2>So what actually gets masked?</h2></div>
+    <p class="lead">
+      Not the input, and not at inference time. Masking happens to <strong>targets, during
+      training</strong>, per row, per head:
+    </p>
+    <ul style="max-width:74ch; padding-left:1.2rem;">
+      <li><strong>Head B (trajectory)</strong> is only trained on rows with real Kalshi tick data (<code>has_market_data=1</code>) — basketball-only rows still run through Head B's forward pass and produce an output, it's just excluded from the loss and never influences that head's weights for that row.</li>
+      <li><strong>Heads A and C</strong> are masked to rows that have a computed run target.</li>
+      <li>All of this masking lives in <code>trainer.py</code>'s loss function, operating on which rows count toward which head's <em>gradient</em>. It has nothing to do with which of the 83 <em>feature columns</em> a given row uses — every row, in training and in inference, always uses all 83.</li>
+    </ul>
+    <p>
+      The zero-filling you see for missing pregame/lineup/market blocks is a data-engineering choice —
+      "no data" is represented as 0 plus a flag bit, not as a differently-shaped input. The network
+      then has to <em>learn</em> to interpret "0 and flag=0" as absence rather than a true measured
+      zero, purely from training signal. There's no architectural mechanism forcing that interpretation
+      — it's an emergent, learned behavior, which is worth remembering as a limitation.
+    </p>
+  </section>
+
   <footer>
-    Source: <span class="mono">models/mmoe/{model,trainer,dataset,train_mmoe}.py</span>. Loss and optimizer
-    formulas match <span class="mono">torch.nn.functional.binary_cross_entropy</span>,
-    <span class="mono">huber_loss</span> (δ=1 default), and <span class="mono">torch.optim.AdamW</span>
-    (default β, ε) exactly. Live epoch numbers captured 2026-07-30 via
-    <span class="mono">python -m models.mmoe.train_mmoe --smoke-test</span>; the smoke test's checkpoint
-    write was reverted with <span class="mono">git checkout</span> immediately after.
+    Feature vector, logged output, and gating weights are the literal contents of
+    <span class="mono">live-trader/go/logs/runs/2026-05-29/20260529-003750-d4af74/inference.jsonl</span>,
+    possession_id 76. Recomputed against <span class="mono">models/saved/mmoe_delay20.pt</span> +
+    <span class="mono">models/saved/mmoe_scaler_delay20.pkl</span> via a standalone script that
+    re-derives every layer from <span class="mono">model.state_dict()</span> by hand.
   </footer>
 
 </div>

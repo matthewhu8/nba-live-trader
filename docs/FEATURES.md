@@ -1,5 +1,15 @@
 # MMoE Feature Reference
 
+> **SUPERSEDED for column names (2026-08-02).** The model now takes **58 features**
+> (33 physics + 11 pregame + 14 market). Several columns named below no longer exist
+> (`trailing_team_urgency`, `comeback_probability_proxy`, `minutes_into_game`,
+> `current_run_team_encoded`, the home/away level pairs). See
+> `docs/FEATURE_CONSOLIDATION.md` for what replaced them and why.
+>
+> **Still valid:** the per-head importance analysis and ablation results below — in particular
+> that Head B depends almost entirely on the 14 market features, and that dropping all 11
+> pregame features *improved* val loss (not acted on).
+
 Reference for the 83 features fed to the MMoE model, with per-head importance and operational drop/keep recommendations from the 2026-06-08 feature analysis.
 
 Authoritative source-of-truth for column names is `models/mmoe/feature_config.py`. This doc tells you which of those columns matter and why.

@@ -103,6 +103,13 @@ class GameState:
     home_prev_xppp: float = 0.0
     away_prev_xppp: float = 0.0
     possession_durations: deque = field(default_factory=lambda: deque(maxlen=10))
+    # Running accumulator for the EXPANDING within-game pace mean. The deque above
+    # only holds the last 10, but `pace_game_to_date` is the mean over every valid
+    # possession so far, matching momentum_features.py's expanding().mean(). Live
+    # previously substituted the pregame constant here, which made the column a
+    # different quantity in each path.
+    pace_duration_sum:   float = 0.0
+    pace_duration_count: int   = 0
 
     # ── Prediction history cache ──────────────────────────────────────────────
     prediction_history: deque = field(default_factory=lambda: deque(maxlen=20))
@@ -134,7 +141,8 @@ class GameState:
     away_sub_count:   int = 0
 
     # ── Pre-loaded at game start (static for entire game) ─────────────────────
-    lineup_ratings:  dict[str, float] = field(default_factory=dict)
+    lineup_ratings:      dict[str, float] = field(default_factory=dict)
+    lineup_sample_sizes: dict[str, float] = field(default_factory=dict)
     player_apm:      dict[int, float] = field(default_factory=dict)
     star_players:    dict[int, int]   = field(default_factory=dict)
     pregame:         dict[str, float] = field(default_factory=dict)
@@ -349,6 +357,8 @@ class GameState:
             gap = self.last_possession_clock_secs - possession.game_clock_secs
             if 0 < gap < 60:
                 self.possession_durations.append(gap)
+                self.pace_duration_sum   += gap
+                self.pace_duration_count += 1
 
         self.last_possession_clock_secs = possession.game_clock_secs
         self.last_possession_period     = possession.period

@@ -80,7 +80,10 @@ FEATURE_SCHEMA = pa.schema([
     pa.field("current_run_length",         pa.int32()),
     pa.field("current_run_points",         pa.int32()),
     pa.field("pace_last_10_possessions",   pa.float32()),
+    # Expanding within-game mean. `pace_season_baseline` is the legacy name kept
+    # while possession_flat is mid-migration; `pace_game_to_date` is the real one.
     pa.field("pace_season_baseline",       pa.float32()),
+    pa.field("pace_game_to_date",          pa.float32()),
     pa.field("home_scoring_sustainable",   pa.bool_()),
     pa.field("away_scoring_sustainable",   pa.bool_()),
 
@@ -110,8 +113,11 @@ FEATURE_SCHEMA = pa.schema([
     pa.field("away_xPPP_last_5",           pa.float32()),
     pa.field("home_actual_vs_expected_PPP", pa.float32()),
     pa.field("away_actual_vs_expected_PPP", pa.float32()),
+    # Raw xPPP differences, no longer np.sign()-collapsed.
     pa.field("home_shot_quality_trend",    pa.float32()),
     pa.field("away_shot_quality_trend",    pa.float32()),
+    pa.field("home_xPPP_prev_5",           pa.float32()),
+    pa.field("away_xPPP_prev_5",           pa.float32()),
 
     # Bonus state
     pa.field("home_in_bonus",              pa.bool_()),

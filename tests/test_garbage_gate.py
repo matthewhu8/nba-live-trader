@@ -54,9 +54,32 @@ def test_overtime_counts_as_garbage_with_period_floor():
     assert gt is True
 
 
-def test_model_feature_constants_frozen():
-    # The model-input garbage_time_risk must stay at the training definition.
-    # If these change, retrain the model — they are NOT the tunable gate.
-    assert feat._TRAIN_BLOWOUT_MARGIN_PTS == 30
-    assert feat._TRAIN_GARBAGE_PERIOD == 4
-    assert feat._TRAIN_GARBAGE_CLOCK_SECS == 360
+def test_model_input_garbage_risk_is_continuous_and_shared():
+    """
+    The model input and the trade gate are still separate concerns, but the model
+    input is no longer a local binary.
+
+    This test previously asserted `_TRAIN_BLOWOUT_MARGIN_PTS == 30`, describing
+    those constants as "the training definition". They never were: training used a
+    sigmoid centred on a 15-point margin with a continuous time factor, so the
+    assertion was pinning a train/serve divergence in place. The model input now
+    comes from transforms.garbage_time_risk(), which both paths call.
+    """
+    from models.features import transforms as T
+
+    # The live module must no longer carry its own copy of these constants.
+    assert not hasattr(feat, "_TRAIN_BLOWOUT_MARGIN_PTS")
+    assert not hasattr(feat, "_TRAIN_GARBAGE_PERIOD")
+
+    # Continuous, and nonzero well before Q4 — the old binary returned 0.0 here.
+    assert 0.0 < float(T.garbage_time_risk(25, 2, 360.0)) < 1.0
+    # Monotone in margin at fixed time.
+    risks = [float(T.garbage_time_risk(d, 4, 300.0)) for d in (5, 15, 25, 35)]
+    assert risks == sorted(risks)
+
+
+def test_trade_gate_stays_independent_of_the_model_input():
+    """The tunable gate is driven by trading.yaml and must not follow the feature."""
+    gt_tight, _ = compute_gate_flags(26, 4, 100, 25, 4, 360)
+    gt_loose, _ = compute_gate_flags(26, 4, 100, 30, 4, 360)
+    assert gt_tight != gt_loose, "gate thresholds must remain configurable"
