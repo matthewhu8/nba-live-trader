@@ -23,7 +23,8 @@
 //     already closed at TP and no SL is needed.
 //   - paper_mode flag: when true, logs the order but does not send to Kalshi.
 //     Paper mode is the default. Single flag in config/trading.yaml to go live.
-//   - Fee accounting: calcNetPnL returns gross P&L with no fee deduction.
+//   - Fee accounting: calcNetPnL is NET of both legs. Entry is always maker;
+//     TP exits are maker (resting), SL/TRAIL/TIME exits are taker (crossing).
 package main
 
 import (
@@ -34,6 +35,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"time"
 )
@@ -302,7 +304,7 @@ func (r *Router) CheckExit(ctx context.Context, pos *PaperPosition, resp *Posses
 		}
 	}
 	if pos.RestingTPStatus == "executed" {
-		return true, "TAKE_PROFIT", calcNetPnL(pos.Size, pos.EntryPrice, pos.RestingTPPrice)
+		return true, "TAKE_PROFIT", calcNetPnL(pos.Size, pos.EntryPrice, pos.RestingTPPrice, makerFeeRate)
 	}
 
 	currentPrice := resp.YesBid
@@ -330,12 +332,12 @@ func (r *Router) CheckExit(ctx context.Context, pos *PaperPosition, resp *Posses
 		if pos.RestingTPPrice == 0 {
 			pos.RestingTPPrice = restingTPPrice(pos.EntryPrice, cfg.Agent.TakeProfitCents)
 		}
-		return true, "TAKE_PROFIT", calcNetPnL(pos.Size, pos.EntryPrice, pos.RestingTPPrice)
+		return true, "TAKE_PROFIT", calcNetPnL(pos.Size, pos.EntryPrice, pos.RestingTPPrice, makerFeeRate)
 	}
 
 	// Hard stop-loss — taker by design; loss-cutting cannot wait for maker fills.
 	if -priceDelta >= cfg.Agent.StopLossCents {
-		return true, "STOP_LOSS", calcNetPnL(pos.Size, pos.EntryPrice, currentPrice)
+		return true, "STOP_LOSS", calcNetPnL(pos.Size, pos.EntryPrice, currentPrice, takerFeeRate)
 	}
 
 	// Trailing take-profit: once the position has been at least TrailActivateCents
@@ -345,19 +347,52 @@ func (r *Router) CheckExit(ctx context.Context, pos *PaperPosition, resp *Posses
 	if cfg.Agent.TrailGivebackCents > 0 {
 		peakDelta := pos.PeakPrice - pos.EntryPrice
 		if peakDelta >= cfg.Agent.TrailActivateCents && (pos.PeakPrice-currentPrice) >= cfg.Agent.TrailGivebackCents {
-			return true, "TRAIL_STOP", calcNetPnL(pos.Size, pos.EntryPrice, currentPrice)
+			return true, "TRAIL_STOP", calcNetPnL(pos.Size, pos.EntryPrice, currentPrice, takerFeeRate)
 		}
 	}
 
 	if possID-pos.EntryPossID >= cfg.Agent.MaxHoldPossessions {
-		return true, "TIME_STOP", calcNetPnL(pos.Size, pos.EntryPrice, currentPrice)
+		return true, "TIME_STOP", calcNetPnL(pos.Size, pos.EntryPrice, currentPrice, takerFeeRate)
 	}
 	return false, "", 0
 }
 
-// calcNetPnL returns gross P&L in dollars.
-// Kalshi maker fees are $0 on standard markets, so gross = net.
-func calcNetPnL(size, entryPrice, exitPrice int) float64 {
+// Kalshi trading fee rates. Maker is a quarter of taker, which is the whole
+// reason the strategy is maker-first.
+const (
+	makerFeeRate = 0.0175
+	takerFeeRate = 0.07
+)
+
+// kalshiFee returns the fee in DOLLARS for one leg of a trade.
+//
+//	fee = ceil(rate * contracts * P * (1-P) * 100) / 100      where P = price/100
+//
+// The P*(1-P) term is not optional: fees peak at 50c and fall toward both ends
+// of the book. 100 contracts at 50c maker = $0.44, taker = $1.76.
+func kalshiFee(contracts, priceCents int, rate float64) float64 {
+	p := float64(priceCents) / 100.0
+	return math.Ceil(rate*float64(contracts)*p*(1.0-p)*100.0) / 100.0
+}
+
+// calcNetPnL returns P&L in dollars NET of both legs' fees.
+//
+// Entry is always a maker order (post_only). exitRate distinguishes a resting
+// take-profit that fills as a maker from a stop/trail/time exit that crosses the
+// book as a taker at 4x the rate. Passing the wrong rate understates the cost of
+// exactly the exits that lose money.
+//
+// This previously returned gross P&L, so every logged and ledgered result
+// overstated performance by the full round-trip fee.
+func calcNetPnL(size, entryPrice, exitPrice int, exitRate float64) float64 {
+	gross := float64(exitPrice-entryPrice) * float64(size) / 100.0
+	fees := kalshiFee(size, entryPrice, makerFeeRate) + kalshiFee(size, exitPrice, exitRate)
+	return gross - fees
+}
+
+// calcGrossPnL returns P&L in dollars before fees, for telemetry that wants to
+// separate market move from cost.
+func calcGrossPnL(size, entryPrice, exitPrice int) float64 {
 	return float64(exitPrice-entryPrice) * float64(size) / 100.0
 }
 

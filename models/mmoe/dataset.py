@@ -57,6 +57,12 @@ HEADB_SPLIT_DATE = pd.Timestamp("2026-04-07")  # ~80/20 within 148-game window
 FEED_DELAY_SECONDS_NBA        = 20
 FEED_DELAY_SECONDS_SPORTRADAR =  5
 
+# Maximum age of the market snapshot a possession may be joined to. Mirrors the
+# live staleness gate in live-trader/go/ring_buffer.go, which reports HasData=false
+# past this age. Training previously had no bound at all, so possessions could
+# bind to a tick from any point in the past.
+MARKET_STALENESS_TOLERANCE_SECONDS = 30
+
 # ── Column lists ────────────────────────────────────────────────────────────
 
 TRAJ_COLS  = [f"traj_{i}" for i in range(10)]
@@ -487,11 +493,24 @@ def _compute_market_features_for_game(game_ticks: pd.DataFrame) -> pd.DataFrame:
     # Spread
     out["spread"] = out["yes_ask"] - out["yes_bid"]
 
-    # Trade volume 60s
-    out["trade_volume_60s"] = out["volume"].rolling("60s").sum().fillna(0)
+    # kalshi_ticks.volume is a CUMULATIVE lifetime counter, not per-tick trade
+    # size. Verified: it is monotone non-decreasing within a market (247,875 flat
+    # / 29,401 increases / 9 decreases across consecutive ticks) and ranges from
+    # e.g. 1,668 to 1,167,700 within one market.
+    #
+    # Summing it over a window therefore produced roughly
+    # (ticks in window) x (lifetime volume), and `volume > 0` was true on 99.96%
+    # of rows, so both features below were noise. The per-interval traded size is
+    # the first difference.
+    traded = out["volume"].diff()
+    # First tick of a market has no predecessor; treat as no observed trade
+    # rather than as the entire lifetime volume.
+    traded = traded.fillna(0.0).clip(lower=0.0)
 
-    # Time since last trade (ms)
-    trade_mask = out["volume"] > 0
+    out["trade_volume_60s"] = traded.rolling("60s").sum().fillna(0)
+
+    # Time since a tick actually carried a trade (ms)
+    trade_mask = traded > 0
     last_trade_ts = out.index.to_series().where(trade_mask).ffill()
     last_trade_ts = last_trade_ts.fillna(out.index[0])
     out["time_since_last_trade_ms"] = (out.index - last_trade_ts).dt.total_seconds() * 1000
@@ -554,6 +573,8 @@ def _join_ticks_to_possessions(
 
     joint_parts: list[pd.DataFrame] = []
     games_with_ticks = set(ticks["game_id"].unique())
+    stale_dropped = 0
+    candidate_rows = 0
 
     for game_id, poss_game in possessions.groupby("game_id"):
         poss_game = poss_game.sort_values("_join_ts").copy()
@@ -576,6 +597,17 @@ def _join_ticks_to_possessions(
             left_on="_join_ts",
             right_on="ts",
             direction="backward",
+            # Without this the join reaches arbitrarily far back for a tick. It
+            # matters because ~86 games carry a +1-day wall_clock_ts bug (root
+            # cause documented at post_game_pipeline.py:903; the code was fixed
+            # but the written rows were never re-backfilled), so those
+            # possessions silently bound to market state ~24 hours stale and
+            # passed the dropna below as if valid.
+            #
+            # The bound matches the live staleness gate in ring_buffer.go, so a
+            # possession that live would refuse to trade is also excluded from
+            # training rather than being learned from.
+            tolerance=pd.Timedelta(seconds=MARKET_STALENESS_TOLERANCE_SECONDS),
         ).drop(columns=["ts", "_join_ts"], errors="ignore")
 
         # Possession-level d_yes_bid and d_spread (within game)
@@ -583,10 +615,28 @@ def _join_ticks_to_possessions(
         merged["d_yes_bid"] = merged["yes_bid"].diff().fillna(0)
         merged["d_spread"]  = merged["spread"].diff().fillna(0)
 
-        # Only keep possessions that have a tick (yes_bid populated)
+        # Only keep possessions that have a tick within tolerance.
+        before = len(merged)
         merged = merged.dropna(subset=["yes_bid"])
+        stale_dropped += before - len(merged)
+        candidate_rows += before
         if not merged.empty:
             joint_parts.append(merged)
+
+    if candidate_rows:
+        logger.info(
+            "Tick join: %d of %d candidate possessions dropped for stale market data "
+            "(no tick within %ds of wall_clock_ts + %ds feed delay) = %.1f%%",
+            stale_dropped, candidate_rows, MARKET_STALENESS_TOLERANCE_SECONDS,
+            feed_delay_seconds, 100.0 * stale_dropped / candidate_rows,
+        )
+        if stale_dropped > 0.20 * candidate_rows:
+            logger.warning(
+                "Over 20%% of tick-game possessions have no fresh market data. Likely "
+                "the +1-day wall_clock_ts bug (post_game_pipeline.py:903). Those rows "
+                "are correctly excluded here, but the affected games are contributing "
+                "nothing to Head B and should be re-backfilled."
+            )
 
     basketball_only = possessions[~possessions["game_id"].isin(games_with_ticks)].copy()
 

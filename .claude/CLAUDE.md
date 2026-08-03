@@ -25,10 +25,21 @@ KALSHI_PEM_PATH=~/.kalshi/private_key.pem  # outside repo
 
 ## Fee Structure
 ```
-Maker:  0.0175 × contracts × price  (~$0.44 per 100 @ 50¢)
-Taker:  0.07 × contracts × price    (~$1.75 per 100 @ 50¢)
+fee = ceil(rate × contracts × P × (1-P) × 100) / 100     P = price/100, result in $
+  Maker rate 0.0175   →  $0.44 per 100 @ 50¢
+  Taker rate 0.07     →  $1.76 per 100 @ 50¢
 ```
+The `P × (1-P)` term is required. Fees peak at 50¢ and fall toward both ends of
+the book. The old form here (`0.0175 × contracts × price`) omitted it and gave
+$0.88 at 50¢, contradicting its own $0.44 example.
+
+Implemented once per language: `backtesting/mmoe_backtest.py::kalshi_fee` and
+`live-trader/go/orders.go::kalshiFee`. Entry is always maker. TP exits rest as
+maker; SL / TRAIL / TIME exits cross as taker at 4× the rate.
+
 All prices in cents (1–99), never floats. YES @ 60¢ = 60% implied probability.
+**P&L is reported in DOLLARS.** A price delta in cents × contracts is cents —
+divide by 100. A 100-contract position cannot swing more than $100 total.
 
 ## Current Status
 - [x] Phase 1-5: Data foundation, feature store, backtesting, MMoE model, execution engine
