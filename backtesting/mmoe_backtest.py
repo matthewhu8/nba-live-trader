@@ -14,6 +14,7 @@ Usage:
 
 import argparse
 import logging
+import math
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -28,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from models.mmoe.dataset import (
     FEED_DELAY_SECONDS_NBA,
     HEADB_SPLIT_DATE,
+    MARKET_STALENESS_TOLERANCE_SECONDS,
     BOOL_COLS,
     _add_derived_features,
     _connect_motherduck,
@@ -62,8 +64,8 @@ class ClosedPosition:
     exit_reason:   str
     entry_side:    int          # +1 BUY_YES | -1 BUY_NO
     hold_time_s:   float
-    gross_pnl:     float        # entry_side * (exit_price - entry_price)
-    net_pnl:       float        # gross_pnl * contracts - fees
+    gross_pnl:     float        # CENTS per contract: entry_side * (exit_price - entry_price)
+    net_pnl:       float        # DOLLARS: gross_pnl * contracts / 100 - fees
     run_prob:        float
     traj_final:      float      # trajectory[-1] at entry (legacy column, kept for backward compat)
     traj_used:       float      # aggregated trajectory actually consulted for entry gate
@@ -138,7 +140,16 @@ def _get_market_features_at_delay(
     """
     lookup_ts = wall_clock_ts + pd.Timedelta(seconds=delay_s)
 
-    candidates = enriched_game_ticks[enriched_game_ticks["ts"] <= lookup_ts]
+    # Bounded lookback, matching the training join and the live staleness gate.
+    # Unbounded, a possession in one of the ~86 games carrying the +1-day
+    # wall_clock_ts bug binds to a tick ~24 hours old and backtests as a real
+    # trade. Returning zeros here sets has_market_data=0, which is the honest
+    # signal that we could not have priced this possession live.
+    earliest_ts = lookup_ts - pd.Timedelta(seconds=MARKET_STALENESS_TOLERANCE_SECONDS)
+    candidates = enriched_game_ticks[
+        (enriched_game_ticks["ts"] <= lookup_ts)
+        & (enriched_game_ticks["ts"] >= earliest_ts)
+    ]
     if candidates.empty:
         return {col: 0.0 for col in MARKET_COLS}
 
@@ -184,11 +195,43 @@ def _build_feature_dict(
     return fd
 
 
-def _compute_maker_fees(entry_price: float, exit_price: float, contracts: int) -> float:
-    """Maker fees for both entry and exit legs.
-    Kalshi charges $0 for resting (maker) orders on standard markets.
+MAKER_FEE_RATE = 0.0175
+TAKER_FEE_RATE = 0.07
+
+
+def kalshi_fee(contracts: int, price_cents: float, rate: float = MAKER_FEE_RATE) -> float:
     """
-    return 0.0
+    Kalshi trading fee in DOLLARS for one leg.
+
+        fee = ceil(rate * contracts * P * (1 - P) * 100) / 100      P = price/100
+
+    The P*(1-P) term matters: fees peak at 50c and fall toward either end of the
+    book. Dropping it (as `.claude/CLAUDE.md` did) overstates the fee near 50c by
+    2x and understates it at the extremes.
+
+    Check against the documented example: 100 contracts at 50c
+        0.0175 * 100 * 0.5 * 0.5 = 0.4375  ->  ceil(43.75)/100 = $0.44   ✓
+
+    This previously returned 0.0 on the claim that resting orders are free, which
+    contradicted both the project docs and the dashboard implementation. Every
+    backtest run before this change was gross of fees.
+    """
+    p = price_cents / 100.0
+    return math.ceil(rate * contracts * p * (1.0 - p) * 100.0) / 100.0
+
+
+def _compute_maker_fees(entry_price: float, exit_price: float, contracts: int) -> float:
+    """
+    Round-trip fee in DOLLARS: maker in, maker out.
+
+    Conservative in one direction and optimistic in another. Take-profit exits do
+    rest as makers, but stop-loss exits cross the book as takers at 4x the rate,
+    and this does not model that. Treat the result as a floor on true cost.
+    """
+    return (
+        kalshi_fee(contracts, entry_price, MAKER_FEE_RATE)
+        + kalshi_fee(contracts, exit_price, MAKER_FEE_RATE)
+    )
 
 
 # ── Per-game replay ──────────────────────────────────────────────────────────
@@ -304,9 +347,15 @@ def _run_game(
             max_seconds=hold_seconds,
         )
 
+        # gross is CENTS per contract. Multiply by contracts and divide by 100 to
+        # reach dollars. The /100 was missing, so every reported P&L was 100x too
+        # large: a 3c move on 100 contracts is $3.00, not $300. A 100-contract
+        # position cannot swing more than $100 in total, since a contract settles
+        # between $0 and $1.
         gross = entry_side * (sim.exit_price - yes_bid)
+        gross_dollars = gross * contracts / 100.0
         fees  = _compute_maker_fees(yes_bid, sim.exit_price, contracts)
-        net   = gross * contracts - fees
+        net   = gross_dollars - fees
 
         positions.append(ClosedPosition(
             game_id       = game_id,
@@ -481,7 +530,8 @@ def run_backtest(
             exit_reasons={}, by_quarter={}, by_score_bucket={}, by_run_length={},
         )
 
-    total_gross = sum(p.gross_pnl * contracts for p in all_positions)
+    # gross_pnl is cents/contract; /100 converts to dollars, matching net_pnl.
+    total_gross = sum(p.gross_pnl * contracts / 100.0 for p in all_positions)
     total_net   = sum(p.net_pnl for p in all_positions)
     win_rate    = sum(1 for p in all_positions if p.net_pnl > 0) / len(all_positions)
     avg_hold    = np.mean([p.hold_time_s for p in all_positions])

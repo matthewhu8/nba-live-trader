@@ -89,10 +89,12 @@ func (rb *RingBuffer) Snapshot() MarketSnapshot {
 	// [5] volume in last 60s
 	vol60 := rb.volumeWindow(60)
 
-	// [6] ms since last trade (volume > 0)
+	// [6] ms since a tick actually carried a trade.
+	// The predicate is the DELTA in the cumulative counter, not the counter
+	// itself — `Volume > 0` is true on 99.96% of ticks and made this ~0 always.
 	timeSinceLastTrade := float32(999999)
-	for i := len(rb.ticks) - 1; i >= 0; i-- {
-		if rb.ticks[i].Volume > 0 {
+	for i := len(rb.ticks) - 1; i >= 1; i-- {
+		if rb.tradedAt(i) > 0 {
 			timeSinceLastTrade = float32(now.Sub(rb.ticks[i].TS).Milliseconds())
 			break
 		}
@@ -147,17 +149,38 @@ func (rb *RingBuffer) Snapshot() MarketSnapshot {
 	return snap
 }
 
-// volumeWindow sums volume for all ticks in the last nSecs seconds.
+// volumeWindow sums the volume actually TRADED in the last nSecs seconds.
+//
+// Kalshi's `volume` field is a cumulative lifetime counter, not per-tick size, so
+// this sums first differences between consecutive ticks rather than the raw field.
+// Summing the raw field yielded roughly (ticks in window) x (lifetime volume) —
+// a number with no relationship to recent trading activity. Mirrors
+// models/mmoe/dataset.py::_compute_market_features_for_game.
 func (rb *RingBuffer) volumeWindow(nSecs int) int {
 	cutoff := time.Now().Add(-time.Duration(nSecs) * time.Second)
 	total := 0
-	for i := len(rb.ticks) - 1; i >= 0; i-- {
+	for i := len(rb.ticks) - 1; i >= 1; i-- {
 		if rb.ticks[i].TS.Before(cutoff) {
 			break
 		}
-		total += rb.ticks[i].Volume
+		if d := rb.ticks[i].Volume - rb.ticks[i-1].Volume; d > 0 {
+			total += d
+		}
 	}
 	return total
+}
+
+// tradedAt reports the volume traded at tick i, i.e. the increase in the
+// cumulative counter since the previous tick. The oldest retained tick has no
+// predecessor and is reported as no trade rather than as its whole lifetime total.
+func (rb *RingBuffer) tradedAt(i int) int {
+	if i <= 0 {
+		return 0
+	}
+	if d := rb.ticks[i].Volume - rb.ticks[i-1].Volume; d > 0 {
+		return d
+	}
+	return 0
 }
 
 // bidAtOffset returns the YesBid of the tick nearest to now - nSecs*time.Second.
