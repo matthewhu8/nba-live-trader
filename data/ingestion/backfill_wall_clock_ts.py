@@ -564,7 +564,8 @@ def _apply_timestamps(
       2. CTAS to atomically rebuild features.possession_flat with the new values
       3. DROP the staging table
 
-    This is safe — possession_flat is rebuilt atomically by DuckDB/MotherDuck.
+    possession_flat is rebuilt atomically by DuckDB/MotherDuck, and the row count
+    is asserted afterwards (see below) because the join key is not unique.
     """
     conn.execute("""
         CREATE TABLE IF NOT EXISTS features.wcts_backfill (
@@ -575,6 +576,35 @@ def _apply_timestamps(
         )
     """)
 
+    # The staging table MUST be unique on the join key. (game_id, period,
+    # game_clock_secs) is NOT unique in possession_flat -- 18,975 keys repeat,
+    # up to 9 times each -- so leaving duplicates here makes the LEFT JOIN below
+    # fan out n*n rows per key and silently inflates the table.
+    #
+    # Dedup is lossless: a computed timestamp is a pure function of
+    # (period, game_clock_secs) via ts_map, so every duplicate key carries an
+    # identical wall_clock_ts. Verified on real data (48 duplicate keys in a
+    # 6-game sample, 0 with more than one distinct value).
+    key = ["game_id", "period", "game_clock_secs"]
+    n_before = len(all_updates)
+    conflicting = all_updates.groupby(key)["wall_clock_ts"].nunique()
+    if (conflicting > 1).any():
+        bad = conflicting[conflicting > 1]
+        raise ValueError(
+            f"{len(bad)} join keys map to more than one timestamp — dedup would be "
+            f"lossy, refusing to write. First few: {bad.head().to_dict()}"
+        )
+    all_updates = all_updates.drop_duplicates(subset=key)
+    if len(all_updates) != n_before:
+        logger.info(
+            "Deduplicated staging rows on %s: %d -> %d (identical timestamps)",
+            key, n_before, len(all_updates),
+        )
+
+    rows_before = conn.execute(
+        "SELECT COUNT(*) FROM features.possession_flat"
+    ).fetchone()[0]
+
     # Wipe and reload the staging table
     conn.execute("DELETE FROM features.wcts_backfill")
     conn.register("_wcts_new", all_updates)
@@ -582,8 +612,9 @@ def _apply_timestamps(
     conn.unregister("_wcts_new")
 
     logger.info(
-        "Inserted %d rows into wcts_backfill — rebuilding possession_flat via CTAS",
-        len(all_updates),
+        "Inserted %d rows into wcts_backfill — rebuilding possession_flat via CTAS "
+        "(%d rows before)",
+        len(all_updates), rows_before,
     )
 
     # Atomic rebuild: swap wall_clock_ts values where we have a match.
@@ -603,7 +634,25 @@ def _apply_timestamps(
                 = ROUND(wb.game_clock_secs, 2)
     """)
 
-    logger.info("CTAS rebuild complete — dropping wcts_backfill")
+    # The rebuild must preserve row count exactly. A mismatch means the join
+    # fanned out (duplicate staging keys) and the table is now corrupt, so fail
+    # loudly rather than leaving it silently wrong. Staging is kept on failure so
+    # the write can be diagnosed.
+    rows_after = conn.execute(
+        "SELECT COUNT(*) FROM features.possession_flat"
+    ).fetchone()[0]
+    if rows_after != rows_before:
+        raise RuntimeError(
+            f"possession_flat row count changed during rebuild: {rows_before:,} -> "
+            f"{rows_after:,} ({rows_after - rows_before:+,}). The join fanned out. "
+            f"features.wcts_backfill has been left in place for inspection; restore "
+            f"wall_clock_ts from the --backup parquet."
+        )
+
+    logger.info(
+        "CTAS rebuild complete — row count preserved (%d) — dropping wcts_backfill",
+        rows_after,
+    )
     conn.execute("DROP TABLE features.wcts_backfill")
 
 
