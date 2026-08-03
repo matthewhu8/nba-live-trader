@@ -57,9 +57,18 @@ Auth mechanism: RSA-PSS signed headers (`KALSHI-ACCESS-KEY`, `KALSHI-ACCESS-TIME
 
 ## Fee Structure
 ```
-Maker fee:  0.0175 × contracts × price   (~$0.44 per 100 contracts at 50¢)
-Taker fee:  0.07   × contracts × price   (~$1.75 per 100 contracts at 50¢)
+Maker fee:  ceil(0.0175 × contracts × P × (1-P))   (~$0.44 per 100 contracts at 50¢)
+Taker fee:  ceil(0.07   × contracts × P × (1-P))   (~$1.75 per 100 contracts at 50¢)
+        where P = price in dollars (50¢ → 0.50), rounded up to the cent
 ```
+- The `P × (1-P)` term is required — an earlier version of this table omitted it and
+  read `rate × contracts × price`, which overstates the fee ~4× at the 50¢ midpoint
+  (the worked examples above have always assumed the correct formula). Canonical
+  implementations: `backtesting/mmoe_backtest.py::_fee_one_leg`,
+  `live-trader/inference/dashboard.py::kalshiMakerFee`.
+- **Which leg pays what:** entry is always a resting limit (maker). Exits pay maker
+  only on `take_profit` (PR #50 rests the TP limit); `stop_loss`, `momentum_flip`,
+  `garbage_time` and `time_gate` all cross the book and pay taker.
 - Taker fees are 4x higher — being a taker destroys edge on small price moves
 - All prices are integers in cents (1–99). Never floats. Never decimals internally.
 - A YES contract at 60¢ = market implies 60% win probability
@@ -93,29 +102,72 @@ Taker fee:  0.07   × contracts × price   (~$1.75 per 100 contracts at 50¢)
 
 ## ⚠️ ALL BACKTEST P&L AND HEAD B ACCURACY ARE UNVERIFIED (as of 2026-08-03)
 
-**Do not quote, build on, or tune against any P&L figure in this file until it is re-measured.** Two defects were found on 2026-08-03; both inflate results and neither has been fixed yet.
+**Do not quote, build on, or tune against any P&L figure in this file until it is re-measured.** Every historical figure below was produced through the lookahead described in defect 1.
 
-**1. Exit-window lookahead (not yet fixed).** Entry price is read at `wall_clock_ts + feed_delay_s` (20s), but the exit search starts at `wall_clock_ts`:
+**THE CORRECTED BASELINE (2026-08-03, branch `fix/backtest-exit-window`):** on the 69-game
+cache (2026-04-15 → 05-17, fully out-of-sample vs. both the Jan 2026 basketball cutoff and
+Head B's Apr 7–12 val window), the Phase 6 config
+(`--use-traj-for-side --min-abs-traj 0.08 --traj-aggregator mean --min-run-length 2 --hold-seconds 240`):
 
-```
-backtesting/mmoe_backtest.py:238   entry uses  wct + feed_delay_s
-backtesting/mmoe_backtest.py:289   future_ticks = ticks[ts > wct]   ← missing + delay
-backtesting/mmoe_backtest.py:293   entry_wall_clock = wct
-```
+| | trades | win rate | net P&L |
+|---|---|---|---|
+| as previously reported | 81 | 51.9% | **+$16,100** |
+| corrected | 80 | 37.5% | **+$61.58** (gross +$200, fees $138) |
 
-So a position can exit up to 20s **before it entered**, capturing movement that already happened. `backtesting/event_trigger_backtest.py` has the same pattern. Measured on the 69-game event-trigger run: 25 of 64 trades held **< 20s** and produced **$13,500 of $14,000** total P&L at 84% win rate; the 39 legitimate trades (hold ≥ 20s) made **$500 at 38% win rate**. Shortest holds were 0.05–0.14s, i.e. a 5¢ take-profit in a twentieth of a second.
+**The measured edge is zero.** +$61.58 over 80 trades is $0.77/trade on 100-contract
+positions; remove the single best trade and it is **−$438**. 37.5% win rate against a
+55–56% break-even at TP=5/SL=3. 70% of exits are stop-outs or momentum flips.
+Treat live trading as blocked on a real edge, not on tuning.
 
-Implication: **the honest edge may be zero.** Fix is `ts > wct + delay` and `entry_wall_clock = wct + delay` in both backtests, then re-measure everything.
+**1. Exit-window lookahead — FIXED 2026-08-03** (`mmoe_backtest.py`, commit `92ebc6c`).
+Entry price is read at `wall_clock_ts + feed_delay_s` (20s) but the exit search started at
+`wall_clock_ts`, so a position could exit up to 20s **before it entered**, capturing
+movement that had already happened. Measured on the 69-game event-trigger run: 25 of 64
+trades held **< 20s** and produced **$13,500 of $14,000** at 84% win rate. On the mmoe run:
+25 of 81 trades held < 20s and produced **+$17,300 at a perfect 100% win rate**, while the
+56 legitimate trades **lost $1,200**.
+
+The fix anchors the exit window, the possession window and the overlap guard on
+`wct + feed_delay_s`, via a single `_tick_at_delay()` helper so the entry price and exit
+anchor cannot drift apart again. A runtime invariant raises on any exit earlier than
+`wct + feed_delay_s`; it is deliberately stated against `wct` rather than the anchor so
+re-anchoring fails loudly instead of silently reinflating results. **Verified in both
+directions** — it fires when the bug is reintroduced.
+
+⚠️ `backtesting/event_trigger_backtest.py` has the same pattern and is **still unfixed**
+(it lives on `event_triggers`).
+
+**Do not "filter" the bug out of old results.** Dropping sub-20s trades from a biased run
+gave an estimate of −$2,600; actually re-running gave +$62. The corrected run re-simulates
+those positions from the right anchor and the overlap guard admits a different trade set.
+Only a real re-run counts.
+
+**1b. Take-profits were over-credited — FIXED 2026-08-03.** TP exits were booked at the
+price of the tick that breached the threshold rather than at the resting maker limit of
+`entry + TP` (PR #50). 18 of 36 TP exits overshot the limit — median 6¢ past it, max 24¢
+(one 44¢→20¢ fill booked as +$2,400) — crediting fills that were never available. Exit
+price is now capped at the limit.
 
 **2. Head B trained on partly-corrupt market features.** `wall_clock_ts` was one day late for 86 games (games tipping after 20:00 ET cross 00:00 UTC). `pd.merge_asof` never fails, so those possessions silently matched the last recorded tick — the settled price (1¢/99¢) — and were then quietly dropped by the 30–70¢ band. **34% of joint rows (16,955 of 49,576)** were affected. The data is now repaired (see below), but Head B was trained before the repair.
 
 **Consequently suspect and needing re-derivation:**
 - Phase 3 `+$37,409` and Phase 6 `+$39.3K / 51.9% / 183 trades`
 - The aggregator sweep that selected `traj_aggregator: mean`
-- **`min_abs_traj: 0.12`** in `live-trader/config/trading.yaml` — raised from 0.08 on win rates measured through the lookahead. This currently governs live orders.
+- **`min_abs_traj: 0.12`** in `live-trader/config/trading.yaml` — raised from 0.08 on win rates measured through the lookahead. This currently governs live orders. Note the 0.08 vs 0.12 comparison was between two buckets that were **both** inflated, so the threshold has no validated basis in either direction. Re-derive against the corrected backtest before the next live session.
 - Head B's `Dir Acc 61.1%`
 
-**Also:** `_compute_maker_fees()` (`mmoe_backtest.py:187`) returns `0.0` unconditionally, contradicting the fee table below. Small at current volume (~$56 over 64 trades) but violates the fees-in-every-calculation rule.
+**3. Fees were zero — FIXED 2026-08-03.** `_compute_maker_fees()` returned `0.0`
+unconditionally, which zeroed the taker cost on every stop-out, i.e. on every loser.
+Replaced by `_compute_fees(entry, exit, contracts, exit_reason)`: maker entry always, maker
+exit only on `take_profit`, taker otherwise. Worth $138 on the 80-trade corrected run —
+more than twice the run's entire net P&L.
+
+**Known remaining bias (not fixed, smaller, and deliberate):** `simulate_exit` evaluates
+momentum-flip and garbage-time exits at each possession's `wall_clock_ts`, with no feed
+delay, so those exits fire ~20s earlier than a live trader could act. Fixing it means
+changing `models/targets/exit_simulator.py`, which also generates Head B/C **training
+labels** — so it would require a retrain and must not be done casually. 27.5% of corrected
+exits are momentum flips, so this is material; scope it as its own task.
 
 **Fixed and verified on 2026-08-03** (branch `fix/wall-clock-ts-date`, merged into `event_triggers`):
 - 86 games' `wall_clock_ts` repaired in MotherDuck; all 2,127 timestamped games now at day-offset 0, no backwards periods, no implausible tip hours, row count preserved at 449,274. Backups in `data/backups/`.
