@@ -49,6 +49,35 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+_CACHE_DIR     = Path("data/feature_store")
+_POSS_CACHE    = _CACHE_DIR / "possession_flat.parquet"
+_TICKS_CACHE   = _CACHE_DIR / "kalshi_ticks.parquet"
+_PREGAME_CACHE = _CACHE_DIR / "pregame.parquet"
+
+
+def _load_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Load the three source tables, preferring the local parquet cache.
+
+    A full MotherDuck scan of possession_flat + kalshi_ticks exhausted the
+    free-tier daily compute limit, so the cache is the default path. Rebuild it
+    with data/ingestion/export_backtest_cache.py.
+    """
+    if _POSS_CACHE.exists() and _TICKS_CACHE.exists() and _PREGAME_CACHE.exists():
+        logger.info("Loading from local parquet cache...")
+        poss    = pd.read_parquet(_POSS_CACHE)
+        ticks   = pd.read_parquet(_TICKS_CACHE)
+        pregame = pd.read_parquet(_PREGAME_CACHE)
+        logger.info("  possession_flat: %d rows / %d games | ticks: %d rows | pregame: %d rows",
+                    len(poss), poss["game_id"].nunique(), len(ticks), len(pregame))
+        return poss, ticks, pregame
+    logger.info("Local cache not found — connecting to MotherDuck...")
+    conn    = _connect_motherduck()
+    poss    = _load_possession_flat(conn)
+    ticks   = _load_kalshi_ticks(conn)
+    pregame = _load_pregame(conn)
+    conn.close()
+    return poss, ticks, pregame
+
 
 # ── Data structures ──────────────────────────────────────────────────────────
 
@@ -389,14 +418,8 @@ def run_backtest(
     only_game: str | None = None,
     traj_aggregator: str = "final",
 ) -> BacktestSummary:
-    logger.info("Connecting to MotherDuck...")
-    conn = _connect_motherduck()
-
     logger.info("Loading data...")
-    all_poss  = _load_possession_flat(conn)
-    all_ticks = _load_kalshi_ticks(conn)
-    pregame   = _load_pregame(conn)
-    conn.close()
+    all_poss, all_ticks, pregame = _load_data()
 
     # Derive features and join pregame
     all_poss = _add_derived_features(all_poss)
