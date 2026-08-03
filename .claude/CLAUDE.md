@@ -71,16 +71,58 @@ Taker fee:  0.07   × contracts × price   (~$1.75 per 100 contracts at 50¢)
 - [x] Phase 1: Data foundation — recorder deployed on Fly.io, nba_api ingestion complete, possession_flat built (400K rows, 86 cols)
 - [x] Phase 2: Feature store (58 features, lineup signals); player + lineup ratings (47M rows); nightly 3 AM pipeline on Fly.io
 - [ ] Phase 2: Rotation tendency model — not built
-- [x] Phase 3: MMoE backtest validated — best config: `--use-traj-for-side --min-abs-traj 0.08 --min-run-length 2 --hold-seconds 240` → 207 trades, 47.8% win rate, +$37,409 net (110 val games, no Head A gate)
-- [x] Phase 4: MMoE retrained (2026-05-15) — Head A AUCPR 0.1593, Head B dir acc 61.1%, Head C Brier 0.0860; artifacts: `models/saved/mmoe_delay20.pt`
-- [x] Phase 5: Go execution engine + Python inference service running end-to-end (paper mode)
+- [x] Phase 3: MMoE backtest ⚠️ UNVERIFIED (exit-window lookahead — see warning above) — original best: `--use-traj-for-side --min-abs-traj 0.08 --min-run-length 2 --hold-seconds 240` → 207 trades, 47.8% win, +$37,409 (110 val games). **Superseded by Phase 1 sweep (see below).**
+- [x] Phase 4: MMoE retrained (2026-05-15) — Head A AUCPR 0.1593, Head B dir acc 61.1% ⚠️ (Head B trained on 34% corrupt market rows), Head C Brier 0.0860; artifacts: `models/saved/mmoe_delay20.pt`
+- [x] Phase 5: Go execution engine + Python inference service running end-to-end
 - [x] Phase 5: Structured JSONL logging across Go and Python
-- [x] Phase 5: Entry config aligned to backtest (2026-05-10)
 - [x] Phase 5: Risk ledger fully enforced — `Check()`, `RecordFill()`, `RecordExit()` implemented; kill switch wired
-- [ ] **Phase 6: Paper trading ← CURRENT FOCUS** — first run 2026-05-09 OKC@LAL
-- [ ] Phase 6: Live trading
+- [x] Phase 6: Paper trading complete — multiple sessions through May 2026
+- [x] Phase 6: Phase 1 aggregator sweep (2026-06-03) ⚠️ UNVERIFIED (lookahead) — winner `traj_aggregator: mean`, `min_abs_traj: 0.08`, `use_traj_for_side` → +$39.3K / 51.9% wr / 183 trades on 128 val games. Tool: `tools/sweep_traj_aggregator.py`
+- [x] Phase 6: Entry threshold raised 0.08 → 0.12 (2026-06-06) ⚠️ tuned on biased backtests; re-derive — the 0.08–0.12 band had 33% win (below 55–56% break-even at TP=5/SL=3 with maker entry + maker TP + taker SL). At 0.12: ~60% fewer trades, ~60% win rate
+- [x] Phase 6: Resting maker take-profits (PR #50) — on entry fill, an opposite-side `post_only=true` limit is placed at `entry + TP`. Captures ~4× maker discount on winners. Stops still cross the book (taker, bounded slippage by `exit_slippage_budget_cents`) — fixes 2026-05-28 post-mortem where 175 post-only stops were rejected as "post only cross"
+- [x] Phase 6: Kelly-style sizing — `kelly_min_contracts: 60`, `kelly_slope: 100`, `kelly_anchor_traj: 0.12`. Floor 60C, ramps to 100C cap only at extreme conviction (`|traj| > 0.88`)
+- [x] Phase 6: Market scanner hardened — won't swap markets while a position is open; stale-tick filter after swap; cancels routed to entry-market ticker (not new market)
+- [x] Phase 6: Config-driven model paths — `inference.model_path` / `scaler_path` forwarded by Go on `/game/start`; Python only reloads if paths differ
+- [x] Phase 6: Garbage-time GATE decoupled from MODEL feature — trade gate is config-tunable; `garbage_time_risk` model feature frozen at training values (30/4/360) to prevent train/serve skew
+- [ ] **Phase 7: Live trading ← CURRENT FOCUS** — went live 2026-06-03 for NYK@SAS Game 1 (user-authorized). Daily kill: $40. Caps: $70 total / $70 per-game. Trailing-TP scaffold present but off (`trail_giveback_cents: 0`)
+- [ ] Phase 2: Rotation tendency model — not built (deprioritized)
 
 **Train/test split:** Jan 2026 cutoff for basketball; Head B: Mar 23–Apr 6 train / Apr 7–12 val. The 2024-25 season test set is sacred — never use during development.
+
+---
+
+## ⚠️ ALL BACKTEST P&L AND HEAD B ACCURACY ARE UNVERIFIED (as of 2026-08-03)
+
+**Do not quote, build on, or tune against any P&L figure in this file until it is re-measured.** Two defects were found on 2026-08-03; both inflate results and neither has been fixed yet.
+
+**1. Exit-window lookahead (not yet fixed).** Entry price is read at `wall_clock_ts + feed_delay_s` (20s), but the exit search starts at `wall_clock_ts`:
+
+```
+backtesting/mmoe_backtest.py:238   entry uses  wct + feed_delay_s
+backtesting/mmoe_backtest.py:289   future_ticks = ticks[ts > wct]   ← missing + delay
+backtesting/mmoe_backtest.py:293   entry_wall_clock = wct
+```
+
+So a position can exit up to 20s **before it entered**, capturing movement that already happened. `backtesting/event_trigger_backtest.py` has the same pattern. Measured on the 69-game event-trigger run: 25 of 64 trades held **< 20s** and produced **$13,500 of $14,000** total P&L at 84% win rate; the 39 legitimate trades (hold ≥ 20s) made **$500 at 38% win rate**. Shortest holds were 0.05–0.14s, i.e. a 5¢ take-profit in a twentieth of a second.
+
+Implication: **the honest edge may be zero.** Fix is `ts > wct + delay` and `entry_wall_clock = wct + delay` in both backtests, then re-measure everything.
+
+**2. Head B trained on partly-corrupt market features.** `wall_clock_ts` was one day late for 86 games (games tipping after 20:00 ET cross 00:00 UTC). `pd.merge_asof` never fails, so those possessions silently matched the last recorded tick — the settled price (1¢/99¢) — and were then quietly dropped by the 30–70¢ band. **34% of joint rows (16,955 of 49,576)** were affected. The data is now repaired (see below), but Head B was trained before the repair.
+
+**Consequently suspect and needing re-derivation:**
+- Phase 3 `+$37,409` and Phase 6 `+$39.3K / 51.9% / 183 trades`
+- The aggregator sweep that selected `traj_aggregator: mean`
+- **`min_abs_traj: 0.12`** in `live-trader/config/trading.yaml` — raised from 0.08 on win rates measured through the lookahead. This currently governs live orders.
+- Head B's `Dir Acc 61.1%`
+
+**Also:** `_compute_maker_fees()` (`mmoe_backtest.py:187`) returns `0.0` unconditionally, contradicting the fee table below. Small at current volume (~$56 over 64 trades) but violates the fees-in-every-calculation rule.
+
+**Fixed and verified on 2026-08-03** (branch `fix/wall-clock-ts-date`, merged into `event_triggers`):
+- 86 games' `wall_clock_ts` repaired in MotherDuck; all 2,127 timestamped games now at day-offset 0, no backwards periods, no implausible tip hours, row count preserved at 449,274. Backups in `data/backups/`.
+- Midnight-crossover bug in `_parse_period_start_et` — lost a day when two consecutive periods started after midnight (late west-coast games). Was still live.
+- Two guards added: `dataset.validate_possession_tick_overlap()` (first possession inside the tick window **and** ≥15% tick coverage) and `backfill_wall_clock_ts._validate_anchors()` (ET date matches `game_date`, plausible tip hour, monotonic periods, span < 6h).
+- Row-fanout bug in the `possession_flat` CTAS rebuild — the join key repeats up to 9× per game; would have added 2,640 phantom rows.
+- Backtest tick coverage went from 3% to 91% median; 69/69 games now pass.
 
 ---
 
@@ -249,7 +291,7 @@ tail -f live-trader/go/logs/runs/{date}/{run_id}/live-trader.jsonl
 83 input features (58 basketball + 10 pregame + 14 market + 1 flag), 3 expert networks (64-dim MLP), 3 gating networks, 3 task heads. ~37K params.
 
 - **Head A — Run Classifier:** P(meaningful run in next 5 possessions) — AUCPR 0.1593 vs 0.0840 baseline (+90%). Entropy regularization (λ=0.015) fixed gating collapse.
-- **Head B — Price Trajectory:** Δ(yes_bid) in log-odds over hold window — Dir Acc 61.1% (trained on ~42K joint rows with Kalshi ticks). w_b raised to 1.0.
+- **Head B — Price Trajectory:** Δ(yes_bid) in log-odds over hold window — Dir Acc 61.1% ⚠️ UNVERIFIED (trained on ~42K joint rows with Kalshi ticks). w_b raised to 1.0.
 - **Head C — Run Survival Hazard:** P(run still ongoing) at 10 time horizons — Brier 0.0860; used for dynamic exit timing.
 
 **Trade only in 30–70¢ band.** Outside this range, market certainty is too high for basketball signal to move price.
@@ -294,7 +336,7 @@ Kalshi WebSocket (NBA events, ~15-20s latency)
 
 Direction (BuyYes vs BuyNo) from `traj_final` sign. Thresholds in `live-trader/config/trading.yaml` — edit and restart Go, no recompile needed.
 
-Validated backtest (2026-05-15 retrain): `python -m backtesting.mmoe_backtest --use-traj-for-side --min-abs-traj 0.08 --min-run-length 2 --hold-seconds 240 --threshold 0.0`
+Backtest command (⚠️ results UNVERIFIED — exit-window lookahead): `python -m backtesting.mmoe_backtest --use-traj-for-side --min-abs-traj 0.08 --min-run-length 2 --hold-seconds 240 --threshold 0.0`
 → 207 trades, 47.8% win rate, +$37,409 net (110 val games)
 
 ---
