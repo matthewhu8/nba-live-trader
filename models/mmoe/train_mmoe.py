@@ -46,13 +46,27 @@ def main() -> None:
     parser.add_argument("--patience",     type=int,   default=15)
     parser.add_argument("--tp",           type=float, default=5.0,  help="Take-profit threshold (cents)")
     parser.add_argument("--sl",           type=float, default=3.0,  help="Stop-loss threshold (cents)")
+    parser.add_argument("--horizon-seconds", type=int, default=120,
+                        help="Head B trajectory horizon — max hold window the targets span. "
+                             "120=scalp (default), 360=half-quarter swing, 600=10-min swing.")
+    parser.add_argument("--no-market-encoder", action="store_true",
+                        help="Pass the 14 market features through raw instead of through "
+                             "nn.Linear(14,4). This is the attribution baseline: run once "
+                             "with this flag to isolate what the physics consolidation "
+                             "bought, then once without it to price the encoder. Saves to "
+                             "a _nomktenc suffix so the two runs do not overwrite.")
     parser.add_argument("--feed-delay",   type=int,   default=FEED_DELAY_SECONDS_NBA,
                         help=f"Feed delay in seconds. NBA polling={FEED_DELAY_SECONDS_NBA}, "
                              f"Sportradar WS={FEED_DELAY_SECONDS_SPORTRADAR}")
     args = parser.parse_args()
 
-    # Derive save paths from feed delay so runs don't overwrite each other
+    # Derive save paths from feed delay (and horizon, for non-default swing runs)
+    # so concurrent runs don't overwrite each other. Default 120s keeps legacy names.
     suffix      = f"delay{args.feed_delay}"
+    if args.horizon_seconds != 120:
+        suffix += f"_h{args.horizon_seconds}"
+    if args.no_market_encoder:
+        suffix += "_nomktenc"
     model_path  = Path(f"models/saved/mmoe_{suffix}.pt")
     scaler_path = Path(f"models/saved/mmoe_scaler_{suffix}.pkl")
 
@@ -62,8 +76,8 @@ def main() -> None:
         args.patience   = 999
 
     logger.info(
-        "Feed delay: %ds | Saving model → %s | scaler → %s",
-        args.feed_delay, model_path, scaler_path,
+        "Feed delay: %ds | Horizon: %ds | TP/SL: %.1f/%.1f¢ | Saving model → %s | scaler → %s",
+        args.feed_delay, args.horizon_seconds, args.tp, args.sl, model_path, scaler_path,
     )
     logger.info("Building dataloaders (this may take a few minutes)...")
     train_loader, val_loader, scaler = build_dataloaders(
@@ -71,6 +85,7 @@ def main() -> None:
         tp=args.tp,
         sl=args.sl,
         feed_delay_seconds=args.feed_delay,
+        horizon_seconds=args.horizon_seconds,
     )
 
     logger.info(
@@ -79,9 +94,12 @@ def main() -> None:
         next(iter(train_loader))[0].shape[1],
     )
 
-    model = MMoEModel()
+    model = MMoEModel(use_market_encoder=not args.no_market_encoder)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    logger.info("Model created: %d trainable parameters", n_params)
+    logger.info(
+        "Model created: %d trainable parameters | market encoder: %s",
+        n_params, "OFF (attribution baseline)" if args.no_market_encoder else "ON",
+    )
 
     result = train(
         model          = model,

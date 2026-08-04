@@ -1,12 +1,12 @@
 """
-FeatureComputer — assembles the full 83-feature X vector for MMoE inference.
+FeatureComputer - assembles the full 58-feature X vector for MMoE inference.
 
 This is where X vector computation happens in the live system.
 Takes a completed PossessionRow + current GameState + Kalshi market snapshot
 and returns a feature dict aligned to models/mmoe/feature_config.ALL_FEATURE_COLS.
 
 Feature groups:
-    58 physics  — computed here from PossessionRow + GameState rolling caches
+    33 physics  - computed here from PossessionRow + GameState rolling caches, via transforms.py
     11 pregame  — loaded once at game start, stored in GameState.pregame (static)
     14 market   — pre-computed by Go's KalshiRingBuffer, passed in as kalshi_snapshot
 
@@ -22,16 +22,14 @@ Streaming reimplementation of:
 
 from typing import TYPE_CHECKING
 
+from models.features import transforms as T
 from models.mmoe.feature_config import ALL_FEATURE_COLS, MARKET_COLS
 
-# Training-parity constants for the `garbage_time_risk` MODEL feature. The MMoE
-# was trained with garbage time defined at exactly these values, so they are
-# FROZEN here — do NOT make them configurable. The tunable trade GATE
-# (is_garbage_time / is_blowout, in main.py) is a SEPARATE concern driven by
-# trading.yaml; decoupling them prevents train/serve skew on a model input.
-_TRAIN_BLOWOUT_MARGIN_PTS = 30
-_TRAIN_GARBAGE_PERIOD = 4
-_TRAIN_GARBAGE_CLOCK_SECS = 360
+# Every formula below comes from models/features/transforms.py, which the offline
+# builder also calls. Do NOT reintroduce a local constant or a local formula here:
+# four silent train/live divergences were caused by exactly that, including a
+# `garbage_time_risk` that this file computed as a hard binary while training used
+# a continuous sigmoid, and a `_TRAIN_BLOWOUT_MARGIN_PTS = 30` that trained at 15.
 
 if TYPE_CHECKING:
     from inference.game_state import GameState
@@ -47,9 +45,11 @@ class FeatureComputer:
         kalshi_snapshot: list[float],  # 14 floats in MARKET_COLS order
     ) -> dict[str, float]:
         """
-        Assemble the full 83-feature dict.
+        Assemble the full 58-feature dict.
         Keys must exactly match models/mmoe/feature_config.ALL_FEATURE_COLS.
-        Missing keys default to 0.0 in MMoEPredictor.predict().
+        Missing keys default to 0.0 in MMoEPredictor.predict(), which is why the
+        assertion below is worth keeping: a silently zero-filled feature is an
+        accuracy loss with no error attached to it.
         """
         features: dict[str, float] = {}
 
@@ -87,10 +87,14 @@ class FeatureComputer:
         run_3pt_pct  = (3 * state.run_3pt_count / state.run_points) if state.run_points > 0 else 0.0
         run_paint_pct = (state.run_paint_pts / state.run_points) if state.run_points > 0 else 0.0
 
-        # Pace — mean of possession_durations deque
+        # Pace — mean of the last-10 possession_durations deque.
+        # The empty-deque fallback must be PACE_FALLBACK_SECS, matching offline's
+        # `.fillna(15.0)`. It previously fell back to state.pace_baseline (the
+        # pregame constant), which diverged from training on every possession
+        # before the first measurable possession duration.
         pace_last_10 = (
             sum(state.possession_durations) / len(state.possession_durations)
-            if state.possession_durations else state.pace_baseline
+            if state.possession_durations else T.PACE_FALLBACK_SECS
         )
 
         # Shot quality — last 5 scored possessions per team
@@ -98,37 +102,51 @@ class FeatureComputer:
         away_xppp        = _mean_xppp(state.away_scored_poss)
         home_actual_ppp  = _mean_actual_ppp(state.home_scored_poss)
         away_actual_ppp  = _mean_actual_ppp(state.away_scored_poss)
-        home_sustain     = _is_sustainable(state.home_scored_poss)
-        away_sustain     = _is_sustainable(state.away_scored_poss)
 
-        # Shot quality trend: sign of xPPP change vs prior 5-poss window — discrete {-1, 0, +1}.
-        # Matches training at momentum_features.py:222-223 (np.sign). Raw float would be
-        # ~10× smaller in magnitude than the training distribution after StandardScaler.
-        home_traj = _sign(home_xppp - state.home_prev_xppp) if state.home_prev_xppp > 0.0 else 0.0
-        away_traj = _sign(away_xppp - state.away_prev_xppp) if state.away_prev_xppp > 0.0 else 0.0
+        # Shot quality trend as a RAW xPPP difference, not np.sign(). The signed
+        # form collapsed a shot-quality collapse and an imperceptible drift onto the
+        # same input; the model can pick its own threshold from the magnitude.
+        home_traj = (home_xppp - state.home_prev_xppp) if state.home_prev_xppp > 0.0 else 0.0
+        away_traj = (away_xppp - state.away_prev_xppp) if state.away_prev_xppp > 0.0 else 0.0
+
+        # Expanding within-game pace mean. NOT state.pace_baseline, which is the
+        # pregame constant — conflating the two was parity bug #4.
+        pace_game_to_date = (
+            state.pace_duration_sum / state.pace_duration_count
+            if state.pace_duration_count > 0
+            else T.PACE_FALLBACK_SECS
+        )
+        expected_pace = state.pregame.get("expected_pace", 0.0) or T.PACE_FALLBACK_SECS
 
         return {
-            "home_points_last_5_poss":   float(home_last_5),
-            "away_points_last_5_poss":   float(away_last_5),
-            "home_points_last_10_poss":  float(home_last_10),
-            "away_points_last_10_poss":  float(away_last_10),
-            "current_run_team_encoded":  _encode_run_team(state.run_team),
-            "current_run_length":        float(state.run_length),
-            "current_run_points":        float(state.run_points),
-            "current_run_3pt_pct":       run_3pt_pct,
-            "current_run_paint_pct":     run_paint_pct,
-            "pace_last_10_possessions":  pace_last_10,
-            "pace_season_baseline":      state.pace_baseline,
-            "home_scoring_sustainable":  float(home_sustain),
-            "away_scoring_sustainable":  float(away_sustain),
-            "home_xPPP_last_5":          home_xppp,
-            "away_xPPP_last_5":          away_xppp,
-            "home_actual_vs_expected_PPP": home_actual_ppp - home_xppp,
-            "away_actual_vs_expected_PPP": away_actual_ppp - away_xppp,
-            "home_shot_quality_trend":   home_traj,
-            "away_shot_quality_trend":   away_traj,
-            "shot_value":                float(possession.shot_value),
-            "shot_distance":             possession.shot_distance,
+            "shot_value":    float(possession.shot_value),
+            "shot_distance": possession.shot_distance,
+            # Runs
+            "run_signed_points": float(
+                T.run_signed_points(T.encode_run_team(state.run_team), state.run_points)
+            ),
+            "run_efficiency": float(T.run_efficiency(state.run_points, state.run_length)),
+            "run_fragility":  float(T.run_fragility(run_3pt_pct, run_paint_pct)),
+            # Recent scoring
+            "swing_5": float(T.swing_5(home_last_5, away_last_5)),
+            "swing_accel": float(
+                T.swing_accel(home_last_5, away_last_5, home_last_10, away_last_10)
+            ),
+            # Pace
+            "pace_ref": float(
+                T.pace_ref(pace_game_to_date, expected_pace, state.possession_count)
+            ),
+            "pace_surprise": float(
+                T.pace_surprise(
+                    pace_last_10, pace_game_to_date, expected_pace, state.possession_count
+                )
+            ),
+            # Shot quality
+            "xppp_edge": float(T.xppp_edge(home_xppp, away_xppp)),
+            "luck_edge": float(
+                T.luck_edge(home_actual_ppp - home_xppp, away_actual_ppp - away_xppp)
+            ),
+            "quality_trend_edge": float(T.edge(home_traj, away_traj)),
         }
 
     @staticmethod
@@ -137,68 +155,48 @@ class FeatureComputer:
         Streaming equivalent of context_features.add_context_features().
         Foul counts, timeout counts, score context — all from accumulators in GameState.
         """
-        score_diff      = possession.home_score - possession.away_score
-        period          = possession.period
-        clock_secs      = possession.game_clock_secs
-        minutes_elapsed = ((period - 1) * 12) + (720.0 - clock_secs) / 60.0
-        minutes_remaining = max(0.1, 48.0 - minutes_elapsed)
+        score_diff = possession.home_score - possession.away_score
+        period     = possession.period
+        clock_secs = possession.game_clock_secs
 
-        # FROZEN training definition — feeds the `garbage_time_risk` model input
-        # below. Not the trade gate (see _TRAIN_* constants above).
-        is_blowout      = abs(score_diff) > _TRAIN_BLOWOUT_MARGIN_PTS
-        is_garbage_time = (
-            is_blowout
-            and period == _TRAIN_GARBAGE_PERIOD
-            and clock_secs < _TRAIN_GARBAGE_CLOCK_SECS
-        )
-
-        # Team fouls → bonus state
         home_team_fouls_q = state.home_team_fouls.get(period, 0)
         away_team_fouls_q = state.away_team_fouls.get(period, 0)
-        home_in_bonus     = home_team_fouls_q >= 5
-        away_in_bonus     = away_team_fouls_q >= 5
 
-        # Star foul trouble: read from player_fouls + star_players
         home_trouble_tier = _star_foul_trouble_tier(state, "home", period)
         away_trouble_tier = _star_foul_trouble_tier(state, "away", period)
 
-        # Timeout context
         poss_since_to = _possessions_since_last_timeout(state)
         home_to_last3, away_to_last3 = _timeout_in_last_3(state, possession.possession_id)
 
-        # TODO: timeout_on_opponent_run
-
         return {
-            "score_diff":                     float(score_diff),
-            "period":                         float(period),
-            "minutes_into_game":              minutes_elapsed,
-            "trailing_team_urgency":          abs(score_diff) / minutes_remaining,
-            "comeback_probability_proxy":     (score_diff ** 2) / minutes_remaining,
-            "q4_close_game":                  float(period == 4 and abs(score_diff) <= 5),
-            "garbage_time_risk":              float(is_garbage_time),
-            "home_team_fouls_q":              float(home_team_fouls_q),
-            "away_team_fouls_q":              float(away_team_fouls_q),
-            "home_cum_fouls":                 float(sum(state.home_team_fouls.values())),
-            "away_cum_fouls":                 float(sum(state.away_team_fouls.values())),
-            "home_in_bonus":                  float(home_in_bonus),
-            "away_in_bonus":                  float(away_in_bonus),
-            "home_fouls_until_bonus":         float(max(0, 5 - home_team_fouls_q)),
-            "away_fouls_until_bonus":         float(max(0, 5 - away_team_fouls_q)),
-            "home_star_in_foul_trouble":      float(home_trouble_tier > 0),
-            "away_star_in_foul_trouble":      float(away_trouble_tier > 0),
-            "home_star_on_court":             float(_has_star(state, "home")),
-            "away_star_on_court":             float(_has_star(state, "away")),
-            "was_foul":                       float(possession.was_foul),
-            "was_sub":                        float(possession.was_sub),
-            "had_shooting_foul":              float(possession.had_shooting_foul),
-            "had_personal_foul":              float(possession.had_personal_foul),
-            "home_sub_count":                 float(state.home_sub_count),
-            "away_sub_count":                 float(state.away_sub_count),
-            "possessions_since_last_timeout": float(poss_since_to),
-            "home_called_timeout_in_last_3_poss": float(home_to_last3),
-            "away_called_timeout_in_last_3_poss": float(away_to_last3),
-            "home_full_timeouts_remaining":   float(4 - state.home_timeouts_used),
-            "away_full_timeouts_remaining":   float(4 - state.away_timeouts_used),
+            # Score x time
+            "score_diff":        float(score_diff),
+            "lead_z":            float(T.lead_z(score_diff, period, clock_secs)),
+            "time_leverage":     float(T.time_leverage(period, clock_secs)),
+            "garbage_time_risk": float(T.garbage_time_risk(score_diff, period, clock_secs)),
+            # Foul state
+            "team_foul_edge":         float(T.edge(home_team_fouls_q, away_team_fouls_q)),
+            "home_fouls_until_bonus": float(T.fouls_until_bonus(home_team_fouls_q)),
+            "away_fouls_until_bonus": float(T.fouls_until_bonus(away_team_fouls_q)),
+            "star_trouble_edge":  float(T.edge(home_trouble_tier > 0, away_trouble_tier > 0)),
+            "star_on_court_edge": float(
+                T.edge(_has_star(state, "home"), _has_star(state, "away"))
+            ),
+            # Event context
+            "was_sub":           float(possession.was_sub),
+            "had_shooting_foul": float(possession.had_shooting_foul),
+            "had_personal_foul": float(possession.had_personal_foul),
+            "sub_count_edge":    float(T.edge(state.home_sub_count, state.away_sub_count)),
+            # Timeouts
+            "poss_since_timeout":  float(T.timeout_possessions_bounded(poss_since_to)),
+            "no_timeout_yet":      float(T.no_timeout_yet(poss_since_to)),
+            "timeout_called_edge": float(T.edge(home_to_last3, away_to_last3)),
+            "timeouts_remaining_edge": float(
+                T.edge(
+                    T.full_timeouts_remaining(state.home_timeouts_used),
+                    T.full_timeouts_remaining(state.away_timeouts_used),
+                )
+            ),
         }
 
     @staticmethod
@@ -210,50 +208,32 @@ class FeatureComputer:
         home_net = state.lineup_ratings.get(possession.home_lineup_id, 0.0)
         away_net = state.lineup_ratings.get(possession.away_lineup_id, 0.0)
 
-        home_apms = [state.player_apm.get(p, 0.0) for p in state.home_lineup]
-        away_apms = [state.player_apm.get(p, 0.0) for p in state.away_lineup]
+        home_samples = state.lineup_sample_sizes.get(possession.home_lineup_id, 0.0)
+        away_samples = state.lineup_sample_sizes.get(possession.away_lineup_id, 0.0)
 
-        home_best  = max(home_apms) if home_apms else 0.0
-        away_best  = max(away_apms) if away_apms else 0.0
-        home_worst = min(home_apms) if home_apms else 0.0
-        away_worst = min(away_apms) if away_apms else 0.0
-
-        # TODO: home_lineup_sample_size from lineup_ratings table
-        # TODO: off_court_best_apm (best player NOT currently on court)
+        home_changed = state.home_lineup != state.prev_home_lineup
+        away_changed = state.away_lineup != state.prev_away_lineup
 
         return {
-            "home_lineup_net_rating":    home_net,
-            "away_lineup_net_rating":    away_net,
-            "lineup_net_rating_delta":   home_net - away_net,
-            "home_lineup_sample_size":   0.0,   # TODO
-            "away_lineup_sample_size":   0.0,   # TODO
-            "home_lineup_just_changed":  float(state.home_lineup != state.prev_home_lineup),
-            "away_lineup_just_changed":  float(state.away_lineup != state.prev_away_lineup),
+            "lineup_net_rating_delta": float(T.edge(home_net, away_net)),
+            "lineup_confidence":       float(T.lineup_confidence(home_samples, away_samples)),
+            "lineup_changed_edge":     float(T.edge(home_changed, away_changed)),
+            "lineup_changed_any":      float(T.any_flag(home_changed, away_changed)),
         }
 
     @staticmethod
     def _compute_derived(possession: "PossessionRow", state: "GameState") -> dict[str, float]:
         """
-        Minimal derived features from dataset.py _add_derived_features().
-        These don't fit neatly into the other groups.
+        Features that belong to no other group.
+
+        `home/away_back_to_back` are no longer model inputs — they were dropped from
+        PHYSICS_COLS in the consolidation — but they remain in GameState and are
+        still logged, so this hook stays for future additions.
         """
-        # back_to_back loaded once at game start
-        return {
-            "home_back_to_back": float(state.home_b2b),
-            "away_back_to_back": float(state.away_b2b),
-        }
+        return {}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _sign(x: float) -> float:
-    """Scalar np.sign equivalent. Avoids adding numpy to the inference dependency tree."""
-    if x > 0.0:
-        return 1.0
-    if x < 0.0:
-        return -1.0
-    return 0.0
-
 
 def _sum_points(recent: "deque", team: str, n: int) -> int:
     """Sum points scored by `team` in the last `n` possessions."""
@@ -280,18 +260,6 @@ def _mean_actual_ppp(scored_poss: "deque") -> float:
     if not scored_poss:
         return 0.0
     return sum(p.points for p in scored_poss) / len(scored_poss)
-
-
-def _is_sustainable(scored_poss: "deque") -> bool:
-    """Sustainable if majority of recent scoring came from 3pt or paint."""
-    if not scored_poss:
-        return False
-    paint_or_3 = sum(1 for p in scored_poss if p.was_paint or p.shot_value == 3)
-    return paint_or_3 / len(scored_poss) > 0.5
-
-
-def _encode_run_team(run_team: str) -> float:
-    return {"home": 1.0, "away": -1.0, "": 0.0}.get(run_team, 0.0)
 
 
 def _has_star(state: "GameState", team: str) -> bool:

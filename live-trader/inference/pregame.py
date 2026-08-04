@@ -54,6 +54,7 @@ async def load_pregame(
     """
     pregame_features: dict[str, float] = {}
     lineup_ratings: dict[str, float] = {}
+    lineup_sample_sizes: dict[str, float] = {}
     player_apm: dict[int, float] = {}
     b2b_data: dict[str, Any] = {
         "home_team_id": fallback_home_team_id,
@@ -66,7 +67,7 @@ async def load_pregame(
         conn = duckdb.connect(f"md:kalshi_trading?motherduck_token={_MOTHERDUCK_TOKEN}")
         try:
             pregame_features = _load_pregame_features(conn, game_id)
-            lineup_ratings   = _load_lineup_ratings(conn, game_id)
+            lineup_ratings, lineup_sample_sizes = _load_lineup_ratings(conn, game_id)
             player_apm       = _load_player_apm(conn, game_id)
             b2b_data         = _load_b2b_and_team_ids(conn, game_id)
         except ValueError as exc:
@@ -105,7 +106,8 @@ async def load_pregame(
 
     return {
         **pregame_features,
-        "lineup_ratings": lineup_ratings,
+        "lineup_ratings":      lineup_ratings,
+        "lineup_sample_sizes": lineup_sample_sizes,
         "player_apm":     player_apm,
         "star_players":   STAR_PLAYERS,
         "home_team_id":   b2b_data["home_team_id"],
@@ -143,10 +145,21 @@ def _load_pregame_features(conn: duckdb.DuckDBPyConnection, game_id: str) -> dic
     return result
 
 
-def _load_lineup_ratings(conn: duckdb.DuckDBPyConnection, game_id: str) -> dict[str, float]:
+def _load_lineup_ratings(
+    conn: duckdb.DuckDBPyConnection, game_id: str
+) -> tuple[dict[str, float], dict[str, float]]:
+    """
+    Load lineup net ratings and their sample sizes as-of this game.
+
+    `possessions_together` feeds `lineup_confidence`. It was previously not
+    selected, so live emitted a hardcoded 0.0 for both sample sizes while training
+    used the real counts.
+
+    Returns (net_rating_by_lineup, possessions_together_by_lineup).
+    """
     rows = conn.execute(
         """
-        SELECT lineup_id, net_rating
+        SELECT lineup_id, net_rating, possessions_together
         FROM features.lineup_ratings
         WHERE as_of_game_id = (
             SELECT MAX(as_of_game_id) FROM features.lineup_ratings
@@ -156,7 +169,14 @@ def _load_lineup_ratings(conn: duckdb.DuckDBPyConnection, game_id: str) -> dict[
         [game_id],
     ).fetchall()
 
-    return {str(lineup_id): float(net_rating) for lineup_id, net_rating in rows if net_rating is not None}
+    ratings: dict[str, float] = {}
+    samples: dict[str, float] = {}
+    for lineup_id, net_rating, possessions_together in rows:
+        if net_rating is None:
+            continue
+        ratings[str(lineup_id)] = float(net_rating)
+        samples[str(lineup_id)] = float(possessions_together or 0)
+    return ratings, samples
 
 
 def _load_player_apm(conn: duckdb.DuckDBPyConnection, game_id: str) -> dict[int, float]:

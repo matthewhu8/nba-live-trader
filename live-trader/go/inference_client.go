@@ -56,7 +56,13 @@ type InferenceConfig struct {
 }
 
 // PossessionResponse is returned by the Python inference service.
-// Python has already assembled the full 83-feature vector and run the model.
+// Python has already assembled the full 58-feature vector and run the model.
+//
+// Gate inputs vs model inputs: every value the agent gates on is a named field
+// here. Features is for LOGGING ONLY — never read a gate input out of it. Go
+// returns the zero value for a missing map key, so a feature rename or removal
+// turns a gate off silently. That is exactly how the physics consolidation
+// disabled the overtime skip and blocked every entry.
 type PossessionResponse struct {
 	Action      string    `json:"action"`       // "BUY_YES" | "BUY_NO" | "EXIT" | "WAIT"
 	RunProb     float32   `json:"run_prob"`
@@ -66,7 +72,10 @@ type PossessionResponse struct {
 	YesAsk      int       `json:"yes_ask"`
 	IsGarbageTime bool    `json:"is_garbage_time"`
 	IsBlowout   bool      `json:"is_blowout"`
-	Features    map[string]float32 `json:"features"` // full 83-feature dict for logging
+	// Gate inputs, captured pre-advance so they match the state the model saw.
+	IsOvertime       bool    `json:"is_overtime"`
+	CurrentRunLength float32 `json:"current_run_length"`
+	Features    map[string]float32 `json:"features"` // 58-feature dict, logging only
 	PipelineMS  int64     `json:"pipeline_ms"`
 }
 

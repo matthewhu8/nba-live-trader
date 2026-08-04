@@ -1,0 +1,552 @@
+<title>Feature Consolidation — 58 Physics Inputs → 33</title>
+<meta name="description" content="Structural flaws in the MMoE physics feature set, a consolidation proposal with concrete formulas, four measured train/live parity defects, and a three-batch sequencing plan.">
+<style>
+  :root{
+    --bg:#eef1f5; --surface:#ffffff; --ink:#141a24; --ink-dim:#57626f;
+    --rule:rgba(20,26,36,0.11); --accent:#b8490a; --accent-soft:#f2ddc8;
+    --good:#1f8f5f; --bad:#c23b3b; --warn:#8a6410;
+    --good-soft:rgba(31,143,95,0.12); --bad-soft:rgba(194,59,59,0.10);
+    --head-a:#b8490a; --head-a-soft:#f5e2d2;
+    --head-b:#2b608f; --head-b-soft:#dbe7f0;
+    --head-c:#6d4e9c; --head-c-soft:#e6dff2;
+    --zero-bg: rgba(87,98,111,0.06);
+    --shadow: 0 1px 2px rgba(20,26,36,0.06), 0 8px 24px rgba(20,26,36,0.05);
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#0c0f14; --surface:#131720; --ink:#e7ecf3; --ink-dim:#8b96a5;
+      --rule:rgba(255,255,255,0.09); --accent:#ff9d52; --accent-soft:rgba(255,157,82,0.14);
+      --good:#4ade9c; --bad:#ff6b6b; --warn:#e8b34a;
+      --good-soft:rgba(74,222,156,0.13); --bad-soft:rgba(255,107,107,0.12);
+      --head-a:#ff9d52; --head-a-soft:rgba(255,157,82,0.14);
+      --head-b:#6faee0; --head-b-soft:rgba(111,174,224,0.14);
+      --head-c:#b79eef; --head-c-soft:rgba(183,158,239,0.14);
+      --zero-bg: rgba(255,255,255,0.03);
+      --shadow: 0 1px 2px rgba(0,0,0,0.4), 0 8px 28px rgba(0,0,0,0.35);
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0c0f14; --surface:#131720; --ink:#e7ecf3; --ink-dim:#8b96a5;
+    --rule:rgba(255,255,255,0.09); --accent:#ff9d52; --accent-soft:rgba(255,157,82,0.14);
+    --good:#4ade9c; --bad:#ff6b6b; --warn:#e8b34a;
+    --good-soft:rgba(74,222,156,0.13); --bad-soft:rgba(255,107,107,0.12);
+    --head-a:#ff9d52; --head-a-soft:rgba(255,157,82,0.14);
+    --head-b:#6faee0; --head-b-soft:rgba(111,174,224,0.14);
+    --head-c:#b79eef; --head-c-soft:rgba(183,158,239,0.14);
+    --zero-bg: rgba(255,255,255,0.03);
+    --shadow: 0 1px 2px rgba(0,0,0,0.4), 0 8px 28px rgba(0,0,0,0.35);
+  }
+  :root[data-theme="light"]{
+    --bg:#eef1f5; --surface:#ffffff; --ink:#141a24; --ink-dim:#57626f;
+    --rule:rgba(20,26,36,0.11); --accent:#b8490a; --accent-soft:#f2ddc8;
+    --good:#1f8f5f; --bad:#c23b3b; --warn:#8a6410;
+    --good-soft:rgba(31,143,95,0.12); --bad-soft:rgba(194,59,59,0.10);
+    --head-a:#b8490a; --head-a-soft:#f5e2d2;
+    --head-b:#2b608f; --head-b-soft:#dbe7f0;
+    --head-c:#6d4e9c; --head-c-soft:#e6dff2;
+    --zero-bg: rgba(87,98,111,0.06);
+    --shadow: 0 1px 2px rgba(20,26,36,0.06), 0 8px 24px rgba(20,26,36,0.05);
+  }
+
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--bg); color:var(--ink);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    line-height:1.6; -webkit-font-smoothing:antialiased; overflow-x:hidden;
+  }
+  ::selection{ background:var(--accent-soft); }
+  .mono{ font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }
+  h1,h2,h3{ font-family: ui-serif, "Iowan Old Style", "Palatino Linotype", Georgia, serif; font-weight:600; text-wrap:balance; color:var(--ink); }
+  a{ color:var(--accent); }
+  .page{ max-width:900px; margin:0 auto; padding: 4rem 1.5rem 6rem; }
+
+  header.hero{ margin-bottom:2.6rem; padding-bottom:1.8rem; border-bottom:1px solid var(--rule); }
+  .eyebrow{ font-family: ui-monospace, monospace; font-size:0.78rem; letter-spacing:0.08em; text-transform:uppercase; color:var(--accent); margin:0 0 0.9rem; }
+  h1{ font-size:clamp(1.8rem, 4vw, 2.35rem); margin:0 0 0.6rem; letter-spacing:-0.01em; }
+  .subtitle{ color:var(--ink-dim); font-size:1.02rem; max-width:68ch; margin:0 0 1.3rem; }
+  .meta-row{ display:flex; flex-wrap:wrap; gap:0.5rem 1.4rem; font-size:0.83rem; color:var(--ink-dim); }
+  .meta-row strong{ color:var(--ink); font-weight:600; }
+
+  section{ margin-bottom:3rem; }
+  .section-label{ display:flex; align-items:baseline; gap:0.7rem; margin-bottom:1rem; flex-wrap:wrap; }
+  .section-label .num{ font-family: ui-monospace, monospace; font-size:0.78rem; color:var(--ink-dim); }
+  .section-label h2{ font-size:1.4rem; margin:0; min-width:0; }
+  h3{ font-size:1.02rem; margin:1.6rem 0 0.5rem; }
+  p{ margin:0.85rem 0; max-width:76ch; }
+  .lead{ color:var(--ink-dim); }
+
+  code{ font-family: ui-monospace, monospace; font-size:0.85em; background:var(--accent-soft); padding:0.05em 0.35em; border-radius:4px; word-break:break-word; }
+
+  .card{ background:var(--surface); border:1px solid var(--rule); border-radius:10px; padding:1.2rem 1.3rem; box-shadow:var(--shadow); margin:1.1rem 0; }
+  .card .label{ font-family: ui-monospace, monospace; font-size:0.72rem; letter-spacing:0.05em; text-transform:uppercase; color:var(--ink-dim); margin-bottom:0.7rem; }
+  .card.flaw{ border-left:3px solid var(--bad); }
+  .card.win{ border-left:3px solid var(--good); }
+  .card.accent{ border-left:3px solid var(--accent); }
+  .card.decided{ border-left:3px solid var(--head-b); }
+
+  .kpi-row{ display:grid; grid-template-columns:repeat(auto-fit, minmax(140px, 1fr)); gap:0.9rem; margin:1.4rem 0; }
+  .kpi{ background:var(--surface); border:1px solid var(--rule); border-radius:10px; padding:0.9rem 1rem; box-shadow:var(--shadow); min-width:0; }
+  .kpi .v{ font-family: ui-monospace, monospace; font-size:1.42rem; font-weight:600; letter-spacing:-0.02em; line-height:1.2; }
+  .kpi .k{ font-size:0.7rem; color:var(--ink-dim); margin-top:0.25rem; text-transform:uppercase; letter-spacing:0.04em; }
+  .kpi.bad .v{ color:var(--bad); } .kpi.good .v{ color:var(--good); } .kpi.acc .v{ color:var(--accent); }
+
+  .table-wrap{ overflow-x:auto; border:1px solid var(--rule); border-radius:10px; background:var(--surface); box-shadow:var(--shadow); margin:1rem 0; }
+  table{ border-collapse:collapse; width:100%; font-size:0.82rem; min-width:540px; }
+  table th, table td{ padding:0.5rem 0.75rem; text-align:right; border-bottom:1px solid var(--rule); vertical-align:top; }
+  table th:first-child, table td:first-child{ text-align:left; }
+  table th{ font-family: ui-monospace, monospace; font-size:0.66rem; letter-spacing:0.04em; text-transform:uppercase; color:var(--ink-dim); font-weight:600; position:sticky; top:0; background:var(--surface); z-index:1; }
+  table td{ font-family: ui-monospace, monospace; }
+  table td.txt{ font-family: ui-sans-serif, system-ui, sans-serif; font-size:0.78rem; text-align:left; white-space:normal; }
+  table tr:last-child td{ border-bottom:none; }
+  tr.hl{ background:var(--accent-soft); }
+  tr.dim{ color:var(--ink-dim); background:var(--zero-bg); }
+  .rowlabel{ font-family: ui-sans-serif, system-ui, sans-serif !important; font-weight:600; text-align:left !important; white-space:normal; }
+
+  .tag{ display:inline-block; font-size:0.64rem; padding:0.12rem 0.42rem; border-radius:4px; font-weight:600; font-family:ui-monospace,monospace; letter-spacing:0.03em; white-space:nowrap; }
+  .tag.drop{ background:var(--bad-soft); color:var(--bad); }
+  .tag.keep{ background:var(--good-soft); color:var(--good); }
+  .tag.new{ background:var(--accent-soft); color:var(--accent); }
+  .tag.fix{ background:var(--head-c-soft); color:var(--head-c); }
+  .tag.done{ background:var(--good-soft); color:var(--good); }
+
+  .split{ display:grid; grid-template-columns:repeat(auto-fit, minmax(0, 260px)); gap:1rem; margin:1.1rem 0; }
+  .split > *{ min-width:0; }
+
+  .formula{ font-family:ui-monospace,monospace; font-size:0.82rem; background:var(--zero-bg); border:1px solid var(--rule); border-radius:8px; padding:0.8rem 0.95rem; margin:0.7rem 0; overflow-x:auto; white-space:pre; line-height:1.65; }
+
+  ul,ol{ max-width:76ch; padding-left:1.3rem; }
+  li{ margin:0.4rem 0; }
+
+  .callout{ background:var(--accent-soft); border-radius:10px; padding:1rem 1.2rem; margin:1.2rem 0; border:1px solid var(--rule); }
+  .callout p{ margin:0.4rem 0; }
+  .callout .label{ font-family:ui-monospace,monospace; font-size:0.7rem; text-transform:uppercase; letter-spacing:0.06em; color:var(--accent); font-weight:700; margin-bottom:0.4rem; }
+
+  .batch{ background:var(--surface); border:1px solid var(--rule); border-radius:10px; padding:1.1rem 1.25rem; margin:0.9rem 0; box-shadow:var(--shadow); }
+  .batch.b1{ border-left:3px solid var(--bad); }
+  .batch.b2{ border-left:3px solid var(--accent); }
+  .batch.b3{ border-left:3px solid var(--head-b); }
+  .batch .bhead{ display:flex; align-items:baseline; gap:0.6rem; flex-wrap:wrap; margin-bottom:0.5rem; }
+  .batch .bnum{ font-family:ui-monospace,monospace; font-size:0.68rem; letter-spacing:0.06em; text-transform:uppercase; color:var(--ink-dim); }
+  .batch .btitle{ font-weight:700; font-size:1rem; min-width:0; }
+  .batch ul{ margin:0.5rem 0 0; }
+  .batch li{ font-size:0.86rem; }
+
+  .mermaid{ background:var(--surface); border:1px solid var(--rule); border-radius:10px; padding:1.1rem; margin:1.2rem 0; overflow-x:auto; box-shadow:var(--shadow); text-align:center; }
+
+  form.q{ background:var(--surface); border:1px solid var(--rule); border-left:3px solid var(--head-b); border-radius:10px; padding:1.1rem 1.25rem; margin:1rem 0; box-shadow:var(--shadow); }
+  form.q .qtitle{ font-weight:600; margin-bottom:0.3rem; }
+  form.q .qsub{ font-size:0.82rem; color:var(--ink-dim); margin-bottom:0.8rem; }
+  form.q label{ display:block; padding:0.55rem 0.7rem; border:1px solid var(--rule); border-radius:8px; margin-bottom:0.45rem; cursor:pointer; font-size:0.87rem; }
+  form.q label:hover{ background:var(--zero-bg); }
+  form.q label input{ margin-right:0.55rem; }
+  form.q label .hint{ display:block; font-size:0.76rem; color:var(--ink-dim); margin-left:1.5rem; margin-top:0.15rem; }
+  form.q button{ font-family:ui-monospace,monospace; font-size:0.78rem; font-weight:600; background:var(--accent); color:#fff; border:none; border-radius:7px; padding:0.5rem 1rem; cursor:pointer; margin-top:0.4rem; }
+  form.q button:hover{ opacity:0.88; }
+
+  .fn{ font-size:0.8rem; color:var(--ink-dim); border-top:1px solid var(--rule); padding-top:1rem; margin-top:2rem; }
+</style>
+
+<div class="page">
+
+<header class="hero">
+  <p class="eyebrow">MMoE · Feature Design Proposal · rev 2</p>
+  <h1>Consolidating the physics block: 58 inputs → 33</h1>
+  <p class="subtitle">
+    The feature set repeatedly splits <em>direction</em> and <em>magnitude</em> into separate columns and asks a 37K-parameter MLP to multiply them back together. Fixing that, plus four measured scale defects and four train/live parity bugs, matters more than the column count.
+  </p>
+  <div class="meta-row">
+    <span><strong>Scope</strong> models/mmoe/feature_config.py PHYSICS_COLS</span>
+    <span><strong>Model</strong> 3 experts × Linear(83→64), ~37K params</span>
+    <span><strong>Data</strong> 24K joint rows</span>
+    <span><strong>Status</strong> <span style="color:var(--good);font-weight:600">all three batches implemented, 56 tests passing</span></span>
+  </div>
+  <div class="callout" style="margin-top:1.4rem">
+    <div class="label">Implemented</div>
+    <p>All three batches are written and tested. <code>models/features/transforms.py</code> is the shared module; <code>tests/test_feature_parity.py</code> holds 24 tests including seven numeric offline-vs-live comparisons across regulation, the final minute and overtime.</p>
+    <p><strong>Two things turned up during implementation that were not in the plan:</strong> a fifth parity bug (the pace fallback at game start), and an existing test that was actively <em>enforcing</em> bug #3. Both are described below.</p>
+    <p><strong>Not done, and deliberately yours to trigger:</strong> the retrain. Every checkpoint in <code>models/saved/</code> was fitted on the old 83-column layout and is now rejected at load with an explicit message rather than a shape error.</p>
+  </div>
+</header>
+
+<section>
+  <div class="section-label"><span class="num">00</span><h2>The four findings, ranked</h2></div>
+  <p class="lead">
+    Consolidation is the fix for findings 1 and 2. Findings 3 and 4 are defects that need fixing whether or not we consolidate, and one of them is measured below as actively destroying a feature.
+  </p>
+
+  <div class="kpi-row">
+    <div class="kpi bad"><div class="v">z=+3.10</div><div class="k">Timeout sentinel</div></div>
+    <div class="kpi bad"><div class="v">0.24</div><div class="k">z-width of its real range</div></div>
+    <div class="kpi acc"><div class="v">7</div><div class="k">Exactly collinear cols</div></div>
+    <div class="kpi acc"><div class="v">5</div><div class="k">Sign/magnitude splits</div></div>
+    <div class="kpi bad"><div class="v">4</div><div class="k">Train/live parity bugs</div></div>
+  </div>
+
+  <div class="card flaw">
+    <div class="label">Finding 1 · Structural</div>
+    <p style="margin-top:0"><strong>Direction and magnitude live in different columns.</strong> An MLP learns sums easily and products badly. Every one of these asks it to learn a product from 24K rows:</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Direction column</th><th>Magnitude column(s)</th><th class="txt">What the net must learn</th></tr></thead>
+        <tbody>
+          <tr><td class="rowlabel">score_diff</td><td>comeback_probability_proxy, trailing_team_urgency</td><td class="txt">Both magnitudes are unsigned, so up-20 and down-20 are identical inputs</td></tr>
+          <tr><td class="rowlabel">current_run_team_encoded</td><td>current_run_length, current_run_points</td><td class="txt">Who is on the run × how big the run is</td></tr>
+          <tr><td class="rowlabel">— (two levels)</td><td>home/away_points_last_5, home/away_points_last_10</td><td class="txt">Must subtract to get the swing that actually moves price</td></tr>
+          <tr><td class="rowlabel">— (two levels)</td><td>home/away_xPPP_last_5, home/away_actual_vs_expected_PPP</td><td class="txt">Same: only the differential is directional</td></tr>
+          <tr class="hl"><td class="rowlabel">already correct ✓</td><td>lineup_net_rating_delta</td><td class="txt"><code>lineup_features.py:76</code> already does home − away. The pattern exists; it just is not applied consistently.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>Head B is the directional head (61.1% dir acc) and is the one paying for this.</p>
+  </div>
+
+  <div class="card flaw">
+    <div class="label">Finding 2 · Rank deficiency</div>
+    <p style="margin-top:0"><strong>Seven columns are exact algebraic functions of other columns.</strong> They add zero information and consume first-layer parameters.</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Redundant column</th><th class="txt">Is exactly</th><th>Source</th></tr></thead>
+        <tbody>
+          <tr><td class="rowlabel">home_lineup_net_rating<br>away_lineup_net_rating</td><td class="txt">The two operands of <code>lineup_net_rating_delta</code>. All three are fed; the trio is rank-2, not rank-3.</td><td>lineup_features.py:76</td></tr>
+          <tr><td class="rowlabel">home_in_bonus<br>away_in_bonus</td><td class="txt"><code>fouls_until_bonus == 0</code></td><td>dataset.py:151</td></tr>
+          <tr><td class="rowlabel">home_fouls_until_bonus<br>away_fouls_until_bonus</td><td class="txt"><code>clip(5 − team_fouls_q, 0)</code> — piecewise-linear in a column already fed</td><td>dataset.py:151-152</td></tr>
+          <tr><td class="rowlabel">was_foul</td><td class="txt"><code>had_shooting_foul OR had_personal_foul</code></td><td>feature_config.py:57-59</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>Team-quarter fouls occupy <strong>six columns carrying two degrees of freedom</strong>.</p>
+  </div>
+
+  <div class="card flaw">
+    <div class="label">Finding 3 · Measured · Worst of the four</div>
+    <p style="margin-top:0"><strong><code>possessions_since_last_timeout</code> is effectively a broken binary flag.</strong> It uses <code>999</code> as a "no timeout yet" sentinel (<code>live-trader/inference/features.py:314</code>), and <code>dataset.py:471</code> z-scores every column with StandardScaler without clipping it.</p>
+    <p>Measured on the real feature store (192,863 rows):</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Quantity</th><th>Value</th><th class="txt">Consequence</th></tr></thead>
+        <tbody>
+          <tr><td class="rowlabel">Rows holding the sentinel</td><td>9.42%</td><td class="txt">Every possession before a game's first timeout</td></tr>
+          <tr><td class="rowlabel">Column mean / std</td><td>105.0 / 288.4</td><td class="txt">Both dominated by the sentinel, not the data</td></tr>
+          <tr><td class="rowlabel">Real value range</td><td>0 → 70</td><td class="txt">The actual signal</td></tr>
+          <tr class="hl"><td class="rowlabel">z of real range</td><td>−0.364 → −0.122</td><td class="txt">The entire real range is squeezed into a band <strong>0.24 z wide</strong></td></tr>
+          <tr class="hl"><td class="rowlabel">z of sentinel</td><td>+3.100</td><td class="txt">Sits <strong>3.46 z</strong> away — a gap 14× wider than the whole real range</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>The model can resolve "has a timeout happened yet" perfectly and "how long ago" essentially not at all. The possession count, which is the thing we wanted, is gone.</p>
+  </div>
+
+  <div class="card flaw">
+    <div class="label">Finding 4 · Quantization, and a name that caused a bug</div>
+    <p style="margin-top:0"><strong>Magnitude thrown away by <code>np.sign()</code>.</strong> <code>momentum_features.py:222-223</code>:</p>
+    <div class="formula">df["home_shot_quality_trend"] = np.sign(home_xppp_last5 - home_xppp_prev5)</div>
+    <p>A shot-quality collapse and an imperceptible drift produce the identical input <code>+1</code> or <code>−1</code>. <code>scoring_sustainable</code> (line 188) has the same shape: a boolean threshold at 0.5 of a rolling mean. Keep the raw difference and let the net set its own threshold.</p>
+    <p><strong>The misnamed column in this group turned out to cause parity bug #4.</strong> <code>pace_season_baseline</code> is not a season baseline — <code>momentum_features.py:159</code> computes it as an <em>expanding within-game mean</em>. The live path implemented the name instead of the behavior. Full detail in section 05.</p>
+  </div>
+</section>
+
+<section>
+  <div class="section-label"><span class="num">01</span><h2>Time scaling: use √ remaining, not linear elapsed</h2></div>
+  <p>
+    Your instinct is right and there is a principled form for it rather than an arbitrary exponential. If in-game scoring is approximately a random walk, the standard deviation of the <em>remaining</em> margin swing scales with <code>√m</code> (minutes remaining). So a lead of <code>d</code> is worth:
+  </p>
+  <div class="formula">lead_z = score_diff / sqrt(max(m, 0.5))     # signed, in units of "remaining randomness"</div>
+  <p>
+    This is the standard win-probability construction. It keeps the sign, amplifies late (exactly your 40→45 vs 10→15 point), and subsumes three existing columns at once.
+  </p>
+
+  <h3>Why it separates cases the current features cannot</h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Situation</th><th>m</th><th>d</th><th>d/m<br><span style="font-weight:400;text-transform:none">urgency</span></th><th>d²/m<br><span style="font-weight:400;text-transform:none">comeback proxy</span></th><th>d/√m<br><span style="font-weight:400;text-transform:none">proposed</span></th></tr></thead>
+      <tbody>
+        <tr><td class="rowlabel">Q1, up 6</td><td>40</td><td>+6</td><td>0.15</td><td>0.90</td><td>+0.95</td></tr>
+        <tr><td class="rowlabel">Q2, up 6</td><td>28</td><td>+6</td><td>0.21</td><td>1.29</td><td>+1.13</td></tr>
+        <tr><td class="rowlabel">Q3, up 6</td><td>16</td><td>+6</td><td>0.38</td><td>2.25</td><td>+1.50</td></tr>
+        <tr><td class="rowlabel">Q4 6:00, up 6</td><td>6</td><td>+6</td><td>1.00</td><td>6.00</td><td>+2.45</td></tr>
+        <tr class="hl"><td class="rowlabel">Q4 1:00, up 6</td><td>1</td><td>+6</td><td>6.00</td><td>36.0</td><td>+6.00</td></tr>
+        <tr class="hl"><td class="rowlabel">Q4 1:00, <em>down</em> 6</td><td>1</td><td>−6</td><td>6.00</td><td>36.0</td><td><strong>−6.00</strong></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>The last two rows are your original objection, quantified: both current features are <em>numerically identical</em> for winning by 6 and losing by 6 with a minute left. These are opposite trades.</p>
+
+  <h3>A separate nonlinear clock</h3>
+  <p>Score-independent time pressure still deserves its own column, on the same √ scale:</p>
+  <div class="formula">time_leverage = 1 - sqrt(m / 48)     # 0.0 at tip-off → 1.0 at the buzzer</div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Five minutes of game time</th><th>Linear <code>minutes_into_game/48</code></th><th>Proposed <code>time_leverage</code></th></tr></thead>
+      <tbody>
+        <tr><td class="rowlabel">10 → 15 min elapsed</td><td>Δ 0.104</td><td>Δ 0.061</td></tr>
+        <tr class="hl"><td class="rowlabel">40 → 45 min elapsed</td><td>Δ 0.104</td><td>Δ 0.158</td></tr>
+        <tr class="dim"><td class="rowlabel">resolution ratio</td><td>1.0×</td><td><strong>2.6×</strong></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Same five minutes of clock, 2.6× the input resolution when it is three minutes left instead of eight. That is the property you asked for, and <code>q4_close_game</code> becomes redundant: "close game, late" is just small <code>|lead_z|</code> with high <code>time_leverage</code>, expressed continuously instead of as a hard conjunction at one threshold.</p>
+
+  <div class="callout">
+    <div class="label">Net effect on this block</div>
+    <p><strong>7 columns → 4.</strong> <code>score_diff</code>, <code>lead_z</code>, <code>time_leverage</code>, <code>garbage_time_risk</code>. Dropped: <code>period</code> (recoverable from time_leverage), <code>minutes_into_game</code>, <code>trailing_team_urgency</code>, <code>comeback_probability_proxy</code>, <code>q4_close_game</code>.</p>
+  </div>
+</section>
+
+<section>
+  <div class="section-label"><span class="num">02</span><h2>The other seven groups</h2></div>
+  <p class="lead">Same two moves throughout: fold direction into magnitude, and decorrelate nested windows by expressing the second one as a difference from the first.</p>
+
+  <h3>Runs · 5 → 3</h3>
+  <div class="formula">run_signed_points = sign(run_team) * current_run_points     # direction folded in
+run_efficiency    = current_run_points / max(current_run_length, 1)
+run_fragility     = current_run_3pt_pct - current_run_paint_pct  # + = jumper-driven = reverts</div>
+  <p><code>run_length</code> and <code>run_points</code> correlate heavily (a k-possession run is roughly 2.3k points), so feeding both raw is mostly duplicated variance; the ratio is the orthogonal part. <code>run_fragility</code> encodes the finding already in the memory notes that 3pt-heavy runs revert.</p>
+
+  <h3>Recent scoring · 4 → 2</h3>
+  <div class="formula">swing_5     = home_points_last_5  - away_points_last_5
+swing_accel = swing_5 - (swing_10 - swing_5)   # recent half vs prior half</div>
+  <p>The 5 and 10 windows are nested and correlate ~0.7. Expressing the second as an acceleration decorrelates them instead of feeding the same trend twice.</p>
+
+  <h3>Shot quality · 8 → 3</h3>
+  <div class="formula">xppp_edge          = home_xPPP_last_5 - away_xPPP_last_5
+luck_edge          = home_actual_vs_expected_PPP - away_actual_vs_expected_PPP
+quality_trend_edge = (home_xppp_5 - home_xppp_prev5) - (away_xppp_5 - away_xppp_prev5)   # RAW, not sign()</div>
+  <p><code>luck_edge</code> is the highest-value feature in this whole proposal and the closest to the core thesis: a team scoring above its shot quality is due to regress, and the market is watching the scoreboard rather than the shot chart. Drop <code>scoring_sustainable</code> entirely — it is a thresholded copy of the same rolling xPPP.</p>
+
+  <h3>Pace · 2 → 2, restructured <span class="tag done">DATA ALREADY EXISTS</span></h3>
+  <p>Your shrinkage idea, with the plateau you specified:</p>
+  <div class="formula">w             = min(0.85, elapsed_poss / (elapsed_poss + 40))
+pace_ref      = w * pace_game_to_date + (1 - w) * expected_pace
+pace_surprise = pace_last_10 - pace_ref</div>
+  <ul>
+    <li>Early: <code>w</code> is small, the prior dominates — correct, the in-game sample is tiny.</li>
+    <li>At 40 elapsed possessions: <code>w = 0.5</code>, an even blend.</li>
+    <li>Late: <code>w</code> ceilings at <strong>0.85</strong>, never 1.0 — the prior keeps a floor of influence, exactly as you described.</li>
+  </ul>
+  <div class="callout">
+    <div class="label">Decision 2 resolved at zero cost</div>
+    <p>You asked for a real per-team season pace prior. <strong>It already exists and is already wired into both paths.</strong> <code>expected_pace</code> (<code>feature_config.py:91</code>) is built in <code>pregame_features.py:207</code> as the mean of the two teams' <code>avg_secs_per_poss</code> from <code>features.team_ratings</code>.</p>
+    <p><strong>It is already lookahead-safe.</strong> The query filters <code>WHERE g.game_date &lt; game_date ORDER BY g.game_date DESC LIMIT 1</code> (<code>pregame_features.py:186-188</code>) — strictly prior games, as-of the game being predicted. No new ingestion, no new audit surface.</p>
+    <p>Better still: this formula <em>structurally fixes parity bug #4</em>, because it names both the within-game mean and the pregame prior explicitly with a defined weight. Today one path uses one and the other path uses the other.</p>
+  </div>
+
+  <h3>Foul and bonus state · 12 → 5</h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Proposed</th><th class="txt">Replaces</th><th>Status</th></tr></thead>
+      <tbody>
+        <tr><td class="rowlabel">team_foul_edge</td><td class="txt">home/away_team_fouls_q</td><td><span class="tag new">FOLD</span></td></tr>
+        <tr><td class="rowlabel">home_fouls_until_bonus<br>away_fouls_until_bonus</td><td class="txt">kept unfolded — the gate at 0 is nonlinear and asymmetric (being in the bonus helps the <em>opponent</em>)</td><td><span class="tag keep">KEEP</span></td></tr>
+        <tr><td class="rowlabel">star_trouble_edge</td><td class="txt">home/away_star_in_foul_trouble</td><td><span class="tag new">FOLD</span></td></tr>
+        <tr><td class="rowlabel">star_on_court_edge</td><td class="txt">home/away_star_on_court</td><td><span class="tag new">FOLD</span></td></tr>
+        <tr class="dim"><td class="rowlabel">—</td><td class="txt">home/away_in_bonus, home/away_cum_fouls</td><td><span class="tag drop">DROP</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Event context · 6 → 4</h3>
+  <p>Drop <code>was_foul</code> (the OR of two columns already present). Keep <code>was_sub</code>, <code>had_shooting_foul</code>, <code>had_personal_foul</code>, and fold sub counts to <code>sub_count_edge</code>.</p>
+
+  <h3>Timeouts · 5 → 4 <span class="tag fix">CONTAINS THE FINDING-3 FIX</span></h3>
+  <div class="formula">poss_since_timeout = min(possessions_since_last_timeout, 30)   # bounded — kills the 999
+no_timeout_yet     = 1.0 if sentinel else 0.0                  # recovers what the sentinel encoded
+timeout_called_edge     = home_called_last3 - away_called_last3
+timeouts_remaining_edge = home_remaining - away_remaining</div>
+  <p>Splitting the sentinel into a bounded count plus an explicit flag recovers both signals. Today they are entangled and the count loses.</p>
+
+  <h3>Lineup · 7 → 4</h3>
+  <p>Keep <code>lineup_net_rating_delta</code>, drop the two components it is a linear combination of. Collapse the two sample sizes into one log-scaled <code>lineup_confidence = log1p(min(home_n, away_n))</code>, and the two change flags into <code>lineup_changed_edge</code> plus <code>lineup_changed_any</code>.</p>
+</section>
+
+<section>
+  <div class="section-label"><span class="num">03</span><h2>Where it lands</h2></div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Group</th><th>Now</th><th>Proposed</th><th>Δ</th><th class="txt">Primary reason</th></tr></thead>
+      <tbody>
+        <tr><td class="rowlabel">Score × time</td><td>7</td><td>4</td><td style="color:var(--good)">−3</td><td class="txt">√-scaled signed leverage subsumes three</td></tr>
+        <tr><td class="rowlabel">Shot info</td><td>2</td><td>2</td><td class="dim">0</td><td class="txt">unchanged</td></tr>
+        <tr><td class="rowlabel">Runs</td><td>5</td><td>3</td><td style="color:var(--good)">−2</td><td class="txt">sign folded; length/points decorrelated</td></tr>
+        <tr><td class="rowlabel">Recent scoring</td><td>4</td><td>2</td><td style="color:var(--good)">−2</td><td class="txt">levels → swing + acceleration</td></tr>
+        <tr><td class="rowlabel">Pace</td><td>2</td><td>2</td><td class="dim">0</td><td class="txt">shrinkage blend toward existing expected_pace</td></tr>
+        <tr class="hl"><td class="rowlabel">Shot quality</td><td>8</td><td>3</td><td style="color:var(--good)">−5</td><td class="txt">four home/away pairs → three edges</td></tr>
+        <tr class="hl"><td class="rowlabel">Foul state</td><td>12</td><td>5</td><td style="color:var(--good)">−7</td><td class="txt">6 columns held 2 DOF</td></tr>
+        <tr><td class="rowlabel">Event context</td><td>6</td><td>4</td><td style="color:var(--good)">−2</td><td class="txt">drop the OR, fold sub counts</td></tr>
+        <tr><td class="rowlabel">Timeouts</td><td>5</td><td>4</td><td style="color:var(--good)">−1</td><td class="txt">sentinel split into count + flag</td></tr>
+        <tr><td class="rowlabel">Lineup</td><td>7</td><td>4</td><td style="color:var(--good)">−3</td><td class="txt">drop delta's own operands</td></tr>
+        <tr style="border-top:2px solid var(--rule);font-weight:700"><td class="rowlabel">PHYSICS</td><td>58</td><td>33</td><td style="color:var(--good)">−25</td><td class="txt">−43%</td></tr>
+        <tr class="dim"><td class="rowlabel">+ pregame, + market</td><td>83</td><td>58</td><td>−25</td><td class="txt">total model input</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout">
+    <div class="label">Honest accounting</div>
+    <p>First-layer parameters drop from <strong>16,683</strong> to <strong>11,658</strong> — about 13.5% of the 37K model. That is real but modest, and it is <em>not</em> the main argument.</p>
+    <p>The main argument is conditioning: removing four exactly-collinear relationships, recovering sign on five directional quantities, and repairing two scale defects that are currently destroying features outright. Fewer columns is a side effect, not the goal.</p>
+  </div>
+</section>
+
+<section>
+  <div class="section-label"><span class="num">04</span><h2>Decision: hybrid, built now</h2></div>
+  <div class="card decided">
+    <div class="label">Decided · Option C</div>
+    <p style="margin-top:0"><strong>Fixed formulas for the physics groups; a learned bottleneck for the 14 market columns; both in this pass.</strong></p>
+  </div>
+  <p>
+    Concretely, that means the 33 physics features are computed as closed-form numpy in the feature pipeline exactly as specified above, while the market block keeps all 14 raw columns and gains a small trainable encoder in front of the experts:
+  </p>
+  <div class="formula">market_encoder = nn.Linear(14, 4)     # ~60 params, trained end-to-end
+x = concat([physics_33, pregame_11, market_encoder(market_14)])   # 48-dim expert input</div>
+  <p>
+    The reasoning holds up: you have strong domain priors about basketball physics (a lead is signed, home minus away is the directional quantity, jumper-heavy runs revert) and essentially none about how <code>yes_bid</code>, <code>spread</code>, <code>open_interest</code>, and <code>bid_velocity_30s</code> should combine. Spend parameters where the prior is weak, spend formulas where it is strong.
+  </p>
+  <div class="callout">
+    <div class="label">One refinement worth taking</div>
+    <p>Building C now costs the clean physics-only baseline, which means a metric move in the final batch cannot be attributed between "the physics consolidation worked" and "the market encoder worked."</p>
+    <p><strong>That attribution is recoverable for one extra retrain:</strong> land the physics consolidation as batch 3, then the market encoder as batch 4. Same destination, same code, one more training run, and you learn which half paid. Recommended, but it is your call and the sequencing below shows both.</p>
+  </div>
+</section>
+
+<section>
+  <div class="section-label"><span class="num">05</span><h2>The prerequisite: one shared transform module</h2></div>
+  <p>
+    Every feature exists twice: offline in <code>models/features/*.py</code> (pandas, whole-game, vectorized) and online in <code>live-trader/inference/features.py</code> (streaming, per-possession). We have now found <strong>four</strong> parity bugs across two small blocks. <strong>Consolidating into richer derived features multiplies that risk unless the derivation itself is shared.</strong>
+  </p>
+
+  <div class="mermaid">
+flowchart TB
+  RS["Raw game state"] --> OFF["Offline builder<br/>pandas, whole game"]
+  RS --> ON["Live inference<br/>streaming, per-possession"]
+  OFF --> T["models/features/transforms.py<br/>pure numpy ufuncs<br/>lead_z · time_leverage · run_signed · pace_ref"]
+  ON --> T
+  T --> P["33 physics features"]
+  P --> E["3 experts, 3 gates, heads A/B/C"]
+  T -.->|"parity asserted to 1e-6"| PT["parity test"]
+  style T fill:#f2ddc8,stroke:#b8490a,stroke-width:2px,color:#141a24
+  style PT fill:#dbe7f0,stroke:#2b608f,color:#141a24
+  </div>
+
+  <p>
+    Because the transforms are pure numpy, the same function serves both callers: arrays offline, scalars online. Add a parity test that pushes identical raw state through both paths and asserts agreement to 1e-6. <strong>That test would have caught all four bugs below.</strong>
+  </p>
+
+  <h3>The five parity defects</h3>
+  <p class="lead" style="font-size:0.86rem">
+    Bug 5 was found by the numeric parity test itself, after the other four were fixed — which is the argument for the test in one line.
+  </p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>#</th><th>Column</th><th class="txt">Offline (training)</th><th class="txt">Online (live)</th><th class="txt">Divergence</th></tr></thead>
+      <tbody>
+        <tr><td class="rowlabel">1</td><td class="rowlabel">minutes_remaining floor</td><td class="txt">clipped at <code>1.0</code></td><td class="txt">clipped at <code>0.1</code></td><td class="txt">up to <strong>10×</strong> in the final minute of Q4</td></tr>
+        <tr><td class="rowlabel">2</td><td class="rowlabel">minutes_remaining in OT</td><td class="txt"><code>clock/60</code>, floored at 1.0</td><td class="txt"><code>48 − elapsed</code> goes negative, pins to <code>0.1</code></td><td class="txt"><strong>~50×</strong>, constant, every OT possession</td></tr>
+        <tr><td class="rowlabel">3</td><td class="rowlabel">garbage_time_risk</td><td class="txt">continuous sigmoid, nonzero from Q1</td><td class="txt">hard binary, requires Q4 and clock &lt; 360</td><td class="txt">25-pt Q2 lead: <strong>0.33 vs 0.00</strong></td></tr>
+        <tr class="hl"><td class="rowlabel">4</td><td class="rowlabel">pace_season_baseline</td><td class="txt">expanding <em>within-game</em> mean, evolves each possession<br><code>momentum_features.py:159</code></td><td class="txt">fixed <em>pregame</em> constant for the whole game<br><code>features.py:121</code> ← <code>main.py:298</code> ← <code>pregame.py:95</code></td><td class="txt"><strong>different quantity entirely</strong>, not a numeric offset</td></tr>
+        <tr class="hl"><td class="rowlabel">5</td><td class="rowlabel">pace_last_10_possessions<br><span style="font-weight:400;font-size:0.72rem">found by the parity test</span></td><td class="txt">empty window resolves via <code>.fillna(15.0)</code></td><td class="txt">empty deque fell back to <code>state.pace_baseline</code> — the pregame constant again</td><td class="txt">disagreed on <strong>every possession before the first measurable duration</strong>, i.e. the start of every game</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    Bug 4 is the instructive one. The column is named <code>pace_season_baseline</code> but computes a within-game mean, and <code>game_state.py:143</code> annotates the live field as <code>"season avg seconds/possession"</code>. Whoever wrote the live path implemented the <em>name</em> rather than the <em>behavior</em>. <strong>A misleading feature name produced a silent train/live divergence</strong> — which is the concrete cost of the naming problem flagged in Finding 4.
+  </p>
+</section>
+
+<section>
+  <div class="section-label"><span class="num">06</span><h2>Sequencing: three batches</h2></div>
+  <p class="lead">Per your decision. All three are now <strong style="color:var(--good)">written and tested</strong>; the retrains are the remaining step and are yours to run.</p>
+  <div class="callout">
+    <div class="label">A test was enforcing bug #3</div>
+    <p><code>tests/test_garbage_gate.py::test_model_feature_constants_frozen</code> asserted <code>_TRAIN_BLOWOUT_MARGIN_PTS == 30</code> and called those values "the training definition". They never were — training used a sigmoid centred on a 15-point margin. The test was pinning the divergence in place and would have blocked the fix.</p>
+    <p>It now asserts the opposite: that the live module carries <em>no</em> local copy of those constants, and that the model input is continuous and monotone in margin.</p>
+  </div>
+
+  <div class="batch b1">
+    <div class="bhead"><span class="bnum">Batch 1</span><span class="btitle">Correctness — no retrain, no feature changes</span></div>
+    <ul>
+      <li>Fix all <strong>four parity bugs</strong>. Live is wrong and training is right in every case; this is a live-only fix.</li>
+      <li>Extract <code>models/features/transforms.py</code> and route both paths through it. No behavior change.</li>
+      <li>Add the parity test asserting offline == online to 1e-6.</li>
+      <li>Confirm the feature store rebuilds bit-identical.</li>
+    </ul>
+    <p style="font-size:0.84rem;color:var(--ink-dim);margin-bottom:0"><strong>Gate:</strong> nothing below starts until the parity test is green.</p>
+  </div>
+
+  <div class="batch b2">
+    <div class="bhead"><span class="bnum">Batch 2</span><span class="btitle">Scale defects + collinearity drops — one retrain</span></div>
+    <ul>
+      <li><code>999</code> sentinel → bounded <code>min(x, 30)</code> plus explicit <code>no_timeout_yet</code> flag.</li>
+      <li><code>np.sign()</code> → raw difference on <code>shot_quality_trend</code>; drop <code>scoring_sustainable</code>.</li>
+      <li>Drop the seven exactly-collinear columns.</li>
+      <li>Rename <code>pace_season_baseline</code> → <code>pace_game_to_date</code>.</li>
+    </ul>
+    <p style="font-size:0.84rem;color:var(--ink-dim);margin-bottom:0"><strong>Expectation:</strong> the collinearity drops are lossless by construction. Any degradation means the collinearity analysis is wrong and batch 3 is suspect.</p>
+  </div>
+
+  <div class="batch b3">
+    <div class="bhead"><span class="bnum">Batch 3</span><span class="btitle">All sign-folding + consolidation + market encoder — one retrain</span></div>
+    <ul>
+      <li>All seven consolidation groups at once: 58 → 33 physics.</li>
+      <li><code>lead_z</code>, <code>time_leverage</code>, pace shrinkage toward <code>expected_pace</code>.</li>
+      <li>Market encoder <code>nn.Linear(14, 4)</code> in front of the experts.</li>
+    </ul>
+    <p style="font-size:0.84rem;color:var(--ink-dim);margin-bottom:0"><strong>Optional split (recommended):</strong> hold the market encoder back as batch 4. One extra retrain buys you the physics-vs-market attribution you otherwise lose here.</p>
+  </div>
+
+  <div class="card flaw">
+    <div class="label">Risks</div>
+    <ul style="margin-bottom:0">
+      <li><strong>The current backtest is invalidated.</strong> 207 trades / 47.8% win rate / +$37,409 was measured on the current feature set. All of it must be re-validated before this touches paper trading, let alone real money.</li>
+      <li><strong>The 2024-25 test set stays sacred.</strong> Every decision above comes off validation only.</li>
+      <li><strong>Judge per head, not on aggregate.</strong> Sign folding should help Head B (directional, 61.1%) most. Heads A and C may not move, and an aggregate metric would hide that.</li>
+      <li><strong>Batch 3 is the attribution risk you accepted.</strong> Seven groups plus an architecture change in one retrain. If it degrades, the only way back is to bisect, which costs more than the batches you saved.</li>
+      <li><strong>Bug 4 means live pace behavior has never matched training.</strong> Any historical live or paper result that depended on pace features was produced by a model reading a constant where it was trained on a curve.</li>
+    </ul>
+  </div>
+</section>
+
+<section>
+  <div class="section-label"><span class="num">07</span><h2>Decisions on record</h2></div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Question</th><th class="txt">Decision</th><th class="txt">Note</th></tr></thead>
+      <tbody>
+        <tr><td class="rowlabel">Architecture</td><td class="txt"><strong>C — hybrid, built now.</strong> Fixed physics formulas + learned market encoder.</td><td class="txt">Overrides the A-then-C recommendation. Cost is the clean baseline; see the refinement in section 04.</td></tr>
+        <tr><td class="rowlabel">Pace prior</td><td class="txt"><strong>Real per-team season prior.</strong></td><td class="txt">Already satisfied by <code>expected_pace</code> at zero cost, and already lookahead-safe.</td></tr>
+        <tr><td class="rowlabel">Ablation</td><td class="txt"><strong>Three batches.</strong></td><td class="txt">Implemented in section 06.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <form class="q" data-lavish-question="market_split" onsubmit="event.preventDefault(); const v=new FormData(event.currentTarget).get('ms'); if(v) window.lavish.queuePrompt('Market encoder sequencing: '+v, {tag:'decision', text:'Market encoder: '+v, element:event.currentTarget, data:{question:'market_encoder_split', answer:v}});">
+    <div class="qtitle">Only open question: hold the market encoder back as batch 4?</div>
+    <div class="qsub">One extra retrain recovers the physics-vs-market attribution that batch 3 otherwise merges.</div>
+    <label><input type="radio" name="ms" value="Yes — market encoder becomes batch 4 (recommended)"> Yes, make it batch 4 <span class="hint">One more training run; you learn which half of the change paid.</span></label>
+    <label><input type="radio" name="ms" value="No — keep the market encoder inside batch 3"> No, keep it in batch 3 <span class="hint">Fastest to the destination; the two effects stay merged.</span></label>
+    <button type="submit">Queue this answer</button>
+  </form>
+</section>
+
+<p class="fn">
+  Every claim above is cited to a file and line, or measured directly. The timeout-sentinel figures come from <code>data/feature_store/feature_rows.parquet</code>, 192,863 rows; the post-fix z-span was measured on all 400,548 rows of <code>features.possession_flat</code> and widened from 0.24 to 2.94. All three batches are implemented and <code>./venv/bin/python -m pytest tests/</code> reports 56 passed, 2 skipped. The retrain has not been run.
+</p>
+
+</div>
+
+<script type="module">
+  import mermaid from "https://esm.sh/mermaid@11/dist/mermaid.esm.mjs";
+  const dark = matchMedia("(prefers-color-scheme: dark)").matches
+    || document.documentElement.getAttribute("data-theme") === "dark";
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: "base",
+    themeVariables: dark
+      ? { primaryColor:"#131720", primaryTextColor:"#e7ecf3", primaryBorderColor:"#8b96a5",
+          lineColor:"#8b96a5", secondaryColor:"#1a1f2b", tertiaryColor:"#1a1f2b",
+          fontFamily:"ui-sans-serif, system-ui, sans-serif", fontSize:"13px" }
+      : { primaryColor:"#ffffff", primaryTextColor:"#141a24", primaryBorderColor:"#57626f",
+          lineColor:"#57626f", secondaryColor:"#f4f6f9", tertiaryColor:"#f4f6f9",
+          fontFamily:"ui-sans-serif, system-ui, sans-serif", fontSize:"13px" }
+  });
+</script>

@@ -417,8 +417,11 @@ def _run_game(
         if use_traj_for_side:
             entry_side = 1 if traj_used >= 0 else -1
         else:
-            run_team_encoded = fd.get("current_run_team_encoded", 0.0)
-            entry_side = 1 if run_team_encoded >= 0 else -1
+            # run_signed_points carries the run direction in its sign (it is
+            # encoded_team * points, and points is non-negative), so this is
+            # equivalent to the old current_run_team_encoded test.
+            run_signed = fd.get("run_signed_points", 0.0)
+            entry_side = 1 if run_signed >= 0 else -1
 
         # Simulate exit from the moment the position can actually exist.
         #
@@ -562,8 +565,10 @@ def run_backtest(
     all_poss, all_ticks, pregame = _load_data()
 
     # Derive features and join pregame
-    all_poss = _add_derived_features(all_poss)
+    # Order matters: _add_derived_features needs `expected_pace` (for pace_ref), which
+    # _join_pregame supplies. dataset.py:276 raises if called the other way round.
     all_poss = _join_pregame(all_poss, pregame)
+    all_poss = _add_derived_features(all_poss)
 
     # Assign game_id to ticks via ticker → game lookup
     all_ticks = _select_home_best_contract(all_ticks, all_poss)

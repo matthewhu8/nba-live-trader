@@ -79,6 +79,21 @@ Consequences, in order of severity:
 3. The warehouse has these populated (`sub_count_edge` has train std 0.48), so the **cache is
    the broken artefact**, not the source.
 
+Measured against the 58-feature config on this cache (2026-08-03), 7 of the 44 non-market
+features are dead — 37 vary normally:
+
+```
+was_sub              all-NaN
+had_shooting_foul    constant 0      had_personal_foul    constant 0
+sub_count_edge       constant 0      roster_rapm_gap      constant 0
+missing_rapm_impact  constant 0      rest_advantage       constant 0
+```
+
+Note `pace_ref`, `poss_since_timeout`, `no_timeout_yet`, `team_foul_edge` and
+`timeout_called_edge` DO vary on this cache, so they are safe. The dead set is smaller than
+feared — but a backtest on this cache is still feeding the model seven constants it saw
+varying in training, so treat any P&L from it as provisional until the cache is re-exported.
+
 ## The cache's tick window sits outside the scaler's era
 
 `feature_config.py:96` documents market coverage as Mar 23 – Apr 12 2026. The local
@@ -104,6 +119,16 @@ zeros come from two independent failures:
 Two documented attempts to fix this — `bdf3a1c` (phase reorder) and `7b6b39f`
 (`_run_pregame_prefill_sync`) — both failed. Neither the missing-row nor the swallowed-error
 path is fixed as of 2026-08-03.
+
+## Known remaining bias — deliberately unfixed
+
+`models/targets/exit_simulator.py` evaluates momentum-flip and garbage-time exits at each
+possession's `wall_clock_ts` with **no feed delay**, so those exits fire ~20s earlier than a
+live trader could act. 27.5% of corrected exits are momentum flips, so it is material.
+
+It is unfixed on purpose: that file also generates Head B and Head C **training labels**, so
+changing it invalidates the current checkpoints and requires a retrain. Scope it as its own
+task, alongside any retrain — not as a backtest patch.
 
 ## Checklist before trusting any measurement
 

@@ -92,12 +92,38 @@ class MMoEPredictor:
                 "Run `python -m models.mmoe.train_mmoe` first."
             )
 
-        model = MMoEModel()
         checkpoint = torch.load(model_path, map_location="cpu", weights_only=True)
-        model.load_state_dict(checkpoint["model_state"])
+        state = checkpoint["model_state"]
+
+        # Infer the architecture variant from the checkpoint rather than assuming.
+        # Runs trained with --no-market-encoder have no market_encoder weights and a
+        # wider expert input, so constructing the wrong variant fails with a shape
+        # error that reads like a stale-checkpoint problem.
+        has_market_encoder = any(k.startswith("market_encoder.") for k in state)
+        model = MMoEModel(use_market_encoder=has_market_encoder)
+
+        try:
+            model.load_state_dict(state)
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"Checkpoint {model_path.name} does not match the current model "
+                f"architecture. The physics feature block was consolidated from 58 "
+                f"columns to 33 and the 14 market features now pass through a learned "
+                f"encoder, so the input layer changed from 83 to "
+                f"{len(ALL_FEATURE_COLS)} raw features. Checkpoints trained before "
+                f"that change cannot be loaded and must be retrained with "
+                f"`python -m models.mmoe.train_mmoe`.\nOriginal error: {exc}"
+            ) from exc
 
         with open(scaler_path, "rb") as f:
             scaler: StandardScaler = pickle.load(f)
+
+        if getattr(scaler, "n_features_in_", len(ALL_FEATURE_COLS)) != len(ALL_FEATURE_COLS):
+            raise RuntimeError(
+                f"Scaler {scaler_path.name} was fitted on {scaler.n_features_in_} "
+                f"features but the model now expects {len(ALL_FEATURE_COLS)}. Model "
+                f"and scaler must come from the same training run — retrain both."
+            )
 
         return cls(model, scaler)
 
@@ -193,7 +219,7 @@ class MMoEPredictor:
         Run inference on a batch of feature rows.
 
         Args:
-            feature_matrix: (N, 83) float array, columns aligned to ALL_FEATURE_COLS.
+            feature_matrix: (N, 58) float array, columns aligned to ALL_FEATURE_COLS.
 
         Returns:
             List of N MMoEOutput objects.

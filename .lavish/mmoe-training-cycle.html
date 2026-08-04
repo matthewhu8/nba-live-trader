@@ -1,0 +1,370 @@
+<title>MMoE — All 83 Inputs, One Real Mid-Game Possession</title>
+<meta name="description" content="Every one of the 83 input features for a real mid-game possession, which ones are actually zero, and whether the model 'sees' all of them.">
+<style>
+  :root{
+    --bg:#eef1f5; --surface:#ffffff; --ink:#141a24; --ink-dim:#57626f;
+    --rule:rgba(20,26,36,0.11); --accent:#b8490a; --accent-soft:#f2ddc8;
+    --good:#1f8f5f; --bad:#c23b3b;
+    --head-a:#b8490a; --head-a-soft:#f5e2d2;
+    --head-b:#2b608f; --head-b-soft:#dbe7f0;
+    --head-c:#6d4e9c; --head-c-soft:#e6dff2;
+    --zero-bg: rgba(87,98,111,0.06);
+    --shadow: 0 1px 2px rgba(20,26,36,0.06), 0 8px 24px rgba(20,26,36,0.05);
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#0c0f14; --surface:#131720; --ink:#e7ecf3; --ink-dim:#8b96a5;
+      --rule:rgba(255,255,255,0.09); --accent:#ff9d52; --accent-soft:rgba(255,157,82,0.14);
+      --good:#4ade9c; --bad:#ff6b6b;
+      --head-a:#ff9d52; --head-a-soft:rgba(255,157,82,0.14);
+      --head-b:#6faee0; --head-b-soft:rgba(111,174,224,0.14);
+      --head-c:#b79eef; --head-c-soft:rgba(183,158,239,0.14);
+      --zero-bg: rgba(255,255,255,0.03);
+      --shadow: 0 1px 2px rgba(0,0,0,0.4), 0 8px 28px rgba(0,0,0,0.35);
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0c0f14; --surface:#131720; --ink:#e7ecf3; --ink-dim:#8b96a5;
+    --rule:rgba(255,255,255,0.09); --accent:#ff9d52; --accent-soft:rgba(255,157,82,0.14);
+    --good:#4ade9c; --bad:#ff6b6b;
+    --head-a:#ff9d52; --head-a-soft:rgba(255,157,82,0.14);
+    --head-b:#6faee0; --head-b-soft:rgba(111,174,224,0.14);
+    --head-c:#b79eef; --head-c-soft:rgba(183,158,239,0.14);
+    --zero-bg: rgba(255,255,255,0.03);
+    --shadow: 0 1px 2px rgba(0,0,0,0.4), 0 8px 28px rgba(0,0,0,0.35);
+  }
+  :root[data-theme="light"]{
+    --bg:#eef1f5; --surface:#ffffff; --ink:#141a24; --ink-dim:#57626f;
+    --rule:rgba(20,26,36,0.11); --accent:#b8490a; --accent-soft:#f2ddc8;
+    --good:#1f8f5f; --bad:#c23b3b;
+    --head-a:#b8490a; --head-a-soft:#f5e2d2;
+    --head-b:#2b608f; --head-b-soft:#dbe7f0;
+    --head-c:#6d4e9c; --head-c-soft:#e6dff2;
+    --zero-bg: rgba(87,98,111,0.06);
+    --shadow: 0 1px 2px rgba(20,26,36,0.06), 0 8px 24px rgba(20,26,36,0.05);
+  }
+
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--bg); color:var(--ink);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    line-height:1.6; -webkit-font-smoothing:antialiased; overflow-x:hidden;
+  }
+  ::selection{ background:var(--accent-soft); }
+  .mono{ font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }
+  h1,h2,h3{ font-family: ui-serif, "Iowan Old Style", "Palatino Linotype", Georgia, serif; font-weight:600; text-wrap:balance; color:var(--ink); }
+  a{ color:var(--accent); }
+  .page{ max-width:880px; margin:0 auto; padding: 4rem 1.5rem 6rem; }
+
+  header.hero{ margin-bottom:2.6rem; padding-bottom:1.8rem; border-bottom:1px solid var(--rule); }
+  .eyebrow{ font-family: ui-monospace, monospace; font-size:0.78rem; letter-spacing:0.08em; text-transform:uppercase; color:var(--accent); margin:0 0 0.9rem; }
+  h1{ font-size:clamp(1.8rem, 4vw, 2.3rem); margin:0 0 0.6rem; letter-spacing:-0.01em; }
+  .subtitle{ color:var(--ink-dim); font-size:1.0rem; max-width:68ch; margin:0 0 1.2rem; }
+  .meta-row{ display:flex; flex-wrap:wrap; gap:0.5rem 1.4rem; font-size:0.83rem; color:var(--ink-dim); }
+  .meta-row strong{ color:var(--ink); font-weight:600; }
+
+  section{ margin-bottom:2.6rem; }
+  .section-label{ display:flex; align-items:baseline; gap:0.7rem; margin-bottom:1rem; }
+  .section-label .num{ font-family: ui-monospace, monospace; font-size:0.78rem; color:var(--ink-dim); }
+  .section-label h2{ font-size:1.35rem; margin:0; }
+  p{ margin:0.85rem 0; max-width:76ch; }
+  .lead{ color:var(--ink-dim); }
+
+  code{ font-family: ui-monospace, monospace; font-size:0.85em; background:var(--accent-soft); padding:0.05em 0.35em; border-radius:4px; }
+
+  .card{ background:var(--surface); border:1px solid var(--rule); border-radius:10px; padding:1.2rem 1.3rem; box-shadow:var(--shadow); margin:1rem 0; }
+  .card .label{ font-family: ui-monospace, monospace; font-size:0.72rem; letter-spacing:0.05em; text-transform:uppercase; color:var(--ink-dim); margin-bottom:0.7rem; }
+  .card.head-a{ border-left:3px solid var(--head-a); }
+
+  .table-wrap{ overflow-x:auto; border:1px solid var(--rule); border-radius:10px; background:var(--surface); box-shadow:var(--shadow); max-height:640px; overflow-y:auto; }
+  table.full{ border-collapse:collapse; width:100%; font-size:0.8rem; min-width:520px; }
+  table.full th, table.full td{ padding:0.4rem 0.7rem; text-align:right; border-bottom:1px solid var(--rule); white-space:nowrap; }
+  table.full th:first-child, table.full td:first-child{ text-align:left; }
+  table.full th{ font-family: ui-monospace, monospace; font-size:0.66rem; letter-spacing:0.04em; text-transform:uppercase; color:var(--ink-dim); font-weight:600; position:sticky; top:0; background:var(--surface); }
+  table.full td{ font-family: ui-monospace, monospace; }
+  table.full tr.zero{ background:var(--zero-bg); color:var(--ink-dim); }
+  table.full tr.zero td.rowlabel{ color:var(--ink-dim); }
+  table.full td.block{ font-family: ui-sans-serif, system-ui, sans-serif; font-size:0.7rem; text-align:left; }
+  .rowlabel{ font-family: ui-sans-serif, system-ui, sans-serif !important; font-weight:600; text-align:left !important; }
+  .tag{ display:inline-block; font-size:0.65rem; padding:0.1rem 0.4rem; border-radius:4px; font-weight:600; }
+  .tag.physics{ background:var(--head-a-soft); color:var(--head-a); }
+  .tag.pregame{ background:var(--head-c-soft); color:var(--head-c); }
+  .tag.market{ background:var(--head-b-soft); color:var(--head-b); }
+
+  table.data{ border-collapse:collapse; width:100%; font-size:0.84rem; min-width:520px; }
+  table.data th, table.data td{ padding:0.5rem 0.7rem; text-align:right; border-bottom:1px solid var(--rule); white-space:nowrap; }
+  table.data th:first-child, table.data td:first-child{ text-align:left; }
+  table.data th{ font-family: ui-monospace, monospace; font-size:0.68rem; letter-spacing:0.04em; text-transform:uppercase; color:var(--ink-dim); font-weight:600; }
+  table.data td{ font-family: ui-monospace, monospace; }
+  table.data tr:last-child td{ border-bottom:none; }
+  .dim{ color:var(--ink-dim); }
+
+  .vec{ font-family: ui-monospace, monospace; font-size:0.84rem; background:var(--bg); border:1px solid var(--rule); border-radius:8px; padding:0.7rem 0.9rem; overflow-x:auto; white-space:nowrap; }
+  .vec .idx{ color:var(--ink-dim); }
+
+  .callout{ border-left:3px solid var(--accent); background:var(--accent-soft); border-radius:0 8px 8px 0; padding:1rem 1.2rem; font-size:0.92rem; color:var(--ink); }
+  .callout strong{ color:var(--accent); }
+  .checkmark{ color:var(--good); font-weight:700; }
+
+  .legend{ display:flex; gap:1.2rem; flex-wrap:wrap; font-size:0.8rem; color:var(--ink-dim); margin:0.6rem 0 1rem; align-items:center; }
+  .legend .swatch{ display:inline-block; width:0.9rem; height:0.9rem; border-radius:3px; vertical-align:-2px; margin-right:0.4rem; }
+
+  footer{ margin-top:3rem; padding-top:1.6rem; border-top:1px solid var(--rule); font-size:0.82rem; color:var(--ink-dim); }
+</style>
+
+<div class="page">
+
+  <header class="hero">
+    <p class="eyebrow">models/mmoe/ · all 83 inputs, one real mid-game possession</p>
+    <h1>All 83, shown honestly</h1>
+    <p class="subtitle">
+      A different real possession — mid-game this time, from a different logged session, chosen
+      because most of its 83 features are actually populated. Every single one is listed below,
+      including the ones that are genuinely zero, followed by the honest answer to "does the model
+      actually see all of them?"
+    </p>
+    <div class="meta-row">
+      <span>Game <strong>2026-05-29 session</strong>, possession 76</span>
+      <span>Period 2 · 6:05 remaining · home 49 – away 41</span>
+      <span>Home scores 2 · yes_bid 59¢ / yes_ask 60¢</span>
+    </div>
+  </header>
+
+  <section id="answer-first">
+    <div class="section-label"><span class="num">00</span><h2>The direct answer</h2></div>
+    <p class="lead">
+      <strong>The model sees all 83, every time, on every forward pass — including the zeros.</strong>
+      There is no feature selection or masking of the <em>input</em> at inference. <code>x</code> is
+      always a dense 83-length vector; every one of those 83 numbers gets multiplied by its own weight
+      column in every linear layer. A zero isn't "skipped" — it's a real value that happens to
+      contribute nothing to that particular dot product (<code>weight × 0 = 0</code>), exactly the way
+      any other number would contribute <code>weight × value</code>.
+    </p>
+    <p>
+      What <em>is</em> masked is target data during <strong>training</strong>, not input features during
+      inference — a completely different mechanism, covered in section 09.
+    </p>
+  </section>
+
+  <section id="full-table">
+    <div class="section-label"><span class="num">01</span><h2>All 83 inputs, none hidden</h2></div>
+    <p class="lead">This possession has 56 non-zero and 27 zero features. Zero rows are greyed, not removed:</p>
+    <div class="legend">
+      <span><span class="tag physics">physics</span> 58 features</span>
+      <span><span class="tag pregame">pregame</span> 11 features</span>
+      <span><span class="tag market">market</span> 14 features</span>
+    </div>
+    <div class="table-wrap">
+      <table class="full">
+        <thead><tr><th>idx</th><th class="rowlabel" style="text-align:left">feature</th><th style="text-align:left">block</th><th>value</th></tr></thead>
+        <tbody>
+          <tr><td>0</td><td class="rowlabel">score_diff</td><td class="block"><span class="tag physics">physics</span></td><td>8.000000</td></tr>
+          <tr><td>1</td><td class="rowlabel">period</td><td class="block"><span class="tag physics">physics</span></td><td>2.000000</td></tr>
+          <tr><td>2</td><td class="rowlabel">minutes_into_game</td><td class="block"><span class="tag physics">physics</span></td><td>17.916666</td></tr>
+          <tr><td>3</td><td class="rowlabel">trailing_team_urgency</td><td class="block"><span class="tag physics">physics</span></td><td>0.265928</td></tr>
+          <tr><td>4</td><td class="rowlabel">comeback_probability_proxy</td><td class="block"><span class="tag physics">physics</span></td><td>2.127424</td></tr>
+          <tr class="zero"><td>5</td><td class="rowlabel">q4_close_game</td><td class="block"><span class="tag physics">physics</span></td><td>0.000000</td></tr>
+          <tr class="zero"><td>6</td><td class="rowlabel">garbage_time_risk</td><td class="block"><span class="tag physics">physics</span></td><td>0.000000</td></tr>
+          <tr><td>7</td><td class="rowlabel">shot_value</td><td class="block"><span class="tag physics">physics</span></td><td>2.000000</td></tr>
+          <tr><td>8</td><td class="rowlabel">shot_distance</td><td class="block"><span class="tag physics">physics</span></td><td>1.370000</td></tr>
+          <tr><td>9</td><td class="rowlabel">home_points_last_5_poss</td><td class="block"><span class="tag physics">physics</span></td><td>3.000000</td></tr>
+          <tr><td>10</td><td class="rowlabel">away_points_last_5_poss</td><td class="block"><span class="tag physics">physics</span></td><td>5.000000</td></tr>
+          <tr><td>11</td><td class="rowlabel">home_points_last_10_poss</td><td class="block"><span class="tag physics">physics</span></td><td>5.000000</td></tr>
+          <tr><td>12</td><td class="rowlabel">away_points_last_10_poss</td><td class="block"><span class="tag physics">physics</span></td><td>10.000000</td></tr>
+          <tr><td>13</td><td class="rowlabel">current_run_team_encoded</td><td class="block"><span class="tag physics">physics</span></td><td>−1.000000</td></tr>
+          <tr><td>14</td><td class="rowlabel">current_run_length</td><td class="block"><span class="tag physics">physics</span></td><td>1.000000</td></tr>
+          <tr><td>15</td><td class="rowlabel">current_run_points</td><td class="block"><span class="tag physics">physics</span></td><td>3.000000</td></tr>
+          <tr><td>16</td><td class="rowlabel">current_run_3pt_pct</td><td class="block"><span class="tag physics">physics</span></td><td>0.333333</td></tr>
+          <tr class="zero"><td>17</td><td class="rowlabel">current_run_paint_pct</td><td class="block"><span class="tag physics">physics</span></td><td>0.000000</td></tr>
+          <tr><td>18</td><td class="rowlabel">pace_last_10_possessions</td><td class="block"><span class="tag physics">physics</span></td><td>15.400000</td></tr>
+          <tr><td>19</td><td class="rowlabel">pace_season_baseline</td><td class="block"><span class="tag physics">physics</span></td><td>14.000000</td></tr>
+          <tr><td>20</td><td class="rowlabel">home_scoring_sustainable</td><td class="block"><span class="tag physics">physics</span></td><td>1.000000</td></tr>
+          <tr><td>21</td><td class="rowlabel">away_scoring_sustainable</td><td class="block"><span class="tag physics">physics</span></td><td>1.000000</td></tr>
+          <tr><td>22</td><td class="rowlabel">home_xPPP_last_5</td><td class="block"><span class="tag physics">physics</span></td><td>0.970000</td></tr>
+          <tr><td>23</td><td class="rowlabel">away_xPPP_last_5</td><td class="block"><span class="tag physics">physics</span></td><td>1.060000</td></tr>
+          <tr><td>24</td><td class="rowlabel">home_actual_vs_expected_PPP</td><td class="block"><span class="tag physics">physics</span></td><td>1.430000</td></tr>
+          <tr><td>25</td><td class="rowlabel">away_actual_vs_expected_PPP</td><td class="block"><span class="tag physics">physics</span></td><td>1.340000</td></tr>
+          <tr><td>26</td><td class="rowlabel">home_shot_quality_trend</td><td class="block"><span class="tag physics">physics</span></td><td>0.050000</td></tr>
+          <tr><td>27</td><td class="rowlabel">away_shot_quality_trend</td><td class="block"><span class="tag physics">physics</span></td><td>−0.030000</td></tr>
+          <tr class="zero"><td>28</td><td class="rowlabel">home_team_fouls_q</td><td class="block"><span class="tag physics">physics</span></td><td>0.000000</td></tr>
+          <tr><td>29</td><td class="rowlabel">away_team_fouls_q</td><td class="block"><span class="tag physics">physics</span></td><td>4.000000</td></tr>
+          <tr><td>30</td><td class="rowlabel">home_cum_fouls</td><td class="block"><span class="tag physics">physics</span></td><td>3.000000</td></tr>
+          <tr><td>31</td><td class="rowlabel">away_cum_fouls</td><td class="block"><span class="tag physics">physics</span></td><td>7.000000</td></tr>
+          <tr class="zero"><td>32</td><td class="rowlabel">home_in_bonus</td><td class="block"><span class="tag physics">physics</span></td><td>0.000000</td></tr>
+          <tr class="zero"><td>33</td><td class="rowlabel">away_in_bonus</td><td class="block"><span class="tag physics">physics</span></td><td>0.000000</td></tr>
+          <tr><td>34</td><td class="rowlabel">home_fouls_until_bonus</td><td class="block"><span class="tag physics">physics</span></td><td>5.000000</td></tr>
+          <tr><td>35</td><td class="rowlabel">away_fouls_until_bonus</td><td class="block"><span class="tag physics">physics</span></td><td>1.000000</td></tr>
+          <tr class="zero"><td>36</td><td class="rowlabel">home_star_in_foul_trouble</td><td class="block"><span class="tag physics">physics</span></td><td>0.000000</td></tr>
+          <tr class="zero"><td>37</td><td class="rowlabel">away_star_in_foul_trouble</td><td class="block"><span class="tag physics">physics</span></td><td>0.000000</td></tr>
+          <tr><td>38</td><td class="rowlabel">home_star_on_court</td><td class="block"><span class="tag physics">physics</span></td><td>1.000000</td></tr>
+          <tr><td>39</td><td class="rowlabel">away_star_on_court</td><td class="block"><span class="tag physics">physics</span></td><td>1.000000</td></tr>
+          <tr><td>40</td><td class="rowlabel">was_foul</td><td class="block"><span class="tag physics">physics</span></td><td>1.000000</td></tr>
+          <tr><td>41</td><td class="rowlabel">was_sub</td><td class="block"><span class="tag physics">physics</span></td><td>1.000000</td></tr>
+          <tr class="zero"><td>42</td><td class="rowlabel">had_shooting_foul</td><td class="block"><span class="tag physics">physics</span></td><td>0.000000</td></tr>
+          <tr><td>43</td><td class="rowlabel">had_personal_foul</td><td class="block"><span class="tag physics">physics</span></td><td>1.000000</td></tr>
+          <tr><td>44</td><td class="rowlabel">home_sub_count</td><td class="block"><span class="tag physics">physics</span></td><td>6.000000</td></tr>
+          <tr><td>45</td><td class="rowlabel">away_sub_count</td><td class="block"><span class="tag physics">physics</span></td><td>6.000000</td></tr>
+          <tr><td>46</td><td class="rowlabel">possessions_since_last_timeout</td><td class="block"><span class="tag physics">physics</span></td><td>12.000000</td></tr>
+          <tr class="zero"><td>47</td><td class="rowlabel">home_called_timeout_in_last_3_poss</td><td class="block"><span class="tag physics">physics</span></td><td>0.000000</td></tr>
+          <tr class="zero"><td>48</td><td class="rowlabel">away_called_timeout_in_last_3_poss</td><td class="block"><span class="tag physics">physics</span></td><td>0.000000</td></tr>
+          <tr><td>49</td><td class="rowlabel">home_full_timeouts_remaining</td><td class="block"><span class="tag physics">physics</span></td><td>2.000000</td></tr>
+          <tr><td>50</td><td class="rowlabel">away_full_timeouts_remaining</td><td class="block"><span class="tag physics">physics</span></td><td>3.000000</td></tr>
+          <tr class="zero"><td>51</td><td class="rowlabel">home_lineup_net_rating</td><td class="block"><span class="tag physics">physics</span></td><td>0.000000</td></tr>
+          <tr class="zero"><td>52</td><td class="rowlabel">away_lineup_net_rating</td><td class="block"><span class="tag physics">physics</span></td><td>0.000000</td></tr>
+          <tr class="zero"><td>53</td><td class="rowlabel">lineup_net_rating_delta</td><td class="block"><span class="tag physics">physics</span></td><td>0.000000</td></tr>
+          <tr class="zero"><td>54</td><td class="rowlabel">home_lineup_sample_size</td><td class="block"><span class="tag physics">physics</span></td><td>0.000000</td></tr>
+          <tr class="zero"><td>55</td><td class="rowlabel">away_lineup_sample_size</td><td class="block"><span class="tag physics">physics</span></td><td>0.000000</td></tr>
+          <tr><td>56</td><td class="rowlabel">home_lineup_just_changed</td><td class="block"><span class="tag physics">physics</span></td><td>1.000000</td></tr>
+          <tr><td>57</td><td class="rowlabel">away_lineup_just_changed</td><td class="block"><span class="tag physics">physics</span></td><td>1.000000</td></tr>
+          <tr class="zero"><td>58</td><td class="rowlabel">team_net_rating_delta</td><td class="block"><span class="tag pregame">pregame</span></td><td>0.000000</td></tr>
+          <tr class="zero"><td>59</td><td class="rowlabel">home_off_rating</td><td class="block"><span class="tag pregame">pregame</span></td><td>0.000000</td></tr>
+          <tr class="zero"><td>60</td><td class="rowlabel">away_off_rating</td><td class="block"><span class="tag pregame">pregame</span></td><td>0.000000</td></tr>
+          <tr class="zero"><td>61</td><td class="rowlabel">home_def_rating</td><td class="block"><span class="tag pregame">pregame</span></td><td>0.000000</td></tr>
+          <tr class="zero"><td>62</td><td class="rowlabel">away_def_rating</td><td class="block"><span class="tag pregame">pregame</span></td><td>0.000000</td></tr>
+          <tr class="zero"><td>63</td><td class="rowlabel">roster_rapm_gap</td><td class="block"><span class="tag pregame">pregame</span></td><td>0.000000</td></tr>
+          <tr class="zero"><td>64</td><td class="rowlabel">missing_rapm_impact</td><td class="block"><span class="tag pregame">pregame</span></td><td>0.000000</td></tr>
+          <tr class="zero"><td>65</td><td class="rowlabel">rest_advantage</td><td class="block"><span class="tag pregame">pregame</span></td><td>0.000000</td></tr>
+          <tr class="zero"><td>66</td><td class="rowlabel">expected_pace</td><td class="block"><span class="tag pregame">pregame</span></td><td>0.000000</td></tr>
+          <tr class="zero"><td>67</td><td class="rowlabel">form_delta</td><td class="block"><span class="tag pregame">pregame</span></td><td>0.000000</td></tr>
+          <tr class="zero"><td>68</td><td class="rowlabel">has_pregame_data</td><td class="block"><span class="tag pregame">pregame</span></td><td>0.000000</td></tr>
+          <tr><td>69</td><td class="rowlabel">yes_bid</td><td class="block"><span class="tag market">market</span></td><td>59.000000</td></tr>
+          <tr><td>70</td><td class="rowlabel">yes_ask</td><td class="block"><span class="tag market">market</span></td><td>60.000000</td></tr>
+          <tr><td>71</td><td class="rowlabel">spread</td><td class="block"><span class="tag market">market</span></td><td>1.000000</td></tr>
+          <tr><td>72</td><td class="rowlabel">yes_last</td><td class="block"><span class="tag market">market</span></td><td>60.000000</td></tr>
+          <tr><td>73</td><td class="rowlabel">open_interest</td><td class="block"><span class="tag market">market</span></td><td>4,557,067</td></tr>
+          <tr><td>74</td><td class="rowlabel">trade_volume_60s</td><td class="block"><span class="tag market">market</span></td><td>333,949,536</td></tr>
+          <tr><td>75</td><td class="rowlabel">time_since_last_trade_ms</td><td class="block"><span class="tag market">market</span></td><td>641.000000</td></tr>
+          <tr><td>76</td><td class="rowlabel">open_interest_change_60s</td><td class="block"><span class="tag market">market</span></td><td>−8.000000</td></tr>
+          <tr><td>77</td><td class="rowlabel">d_yes_bid</td><td class="block"><span class="tag market">market</span></td><td>1.000000</td></tr>
+          <tr><td>78</td><td class="rowlabel">d_spread</td><td class="block"><span class="tag market">market</span></td><td>−1.000000</td></tr>
+          <tr><td>79</td><td class="rowlabel">bid_velocity_30s</td><td class="block"><span class="tag market">market</span></td><td>0.033333</td></tr>
+          <tr><td>80</td><td class="rowlabel">bid_acceleration_30s</td><td class="block"><span class="tag market">market</span></td><td>0.033333</td></tr>
+          <tr><td>81</td><td class="rowlabel">bid_vs_last_divergence</td><td class="block"><span class="tag market">market</span></td><td>−1.000000</td></tr>
+          <tr><td>82</td><td class="rowlabel">has_market_data</td><td class="block"><span class="tag market">market</span></td><td>1.000000</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      Notice the zero rows cluster: <strong>all 11 pregame features are zero as a block</strong>
+      (including the <code>has_pregame_data=0</code> flag itself) — this particular game simply has no
+      entry in the 2025-26 pregame ratings table. Same story for the 5 lineup-rating features. These
+      aren't scattered missing values; they're two entire, known-unavailable feature groups, and the
+      network is told exactly that via the flag columns.
+    </p>
+  </section>
+
+  <section id="crosscheck">
+    <div class="section-label"><span class="num">02</span><h2>Ground truth: matched against production's own log</h2></div>
+    <p class="lead">Same discipline as before — recomputing today reproduces exactly what live-trader logged in production on 2026-05-29:</p>
+    <div class="table-wrap">
+      <table class="data">
+        <thead><tr><th class="rowlabel" style="text-align:left">quantity</th><th>logged</th><th>recomputed</th></tr></thead>
+        <tbody>
+          <tr><td class="rowlabel">run_prob (Head A)</td><td>0.02024881</td><td>0.02024881</td></tr>
+          <tr><td class="rowlabel">trajectory[9] (Head B)</td><td>−0.06757559</td><td>−0.06757559</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="scaling">
+    <div class="section-label"><span class="num">03</span><h2>Scaling a few of these, including a wild one</h2></div>
+    <div class="table-wrap">
+      <table class="data">
+        <thead><tr><th class="rowlabel" style="text-align:left">feature</th><th>x</th><th>mean</th><th>std</th><th>x′</th></tr></thead>
+        <tbody>
+          <tr><td class="rowlabel">score_diff</td><td>8.0000</td><td class="dim">0.9463</td><td class="dim">11.8755</td><td>0.5940</td></tr>
+          <tr><td class="rowlabel">period</td><td>2.0000</td><td class="dim">2.5032</td><td class="dim">1.1268</td><td>−0.4466</td></tr>
+          <tr><td class="rowlabel">home_cum_fouls</td><td>3.0000</td><td class="dim">9.0198</td><td class="dim">6.5307</td><td>−0.9218</td></tr>
+          <tr><td class="rowlabel">yes_bid</td><td>59.0000</td><td class="dim">53.7402</td><td class="dim">35.9231</td><td>0.1464</td></tr>
+          <tr><td class="rowlabel">has_pregame_data</td><td>0.0000</td><td class="dim">0.4356</td><td class="dim">0.4958</td><td>−0.8785</td></tr>
+          <tr><td class="rowlabel">open_interest</td><td>4,557,067</td><td class="dim">141,647</td><td class="dim">312,525</td><td><strong>14.1282</strong></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="callout">
+      <strong>open_interest lands at z ≈ 14.1</strong> — 14 standard deviations from its training mean,
+      even after the market-feature refit that's supposed to keep live values centered. Most Kalshi
+      markets in the training window had modest open interest; this one happened to be unusually
+      liquid. The network never sees a value this extreme flagged as "wrong" — it's just an
+      unusually large number in that column, and whatever the downstream weights do with it is
+      whatever they learned to do with large numbers there. This is a real weak spot in the current
+      scaling approach, not a hidden or synthetic example.
+    </p>
+  </section>
+
+  <section id="expert1">
+    <div class="section-label"><span class="num">04</span><h2>Expert 1 forward — same mechanics, new numbers</h2></div>
+    <div class="vec"><span class="idx">z₁[:8] = </span>[ 2.7920, −0.8709, −5.0866, 1.6968, −4.4053, −11.2230, −2.2161, −3.6022 ]</div>
+    <div class="card">
+      <div class="label">BatchNorm + ReLU on z₁[0]</div>
+      <div class="vec">BN(z₁)[0] = 0.9150 · (2.7920 − 0.2559) / √(0.7561+1e−5) + (−0.0738) = <strong>+2.5949</strong> → ReLU → <strong>2.5949</strong> (survives)</div>
+    </div>
+    <div class="vec"><span class="idx">a₁[:8] = </span>[ 2.5949, 0, 0, 2.4423, 0, 0, 0, 0 ]</div>
+    <div class="vec"><span class="idx">h⁽¹⁾[:8] (after layer 2) = </span>[ 0, 1.3892, 1.1753, 0, 0, 0.7867, 0, 3.1293 ]</div>
+    <p class="callout"><span class="checkmark">✓</span> Matches <code>model.experts[0](x)</code> exactly.</p>
+  </section>
+
+  <section id="gates">
+    <div class="section-label"><span class="num">05</span><h2>The gates — a much sharper decision this time</h2></div>
+    <div class="vec">g_A = [ <strong>0.9918</strong>, 0.0074, 0.0008 ]&nbsp;&nbsp;&nbsp;g_B = [ 0.5961, 0.0000, 0.4039 ]&nbsp;&nbsp;&nbsp;g_C = [ 0.2100, 0.4764, 0.3136 ]</div>
+    <p>
+      Compare to the earlier tip-off possession, where Gate A split 17/83/~0 across the experts. Here
+      it puts <strong>99.2% of its trust in Expert 1 alone</strong>. Same gate network, same weights —
+      completely different routing decision, because the input is completely different. This is the
+      mechanism working as designed: gates specialize per-input, not per-head-in-general.
+    </p>
+  </section>
+
+  <section id="mixture">
+    <div class="section-label"><span class="num">06</span><h2>Mixture and Head A</h2></div>
+    <div class="table-wrap">
+      <table class="data">
+        <thead><tr><th class="rowlabel" style="text-align:left"></th><th>[0]</th><th>[1]</th><th>[2]</th><th>[3]</th><th>[4]</th><th>[5]</th><th>[6]</th><th>[7]</th></tr></thead>
+        <tbody>
+          <tr><td class="rowlabel">h⁽¹⁾ (w 0.9918)</td><td>0</td><td>1.3892</td><td>1.1753</td><td>0</td><td>0</td><td>0.7867</td><td>0</td><td>3.1293</td></tr>
+          <tr><td class="rowlabel">h⁽²⁾ (w 0.0074)</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0.5039</td><td>0</td><td>4.5633</td><td>0</td></tr>
+          <tr><td class="rowlabel">h⁽³⁾ (w 0.0008)</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0.6963</td><td>0</td><td>0.5100</td><td>0</td></tr>
+          <tr><td class="rowlabel"><strong>m⁽ᴬ⁾</strong></td><td><strong>0</strong></td><td><strong>1.3777</strong></td><td><strong>1.1656</strong></td><td><strong>0</strong></td><td><strong>0.0043</strong></td><td><strong>0.7802</strong></td><td><strong>0.0344</strong></td><td><strong>3.1034</strong></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="card head-a">
+      <div class="label">Head A: 64→32→1→sigmoid</div>
+      <div class="vec">u[:8] = [ 1.7084, 2.2031, 0, 2.5569, 0, 2.7531, 0, 1.4008 ]</div>
+      <div class="vec">o = <strong>−3.8792026</strong></div>
+      <div class="vec">P(run) = σ(o) = <strong>0.02024881</strong></div>
+    </div>
+    <p class="callout"><span class="checkmark">✓</span> <strong>Production logged 0.02024881</strong> for this exact row.</p>
+  </section>
+
+  <section id="masking">
+    <div class="section-label"><span class="num">07</span><h2>So what actually gets masked?</h2></div>
+    <p class="lead">
+      Not the input, and not at inference time. Masking happens to <strong>targets, during
+      training</strong>, per row, per head:
+    </p>
+    <ul style="max-width:74ch; padding-left:1.2rem;">
+      <li><strong>Head B (trajectory)</strong> is only trained on rows with real Kalshi tick data (<code>has_market_data=1</code>) — basketball-only rows still run through Head B's forward pass and produce an output, it's just excluded from the loss and never influences that head's weights for that row.</li>
+      <li><strong>Heads A and C</strong> are masked to rows that have a computed run target.</li>
+      <li>All of this masking lives in <code>trainer.py</code>'s loss function, operating on which rows count toward which head's <em>gradient</em>. It has nothing to do with which of the 83 <em>feature columns</em> a given row uses — every row, in training and in inference, always uses all 83.</li>
+    </ul>
+    <p>
+      The zero-filling you see for missing pregame/lineup/market blocks is a data-engineering choice —
+      "no data" is represented as 0 plus a flag bit, not as a differently-shaped input. The network
+      then has to <em>learn</em> to interpret "0 and flag=0" as absence rather than a true measured
+      zero, purely from training signal. There's no architectural mechanism forcing that interpretation
+      — it's an emergent, learned behavior, which is worth remembering as a limitation.
+    </p>
+  </section>
+
+  <footer>
+    Feature vector, logged output, and gating weights are the literal contents of
+    <span class="mono">live-trader/go/logs/runs/2026-05-29/20260529-003750-d4af74/inference.jsonl</span>,
+    possession_id 76. Recomputed against <span class="mono">models/saved/mmoe_delay20.pt</span> +
+    <span class="mono">models/saved/mmoe_scaler_delay20.pkl</span> via a standalone script that
+    re-derives every layer from <span class="mono">model.state_dict()</span> by hand.
+  </footer>
+
+</div>

@@ -1,0 +1,2 @@
+game_id,possession_id,wall_clock_ts,entry_price,exit_price,exit_reason,entry_side,hold_time_s,gross_pnl,net_pnl,run_prob,traj_final,traj_used,traj_aggregator,hazard_final,quarter,score_diff,run_length,fees,entry_tick_age_s
+0042500152,127,2026-04-22 01:43:57.916667+00:00,66.0,66.0,momentum_flip,-1,7.150438,-0.0,-1.98,0.1737748384475708,-0.10941026359796524,-0.0905725359916687,mean,0.9955503940582275,3,2,2,1.98,1.8496540000000001
