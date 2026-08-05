@@ -77,7 +77,15 @@ divide by 100. A 100-contract position cannot swing more than $100 total.
 > **83-feature** model on 2026-08-03 at 16:01, hours before this branch merged PR #51 and
 > swapped in the 58-feature model. It reproduces exactly at `85d8a66`, but it does not
 > describe the current code. It was additionally measured with a fee function that
-> overcharged up to a cent per leg. Current baseline in `skills/backtesting.md`.
+> overcharged up to a cent per leg.
+>
+> **Current baseline (2026-08-05, post-merge with PR #54):**
+> **181 trades, 26.0% win rate, gross −$6.00, fees $318.35, net −$324.35** across 44 games.
+> Per-trade **−$1.79**, game-clustered bootstrap 95% CI **[−$2.40, −$1.17]**. Config:
+> `--use-traj-for-side --min-abs-traj 0.08 --min-run-length 2 --hold-seconds 240
+> --threshold 0.15 --traj-aggregator mean`. Full provenance in `skills/backtesting.md`.
+> The strategy still loses money with well over 99% confidence — but see the Level 2 note
+> above before treating that as a verdict on the idea.
 >
 > **Quote the command, not just the number.** The corrected run used
 > `--traj-aggregator mean --threshold 0.15`, *not* the `--threshold 0.0` command block that
