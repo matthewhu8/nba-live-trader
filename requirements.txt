@@ -9,3 +9,9 @@ scipy>=1.11
 scikit-learn>=1.0
 numpy>=1.24
 pytz>=2023.3
+# PyYAML is a hard dependency, not optional: dataset.py::_blowout_margin_pts reads the
+# blowout margin from live-trader/config/trading.yaml and silently falls back to a
+# hardcoded 30 when the import fails, so training and the live gate can diverge without
+# anyone noticing. It was missing from this file until 2026-08-05.
+PyYAML>=6.0
+pytest>=8.0

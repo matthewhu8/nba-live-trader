@@ -1,26 +1,54 @@
 # Backtesting & Strategy Evaluation
 
-## MMoE Backtest (⚠️ baseline VOID — see below)
+## MMoE Backtest — current baseline
+
+**The config is part of the result. Always quote both.**
+
 ```bash
 python -m backtesting.mmoe_backtest \
   --use-traj-for-side \
   --min-abs-traj 0.08 \
   --min-run-length 2 \
   --hold-seconds 240 \
-  --threshold 0.0
+  --threshold 0.15 \
+  --traj-aggregator mean
 ```
 
-**Result:** 207 trades, 47.8% win rate, +$37,409 net (110 val games)
+**Baseline @ `fix/backtest-exit-window` merged with `origin/main` (2026-08-05):**
 
-> **VOID as of 2026-08-02.** Measured on the pre-consolidation 83-feature model. The feature
-> set is now 58 columns *and* training excludes overtime/blowouts, so this is not a valid
-> comparison baseline. Re-run before drawing any conclusion. Expect trade count to shift on
-> its own: `min_abs_traj` and `min_run_length` were tuned on feature distributions that no
-> longer exist, so re-tune them before judging P&L. See `docs/FEATURE_CONSOLIDATION.md`.
->
-> **And it was never valid in the first place** — not merely stale. Four measurement defects
-> inflated it; the corrected figure on the same config is **negative**. Read the next section
-> before re-running anything.
+| trades | win rate | gross | fees | net | games |
+|---|---|---|---|---|---|
+| 181 | 26.0% | −$6.00 | $318.35 | **−$324.35** | 44 of 69 |
+
+Per-trade edge **−$1.79**, game-clustered bootstrap 95% CI **[−$2.40, −$1.17]**, P(edge ≥ 0)
+< 0.0001 over 10,000 resamples. 100 contracts, TP=5 / SL=3, 20s feed delay, local parquet
+cache (71 games / 14,239 possessions / 770,054 ticks, Apr 15 – May 17 2026).
+
+> ⚠️ **This measures a model trained on defective labels.** `exit_simulator.py` still
+> generates Head B/C training targets with no feed delay (see `data-integrity.md`), so the
+> number describes the current pipeline honestly but says nothing about whether the strategy
+> could work once the labels are fixed. Do not read an improvement or a regression into it.
+
+### Superseded numbers — do not quote
+
+| figure | why it is dead |
+|---|---|
+| `207 trades / 47.8% / +$37,409` | four measurement defects, 83-feature model, and a different config from the one printed beside it |
+| `81 trades / 51.9% / +$16,100` | same four defects |
+| `80 trades / 30.0% / −$136.42` | **defects fixed, but measured on the 83-feature model** at `85d8a66` (2026-08-03 16:01), hours before this branch merged PR #51 and swapped in the 58-feature model. Also measured with the pre-Decimal fee function. Reproduces exactly at `85d8a66`; does not describe current code. |
+| `63 trades / 34.9% / −$82.53` (`--prod-features`) | same 83-feature provenance |
+
+**Two lessons, both cheap to repeat and expensive to catch:**
+
+1. **The command in this file was wrong for two days.** The `--threshold 0.0` block above the
+   corrected table belonged to the old 207-trade run; the corrected run actually used
+   `--threshold 0.15 --traj-aggregator mean` (which is what `trading.yaml` ships). Re-running
+   the documented command gave 466 trades / −$781.40 and looked like non-determinism. The real
+   config was recovered by reading `traj_aggregator` and `min(run_prob)` back out of the saved
+   position CSVs. **Record the command next to the number, every time.**
+2. **A model swap silently invalidates a baseline.** Nothing failed, nothing warned; the
+   branch merged PR #51 and the recorded baseline quietly stopped describing the code. Check
+   `feature_config.py` and the checkpoint alongside any figure you are about to compare.
 
 ## ⚠️ Four defects corrected 2026-08-03 — branch `fix/backtest-exit-window`
 
@@ -59,7 +87,27 @@ taker: ceil(0.07   x contracts x P x (1-P) x 100) / 100
 ```
 
 `rate x contracts x price` overstates the fee ~4x at the 50c midpoint. Canonical
-implementations: `mmoe_backtest.py::_fee_one_leg`, `inference/dashboard.py::kalshiMakerFee`.
+implementation: `mmoe_backtest.py::_fee_one_leg`. The only other one is
+`inference/dashboard.py::kalshiMakerFee` (JavaScript). **There is no Go fee function** —
+`orders.go::calcNetPnL` returns gross P&L with no fee deduction, so the
+`orders.go::kalshiFee` cross-reference that appeared in `CLAUDE.md` pointed at nothing.
+
+**Compute it in `Decimal`, not float.** Verified against Kalshi's published table
+(effective 2026-02-05) in `tests/test_fees.py`:
+
+| price | taker | maker | naive float64 gave |
+|---|---|---|---|
+| $0.10 | $0.63 | $0.16 | taker **$0.64** |
+| $0.20 | $1.12 | $0.28 | taker **$1.13**, maker **$0.29** |
+| $0.50 | $1.75 | $0.44 | taker **$1.76** |
+| $0.85 | $0.90 | $0.23 | correct |
+| $0.90 | $0.63 | $0.16 | correct |
+
+`0.07 * 100 * 0.5 * 0.5 * 100` evaluates to `175.00000000000003`, so `ceil` promoted a whole
+cent. Three of five taker rows were wrong. Both the branch's `_fee_one_leg` and the
+`kalshi_fee` added by PR #54 had it, and `.claude/CLAUDE.md` on `main` recorded the buggy
+**$1.76** as the correct figure — a bug that had been written down as ground truth. Assert
+against the published table, never against the implementation.
 
 **Which leg pays what:** entry is always maker. Exits pay maker only on `take_profit`
 (PR #50 rests the TP limit); `stop_loss`, `momentum_flip`, `garbage_time` and `time_gate`
@@ -69,14 +117,43 @@ cross the book and pay taker.
 -$3.00 - $2.19 = -$5.19, so 5.19/9.31. The model currently delivers ~37% on gross moves.
 No threshold tuning closes an 18-point gap.
 
-### The invariant
+### The invariant — the original one was a tautology
 
-`mmoe_backtest.py` raises on any exit earlier than `wct + feed_delay_s`. It is stated against
-`wct` rather than the entry anchor so that re-anchoring fails loudly instead of silently
-reinflating results. Verified to fire when the bug is reintroduced.
+The guard used to read:
+
+```python
+exit_abs_ts = entry_anchor_ts + pd.Timedelta(seconds=sim.exit_time_offset_s)
+if sim.exit_time_offset_s < 0 or exit_abs_ts < wct + pd.Timedelta(seconds=feed_delay_s):
+```
+
+`entry_anchor_ts` **is** `wct + feed_delay_s`, so the second clause reduces to
+`exit_time_offset_s < 0` — an exact duplicate of the first. This file previously claimed it
+was "verified to fire when the bug is reintroduced." **It was not.** Measured 2026-08-05:
+with the original three-line defect restored (`future_ticks > wct`, `future_poss > wct`,
+`entry_wall_clock=wct`) the backtest ran to completion — 178 trades, 30.9% win rate, 0.03s
+minimum hold, net −$258.04 against the correct −$324.35 — and the guard never fired. It had
+been protecting nothing for two days while being cited as evidence that it was.
+
+The replacement asserts the **inputs** to `simulate_exit`, not its output, because the offset
+it returns is measured from whatever anchor it was handed:
+
+- `exit_search_start` is the single name the tick window, the possession window and the call
+  all read, so there is one place to get it wrong;
+- the window may not open before `wct + feed_delay_s`;
+- nothing reachable by the exit search may predate the anchor (this is the clause that
+  catches the actual historical defect);
+- a non-`time_gate` exit must land within 1 ms of a real tick, which catches an anchor and a
+  tick window that have drifted apart.
+
+Confirmed to raise on game `0042500101` when `exit_search_start` is pointed back at `wct`,
+and confirmed not to fire on any of the 181 valid trades.
 
 Do **not** assert `hold_time_s >= feed_delay_s` — once the anchor is correct, hold time is
 measured *from* the anchor and a legitimate 1s hold exists.
+
+**General rule this cost us:** an invariant written in terms of quantities that are equal by
+construction is not an invariant. Before trusting a guard, reintroduce the bug and watch it
+fail — over the full population, not one synthetic row.
 
 ### Never estimate a fix by filtering
 

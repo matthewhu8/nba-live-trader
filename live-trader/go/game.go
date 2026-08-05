@@ -339,7 +339,8 @@ func (g *GameEngine) Run(ctx context.Context) {
 								// Cancel-vs-fill race: TP won. Re-route as TP exit.
 								reason = "TAKE_PROFIT"
 								closePrice = openPosition.RestingTPPrice
-								pnl = calcNetPnL(openPosition.Size, openPosition.EntryPrice, closePrice)
+								// The resting TP filled, so this leg was a maker.
+								pnl = calcNetPnL(openPosition.Size, openPosition.EntryPrice, closePrice, makerFeeRate)
 								tpFilled = true
 								ok = true
 							}

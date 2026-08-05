@@ -37,6 +37,15 @@ agent:
   # (+$39.3K net / 51.9% wr / 183 trades on 128 val games — beats all alternatives).
   # TP=5¢, SL=3¢ unchanged: break-even at TP=5/SL=3 is 37.5%; actual 51.9% margin.
   min_run_prob_entry: 0.0
+  # CONTAMINATED: tuned on pre-#52 / pre-exit-window-fix backtests (see PR #52 comment).
+  # Must be re-derived after the Level 2 label fix and retrain. Do not trust before preseason.
+  #
+  # The 2026-06-06 justification below compared two inflated buckets: both the 0.08-0.12 and
+  # the 0.12-0.20 win rates came from runs carrying all four measurement defects (exit-window
+  # lookahead, TP over-crediting, zeroed fees, cents-labelled-dollars), so the "+$0.11/30C"
+  # has no validated basis in either direction. Value deliberately left unchanged — changing
+  # a live entry gate on the strength of a retracted measurement would repeat the mistake.
+  #
   # 2026-06-06: raised from 0.08 → 0.12. At 0.08 the band 0.08-0.12 had 33% win
   # rate (below the 55-56% break-even at TP=5/SL=3 with maker entry + maker TP +
   # taker SL fees). Raising to 0.12 cuts ~60% of trades but lifts win rate to

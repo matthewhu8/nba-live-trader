@@ -109,9 +109,12 @@ func TestCheckExitWithRestingTPExecuted(t *testing.T) {
 	if !exit || reason != "TAKE_PROFIT" {
 		t.Fatalf("got (exit=%v reason=%q) want (true, TAKE_PROFIT)", exit, reason)
 	}
-	wantPnL := float64(50-45) * 10 / 100.0 // +$0.50 — at limit price, not through
+	// At the limit price (50), not the through price (70), and net of maker fees
+	// on both legs since a resting TP fills as a maker.
+	wantPnL := float64(50-45)*10/100.0 -
+		kalshiFee(10, 45, makerFeeRate) - kalshiFee(10, 50, makerFeeRate)
 	if pnl != wantPnL {
-		t.Errorf("pnl = %v, want %v (at RestingTPPrice not yesBid)", pnl, wantPnL)
+		t.Errorf("pnl = %v, want %v (at RestingTPPrice not yesBid, net of fees)", pnl, wantPnL)
 	}
 }
 
@@ -136,8 +139,19 @@ func TestPaperModeTPSimulatesRestingFill(t *testing.T) {
 	if pos.RestingTPStatus != "executed" {
 		t.Errorf("RestingTPStatus should be 'executed' after paper TP, got %q", pos.RestingTPStatus)
 	}
-	// pnl reflects fill at TP target (45), not the runaway bid (50).
-	if pnl != float64(5*10)/100.0 {
-		t.Errorf("paper TP pnl = %v, want 0.50 (5¢ × 10 contracts)", pnl)
+	// pnl reflects fill at TP target (45), not the runaway bid (50), and is NET
+	// of both legs' fees. Entry and a resting TP both fill as makers:
+	//   gross = 5¢ × 10 / 100                     = $0.50
+	//   fee   = kalshiFee(10, 40, maker) at entry = $0.05
+	//         + kalshiFee(10, 45, maker) at exit  = $0.05
+	//   net                                       = $0.40
+	wantGross := float64(5*10) / 100.0
+	wantFees := kalshiFee(10, 40, makerFeeRate) + kalshiFee(10, 45, makerFeeRate)
+	if pnl != wantGross-wantFees {
+		t.Errorf("paper TP pnl = %v, want %v (gross %v less fees %v)",
+			pnl, wantGross-wantFees, wantGross, wantFees)
+	}
+	if wantFees == 0 {
+		t.Error("fees are zero — calcNetPnL has regressed to gross P&L")
 	}
 }
