@@ -33,16 +33,12 @@ The `P × (1-P)` term is required. Fees peak at 50¢ and fall toward both ends o
 the book. The old form here (`0.0175 × contracts × price`) omitted it and gave
 $0.88 at 50¢, contradicting its own $0.44 example.
 
-**Compute this in `Decimal`, never float.** In float64 the product lands a few ulp above
-an exact cent and `ceil` rounds a whole cent up, disagreeing with Kalshi's published table
-on three of five taker rows — 50¢ returns $1.76, 20¢ returns $1.13, 10¢ returns $0.64. An
-earlier revision of this table recorded the buggy **$1.76** as if it were correct. Assert
-against the published table, not against the code: `tests/test_fees.py`.
+**Compute in `Decimal`, never float** — float64 `ceil` promotes a whole cent on 3 of 5
+taker rows. Assert against Kalshi's published table, not the code: `tests/test_fees.py`.
 
-Canonical implementation: `backtesting/mmoe_backtest.py::_fee_one_leg`. The only other one
-is `inference/dashboard.py::kalshiMakerFee` (JavaScript). **There is no Go fee function** —
-`orders.go::calcNetPnL` returns gross P&L with no fee deduction, so a `orders.go::kalshiFee`
-cross-reference is a dangling pointer.
+Implemented once per language: `mmoe_backtest.py::_fee_one_leg` and
+`inference/dashboard.py::kalshiMakerFee` (JS). **No Go fee function exists** —
+`orders.go::calcNetPnL` is gross of fees.
 
 Entry is always maker. Exits pay maker only on `take_profit` (PR #50 rests the TP limit);
 `stop_loss`, `momentum_flip`, `garbage_time` and `time_gate` cross the book and pay taker.
@@ -59,46 +55,20 @@ divide by 100. A 100-contract position cannot swing more than $100 total.
   - MMoE (58-feat, 2026-08-03): Head A AUCPR 0.1590, Head B dir acc 62.5%, Head C Brier 0.0860
   - Entry gates: `|traj_final| ≥ 0.08`, `run_length ≥ 2`, price 30-70¢, no garbage time
 
-> 🔴 **The exit-window fix covers the BACKTEST ONLY.**
-> `models/targets/exit_simulator.py:237` still reads `entry_ts = pd.Timestamp(row["wall_clock_ts"])`
-> with no feed delay applied. That file generates **Head B's and Head C's training labels**, so
-> every label the deployed model learned from — and every Head B metric scored against them,
-> including the **62.5% directional accuracy that selected the deployed checkpoint** — was
-> produced by simulating exits ~20s before a live trader could have acted.
-> Fixing it invalidates the current checkpoints and requires a retrain, so it is scoped
-> separately (Level 2). **Do not retrain until it lands.** See `skills/data-integrity.md`.
-
-> ⚠️ **`207 trades / 47.8% / +$37,409` is VOID — do not quote it.** That backtest had four
-> compounding defects (exit-window lookahead, take-profits credited above the resting limit,
-> fees hardcoded to 0.0, and P&L reported in cents but labelled dollars — so 100× too large).
-> Full accounting in `skills/backtesting.md`.
+> 🔴 **The exit-window fix is BACKTEST-ONLY. `exit_simulator.py:237` still builds Head B/C
+> training labels with no feed delay** — including the 62.5% dir acc that picked the deployed
+> checkpoint. **Do not retrain until Level 2 lands.** See `skills/data-integrity.md`.
 >
-> ⚠️ **`80 trades / 30.0% / −$136.42` is ALSO superseded.** It was measured on the
-> **83-feature** model on 2026-08-03 at 16:01, hours before this branch merged PR #51 and
-> swapped in the 58-feature model. It reproduces exactly at `85d8a66`, but it does not
-> describe the current code. It was additionally measured with a fee function that
-> overcharged up to a cent per leg.
+> ⚠️ **Baseline: 181 trades / 26.0% / −$324.35**, per-trade −$1.79 CI [−$2.40, −$1.17].
+> `+$37,409`, `+$16,100` and `−$136.42` are all superseded — **do not quote them.**
+> **Always quote the config with the number**; a wrong command sat beside `−$136.42` for two
+> days. Command, provenance and the four defects: `skills/backtesting.md`.
 >
-> **Current baseline (2026-08-05, post-merge with PR #54):**
-> **181 trades, 26.0% win rate, gross −$6.00, fees $318.35, net −$324.35** across 44 games.
-> Per-trade **−$1.79**, game-clustered bootstrap 95% CI **[−$2.40, −$1.17]**. Config:
-> `--use-traj-for-side --min-abs-traj 0.08 --min-run-length 2 --hold-seconds 240
-> --threshold 0.15 --traj-aggregator mean`. Full provenance in `skills/backtesting.md`.
-> The strategy still loses money with well over 99% confidence — but see the Level 2 note
-> above before treating that as a verdict on the idea.
+> ⚠️ Head B's `62.5%` and every checkpoint predate the `wall_clock_ts` repair; 55% of Head B's
+> val rows carried settled prices. See `skills/model-provenance.md`.
 >
-> **Quote the command, not just the number.** The corrected run used
-> `--traj-aggregator mean --threshold 0.15`, *not* the `--threshold 0.0` command block that
-> sat above it in `skills/backtesting.md` for two days. Config is part of a result.
->
-> Head B's `62.5%` dir acc is also provisional: every checkpoint to date was trained before
-> the 2026-08-03 `wall_clock_ts` repair, and **55% of Head B's validation rows carried
-> settled prices**, so early stopping and metric reporting both ran on corrupt data.
-> See `skills/model-provenance.md`.
->
-> `min_abs_traj_entry: 0.12` in `trading.yaml` was tuned on these figures and has **no validated
-> basis in either direction** — the 0.08-vs-0.12 comparison was between two inflated buckets.
-> Re-derive before the next live session.
+> ⚠️ `min_abs_traj_entry: 0.12` in `trading.yaml` was tuned on inflated figures — no validated
+> basis in either direction. Re-derive before the next live session.
 
 **Test set (2024-26 season):** Sacred. Never touch during dev.
 

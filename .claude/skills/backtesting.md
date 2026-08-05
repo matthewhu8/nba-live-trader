@@ -175,16 +175,31 @@ substitution had occurred. Re-export before treating this as final. See `data-in
 80 trades came from only 30 of 69 games. Per `model-provenance.md`, demonstrating a
 +$1.00/trade edge needs ~106 games. Size the validation set before running, not after.
 
-## Entry Gates (Current Config)
-| Gate | Status |
-|------|--------|
-| `\|traj_final\| ≥ 0.08` | required |
-| `run_length ≥ 2` | required |
-| Price 30–70¢ | required |
-| No garbage time/blowout | required |
-| `run_prob ≥ 0.10` | not used — reduces P&L |
+## Entry Gates
 
-Direction from `traj_final` sign. Edit `trading.yaml` to tune.
+`live-trader/config/trading.yaml` is the source of truth. This table had drifted from it on
+two of five rows; check both before quoting either.
+
+| gate | `trading.yaml` (live) | backtest baseline flag |
+|---|---|---|
+| trajectory magnitude | `min_abs_traj_entry: 0.12` ⚠️ **contaminated** | `--min-abs-traj 0.08` |
+| Head A run prob | `min_run_prob_entry: 0.0` | `--threshold 0.15` |
+| run length | `min_run_length_entry: 2` | `--min-run-length 2` |
+| aggregator | `traj_aggregator: "mean"` | `--traj-aggregator mean` |
+| price band | 30–70¢ | 30–70¢ |
+| regime | `blowout_margin_pts: 30` | `_filter_to_traded_regime` |
+
+Two divergences are deliberate and two are not:
+
+- **`min_run_prob_entry: 0.0` is intentional**, not a bug — Head A's gating collapsed and
+  routes 95%+ to the conservative expert, so the gate carries no information. The backtest's
+  `--threshold 0.15` is a leftover default and means the two are **not** measuring the same
+  strategy. Reconcile before reading across them.
+- **`min_abs_traj_entry: 0.12` vs the backtest's 0.08** is unresolved. The 0.12 was tuned on
+  inflated figures (see `trading.yaml:40`) and has no validated basis. Re-derive after Level 2.
+
+Direction comes from the sign of the aggregated trajectory (`traj_used`), not `traj_final`,
+whenever `--use-traj-for-side` is set — which the baseline and `agent.go` both do.
 
 ## MMoE Performance
 
