@@ -10,8 +10,9 @@ These use synthetic ticks so they run in milliseconds. Note the deliberate limit
 recorded in `.claude/skills/backtesting.md`: the exit-window guard only fires when an exit
 actually resolves earlier than `wct + feed_delay_s`, which on any *individual* possession
 may legitimately not happen. A single synthetic row can therefore pass with the bug
-reintroduced. The population-level check belongs in a full-cache run — see the negative-test
-log in the PR description — and this file asserts the guard's logic directly instead.
+reintroduced. This file asserts the guard's logic directly instead; the real end-to-end
+negative test — the three-line defect reintroduced against game `0042500101`, with a control
+run to prove it is not vacuous — is recorded in `.claude/skills/backtesting.md`.
 """
 
 import sys

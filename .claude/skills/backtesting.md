@@ -145,8 +145,28 @@ it returns is measured from whatever anchor it was handed:
 - a non-`time_gate` exit must land within 1 ms of a real tick, which catches an anchor and a
   tick window that have drifted apart.
 
-Confirmed to raise on game `0042500101` when `exit_search_start` is pointed back at `wct`,
-and confirmed not to fire on any of the 181 valid trades.
+**Negative test — measured 2026-08-05 on game `0042500101`.** Control first, so the test is
+not vacuous: unpatched, that game yields 2 trades with a 16.17s minimum hold and no raise.
+Then the full three-line defect (`future_ticks > wct`, `future_poss > wct`,
+`entry_wall_clock=wct`) with `exit_search_start` deliberately **left at the anchor**, so
+clause (a) cannot fire and the run actually exercises clause (b):
+
+```
+RuntimeError: exit search can see pre-entry ticks in game 0042500101 @ 2026-04-19 22:45:12+00:00:
+  earliest=2026-04-19 22:45:12.169127+00:00, anchor=2026-04-19 22:45:32+00:00
+```
+
+19.8s of visible pre-entry tape against a 20s feed delay. **Clause (b) is the one to confirm.**
+An earlier version of this file claimed the test was "confirmed to raise ... when
+`exit_search_start` is pointed back at `wct`" — that variant trips clause (a) trivially and
+proves nothing about the historical bug, which left `exit_search_start` correct and widened
+the windows underneath it.
+
+Note that clause (a) still cannot fire in current code, since `exit_search_start` **is**
+`wct + feed_delay_s`. It is a tripwire against a future edit to that one assignment, not
+active coverage. Do not count it as such.
+
+The guard fires on none of the 181 valid trades in the full run.
 
 Do **not** assert `hold_time_s >= feed_delay_s` — once the anchor is correct, hold time is
 measured *from* the anchor and a legitimate 1s hold exists.
