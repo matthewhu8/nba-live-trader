@@ -709,16 +709,17 @@ def _join_ticks_to_possessions(
             left_on="_join_ts",
             right_on="ts",
             direction="backward",
-            # Without this the join reaches arbitrarily far back for a tick. It
-            # matters because ~86 games carry a +1-day wall_clock_ts bug (root
-            # cause documented at post_game_pipeline.py:903; the code was fixed
-            # but the written rows were never re-backfilled), so those
-            # possessions silently bound to market state ~24 hours stale and
-            # passed the dropna below as if valid.
+            # Without this the join reaches arbitrarily far back for a tick, so a
+            # possession could bind to market state of any age and pass the dropna
+            # below as if valid.
             #
-            # The bound matches the live staleness gate in ring_buffer.go, so a
-            # possession that live would refuse to trade is also excluded from
-            # training rather than being learned from.
+            # The motivating case — ~86 games carrying a +1-day wall_clock_ts bug
+            # (post_game_pipeline.py:903) — was repaired in the warehouse by PR #52
+            # on 2026-08-03: 11,060/11,060 cache rows now match the warehouse and
+            # 4,930 of 5,332 shifted exactly -24h. The bound stays because it is the
+            # right rule regardless of that one bug: it matches the live staleness
+            # gate in ring_buffer.go, so a possession live would refuse to trade is
+            # also excluded from training rather than learned from.
             tolerance=pd.Timedelta(seconds=MARKET_STALENESS_TOLERANCE_SECONDS),
         ).drop(columns=["ts", "_join_ts"], errors="ignore")
 
@@ -744,10 +745,13 @@ def _join_ticks_to_possessions(
         )
         if stale_dropped > 0.20 * candidate_rows:
             logger.warning(
-                "Over 20%% of tick-game possessions have no fresh market data. Likely "
-                "the +1-day wall_clock_ts bug (post_game_pipeline.py:903). Those rows "
+                "Over 20%% of tick-game possessions have no fresh market data. Those rows "
                 "are correctly excluded here, but the affected games are contributing "
-                "nothing to Head B and should be re-backfilled."
+                "nothing to Head B. NOTE: the +1-day wall_clock_ts bug this originally "
+                "pointed at was repaired by PR #52 (2026-08-03) and the tick-join guard "
+                "from #52 now covers it, so a trip today means something else — sparse "
+                "tick coverage, a market that stopped quoting, or a new ingestion gap. "
+                "Investigate before assuming timestamps."
             )
 
     basketball_only = possessions[~possessions["game_id"].isin(games_with_ticks)].copy()

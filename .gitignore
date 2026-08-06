@@ -24,3 +24,19 @@ analysis/
 # feature_distribution_diff.py reference cache (rebuildable from MotherDuck)
 tools/.reference_distribution.json
 .DS_Store
+# Backtest run outputs — regenerate with `python -m backtesting.mmoe_backtest`
+backtesting/results/*.csv
+
+# One-off analysis scratch. Deliberately untracked: the main artefact here,
+# feature_audit.csv, is documented as invalid in skills/model-provenance.md
+# ("do not use this artefact to justify a retrain"), so it must not be
+# mistaken for supporting evidence.
+scratch/
+
+# Pre-repair wall_clock_ts snapshots (2026-08-03). Local recovery artefacts,
+# referenced by docs/STATE_2026-08-03.md; too large and too situational to track.
+data/backups/
+
+# Rendered assessment exports — the Markdown source is what belongs in git.
+docs/ASSESSMENT_*.html
+docs/ASSESSMENT_*.pdf

@@ -27,26 +27,48 @@ KALSHI_PEM_PATH=~/.kalshi/private_key.pem  # outside repo
 ```
 fee = ceil(rate × contracts × P × (1-P) × 100) / 100     P = price/100, result in $
   Maker rate 0.0175   →  $0.44 per 100 @ 50¢
-  Taker rate 0.07     →  $1.76 per 100 @ 50¢
+  Taker rate 0.07     →  $1.75 per 100 @ 50¢
 ```
 The `P × (1-P)` term is required. Fees peak at 50¢ and fall toward both ends of
 the book. The old form here (`0.0175 × contracts × price`) omitted it and gave
 $0.88 at 50¢, contradicting its own $0.44 example.
 
-Implemented once per language: `backtesting/mmoe_backtest.py::kalshi_fee` and
-`live-trader/go/orders.go::kalshiFee`. Entry is always maker. TP exits rest as
-maker; SL / TRAIL / TIME exits cross as taker at 4× the rate.
+**Compute in `Decimal`, never float** — float64 `ceil` promotes a whole cent on 3 of 5
+taker rows. Assert against Kalshi's published table, not the code: `tests/test_fees.py`.
+
+Implemented once per language: `mmoe_backtest.py::_fee_one_leg` and
+`inference/dashboard.py::kalshiMakerFee` (JS). **No Go fee function exists** —
+`orders.go::calcNetPnL` is gross of fees.
+
+Entry is always maker. Exits pay maker only on `take_profit` (PR #50 rests the TP limit);
+`stop_loss`, `momentum_flip`, `garbage_time` and `time_gate` cross the book and pay taker.
+**Break-even at TP=5/SL=3 is 55.7%** (win +$4.12, loss −$5.19). See `skills/backtesting.md`.
 
 All prices in cents (1–99), never floats. YES @ 60¢ = 60% implied probability.
 **P&L is reported in DOLLARS.** A price delta in cents × contracts is cents —
 divide by 100. A 100-contract position cannot swing more than $100 total.
+100 contracts × 5¢ = **$5.00, not $500** — mixing cents and dollars understated fees 100×.
 
 ## Current Status
 - [x] Phase 1-5: Data foundation, feature store, backtesting, MMoE model, execution engine
 - [ ] **Phase 6: Paper trading** ← CURRENT
-  - MMoE: Head A AUCPR 0.1593, Head B dir acc 61.1%, Head C Brier 0.0860
-  - Backtest: 207 trades, 47.8% win rate, +$37,409 net
+  - MMoE (58-feat, 2026-08-03): Head A AUCPR 0.1590, Head B dir acc 62.5%, Head C Brier 0.0860
   - Entry gates: `|traj_final| ≥ 0.08`, `run_length ≥ 2`, price 30-70¢, no garbage time
+
+> 🔴 **The exit-window fix is BACKTEST-ONLY. `exit_simulator.py:237` still builds Head B/C
+> training labels with no feed delay** — including the 62.5% dir acc that picked the deployed
+> checkpoint. **Do not retrain until Level 2 lands.** See `skills/data-integrity.md`.
+>
+> ⚠️ **Baseline: 181 trades / 26.0% / −$324.35**, per-trade −$1.79 CI [−$2.40, −$1.17].
+> `+$37,409`, `+$16,100` and `−$136.42` are all superseded — **do not quote them.**
+> **Always quote the config with the number**; a wrong command sat beside `−$136.42` for two
+> days. Command, provenance and the four defects: `skills/backtesting.md`.
+>
+> ⚠️ Head B's `62.5%` and every checkpoint predate the `wall_clock_ts` repair; 55% of Head B's
+> val rows carried settled prices. See `skills/model-provenance.md`.
+>
+> ⚠️ `min_abs_traj_entry: 0.12` in `trading.yaml` was tuned on inflated figures — no validated
+> basis in either direction. Re-derive before the next live session.
 
 **Test set (2024-26 season):** Sacred. Never touch during dev.
 

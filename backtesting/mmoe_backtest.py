@@ -18,6 +18,7 @@ import math
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Optional
 
@@ -33,6 +34,7 @@ from models.mmoe.dataset import (
     BOOL_COLS,
     _add_derived_features,
     _connect_motherduck,
+    _filter_to_traded_regime,
     _join_pregame,
     _load_kalshi_ticks,
     _load_possession_flat,
@@ -51,6 +53,35 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+_CACHE_DIR     = Path("data/feature_store")
+_POSS_CACHE    = _CACHE_DIR / "possession_flat.parquet"
+_TICKS_CACHE   = _CACHE_DIR / "kalshi_ticks.parquet"
+_PREGAME_CACHE = _CACHE_DIR / "pregame.parquet"
+
+
+def _load_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Load the three source tables, preferring the local parquet cache.
+
+    A full MotherDuck scan of possession_flat + kalshi_ticks exhausted the
+    free-tier daily compute limit, so the cache is the default path. Rebuild it
+    with data/ingestion/export_backtest_cache.py.
+    """
+    if _POSS_CACHE.exists() and _TICKS_CACHE.exists() and _PREGAME_CACHE.exists():
+        logger.info("Loading from local parquet cache...")
+        poss    = pd.read_parquet(_POSS_CACHE)
+        ticks   = pd.read_parquet(_TICKS_CACHE)
+        pregame = pd.read_parquet(_PREGAME_CACHE)
+        logger.info("  possession_flat: %d rows / %d games | ticks: %d rows | pregame: %d rows",
+                    len(poss), poss["game_id"].nunique(), len(ticks), len(pregame))
+        return poss, ticks, pregame
+    logger.info("Local cache not found — connecting to MotherDuck...")
+    conn    = _connect_motherduck()
+    poss    = _load_possession_flat(conn)
+    ticks   = _load_kalshi_ticks(conn)
+    pregame = _load_pregame(conn)
+    conn.close()
+    return poss, ticks, pregame
+
 
 # ── Data structures ──────────────────────────────────────────────────────────
 
@@ -65,7 +96,7 @@ class ClosedPosition:
     entry_side:    int          # +1 BUY_YES | -1 BUY_NO
     hold_time_s:   float
     gross_pnl:     float        # CENTS per contract: entry_side * (exit_price - entry_price)
-    net_pnl:       float        # DOLLARS: gross_pnl * contracts / 100 - fees
+    net_pnl:       float        # DOLLARS: pnl_dollars(gross_pnl, contracts) - fees
     run_prob:        float
     traj_final:      float      # trajectory[-1] at entry (legacy column, kept for backward compat)
     traj_used:       float      # aggregated trajectory actually consulted for entry gate
@@ -74,6 +105,8 @@ class ClosedPosition:
     quarter:         int
     score_diff:      int
     run_length:      int
+    fees:            float = 0.0   # round-trip fees actually charged (maker entry + reason-based exit)
+    entry_tick_age_s: float = 0.0  # how stale the entry tick was vs wct + feed_delay_s
 
 
 TRAJ_AGGREGATORS = ("final", "mean", "mean_3_to_9", "max_abs")
@@ -121,6 +154,39 @@ class BacktestSummary:
 
 # ── Market feature helpers ───────────────────────────────────────────────────
 
+def _tick_at_delay(
+    enriched_game_ticks: pd.DataFrame,
+    wall_clock_ts: pd.Timestamp,
+    delay_s: int,
+) -> tuple[Optional[pd.Series], pd.Timestamp]:
+    """The tick a trader could actually act on for a possession ending at wall_clock_ts.
+
+    Returns (tick, entry_anchor_ts) where entry_anchor_ts is wall_clock_ts + delay_s —
+    the earliest moment the position can exist. The tick itself is the most recent one
+    at or before that anchor (a backward asof, matching the training-time join), so it
+    may be older than the anchor; `tick["ts"]` vs the anchor is the entry staleness.
+
+    Single source of truth for the delay: the exit window must start at the anchor this
+    returns, or the simulation can exit before it entered.
+
+    The lookback is bounded by MARKET_STALENESS_TOLERANCE_SECONDS (PR #54), matching the
+    training join and the live staleness gate in ring_buffer.go. Unbounded, a possession
+    binds to a tick of any age and backtests as a real trade; returning None instead sets
+    has_market_data=0, the honest signal that we could not have priced it live. The bound
+    lives here rather than in the caller so the feature lookup and the exit anchor cannot
+    drift apart — that divergence is what produced the exit-window lookahead.
+    """
+    entry_anchor_ts = wall_clock_ts + pd.Timedelta(seconds=delay_s)
+    earliest_ts = entry_anchor_ts - pd.Timedelta(seconds=MARKET_STALENESS_TOLERANCE_SECONDS)
+    candidates = enriched_game_ticks[
+        (enriched_game_ticks["ts"] <= entry_anchor_ts)
+        & (enriched_game_ticks["ts"] >= earliest_ts)
+    ]
+    if candidates.empty:
+        return None, entry_anchor_ts
+    return candidates.iloc[-1], entry_anchor_ts
+
+
 def _get_market_features_at_delay(
     enriched_game_ticks: pd.DataFrame,
     wall_clock_ts: pd.Timestamp,
@@ -138,22 +204,11 @@ def _get_market_features_at_delay(
     prev_yes_bid and prev_spread are the values from the previous possession's tick,
     used to compute d_yes_bid and d_spread — matching the diff() logic in training.
     """
-    lookup_ts = wall_clock_ts + pd.Timedelta(seconds=delay_s)
-
-    # Bounded lookback, matching the training join and the live staleness gate.
-    # Unbounded, a possession in one of the ~86 games carrying the +1-day
-    # wall_clock_ts bug binds to a tick ~24 hours old and backtests as a real
-    # trade. Returning zeros here sets has_market_data=0, which is the honest
-    # signal that we could not have priced this possession live.
-    earliest_ts = lookup_ts - pd.Timedelta(seconds=MARKET_STALENESS_TOLERANCE_SECONDS)
-    candidates = enriched_game_ticks[
-        (enriched_game_ticks["ts"] <= lookup_ts)
-        & (enriched_game_ticks["ts"] >= earliest_ts)
-    ]
-    if candidates.empty:
+    # _tick_at_delay applies the MARKET_STALENESS_TOLERANCE_SECONDS bound (PR #54).
+    tick, _ = _tick_at_delay(enriched_game_ticks, wall_clock_ts, delay_s)
+    if tick is None:
         return {col: 0.0 for col in MARKET_COLS}
 
-    tick = candidates.iloc[-1]
     current_bid    = float(tick["yes_bid"])
     current_spread = float(tick["spread"])
 
@@ -175,13 +230,51 @@ def _get_market_features_at_delay(
     }
 
 
+# Features that production does NOT actually deliver to the model, as measured from
+# 3,131 recorded possessions across 27 sessions in live-trader/go/logs/runs/ (2026-08-03).
+# The backtest reads these from the feature store, so it trades a strategy production
+# cannot run. `--prod-features` zeroes them to measure what live would really have done.
+#
+# Sources of each gap:
+#   11 pregame  — features.pregame has no row at tip-off (3 AM ET prefill runs after the
+#                 day's games), so live-trader/inference/pregame.py:137 zero-fills. 0.0 in
+#                 100% of recorded prod possessions.
+#   2 lineup sample_size — hardcoded `0.0  # TODO` at inference/features.py:228-229.
+#   3 lineup net_rating  — non-zero in only 1.8-8.8% of prod possessions vs 31-41% here,
+#                 because game_state.py:129-131 never seeds starters so the lineup hash
+#                 rarely matches. Zeroing slightly OVERSHOOTS the real gap.
+_PROD_ZERO_FEATURES = tuple(PREGAME_COLS) + (
+    "home_lineup_sample_size", "away_lineup_sample_size",
+    "home_lineup_net_rating",  "away_lineup_net_rating", "lineup_net_rating_delta",
+)
+# Losing expected_pace also pins this constant in prod (inference/pregame.py:95).
+_PROD_PINNED_FEATURES = {"pace_season_baseline": 14.0}
+
+# NOT masked, deliberately: was_foul / was_sub are populated in prod (20.2% / 16.5%) but
+# are all-NaN in the local cache, so this backtest already understates them. That skew
+# runs the opposite way and cannot be corrected from the cache.
+
+
+def _apply_prod_feature_gaps(fd: dict[str, float]) -> dict[str, float]:
+    """Degrade a feature dict to what production actually supplies. See _PROD_ZERO_FEATURES."""
+    out = dict(fd)
+    for col in _PROD_ZERO_FEATURES:
+        if col in out:
+            out[col] = 0.0
+    for col, val in _PROD_PINNED_FEATURES.items():
+        if col in out:
+            out[col] = val
+    return out
+
+
 def _build_feature_dict(
     poss_row: pd.Series,
     market_features: dict[str, float],
 ) -> dict[str, float]:
     """
-    Assemble 83-dim feature dict from a possession_flat row + market feature dict.
-    Physics (58) + Pregame (11) come from poss_row; Market (14) from market_features.
+    Assemble the model's feature dict from a possession_flat row + market feature dict.
+    Physics + Pregame come from poss_row; Market from market_features. Sizes follow
+    feature_config.py (58 = 33 + 11 + 14 as of PR #51); do not hardcode a count here.
     """
     fd: dict[str, float] = {}
 
@@ -199,39 +292,70 @@ MAKER_FEE_RATE = 0.0175
 TAKER_FEE_RATE = 0.07
 
 
-def kalshi_fee(contracts: int, price_cents: float, rate: float = MAKER_FEE_RATE) -> float:
+def pnl_dollars(price_move_cents: float, contracts: int) -> float:
+    """Convert a price move in cents into dollars for `contracts` contracts.
+
+    A Kalshi contract settles at $1, quoted 1-99c, so one contract moving 1c is $0.01:
+    100 contracts x 5c = $5.00, NOT $500. Fees are computed in dollars, so P&L must be
+    too -- `gross_cents * contracts - fees_dollars` silently mixes the two and makes the
+    fee look 100x smaller than it is. That mix is why the old backtests reported figures
+    like "+$16,100" (really 16,100 cents = $161) while CLAUDE.md's break-even win rate of
+    55-56% was derived with correct units.
     """
-    Kalshi trading fee in DOLLARS for one leg.
+    return price_move_cents * contracts / 100.0
 
-        fee = ceil(rate * contracts * P * (1 - P) * 100) / 100      P = price/100
+# Exits that rest a limit order and therefore pay the maker rate. Every other exit
+# reason crosses the book to get out now, so it pays taker — see CLAUDE.md Phase 6:
+# resting maker take-profits (PR #50), stops cross the book.
+_MAKER_EXIT_REASONS = frozenset({"take_profit"})
 
-    The P*(1-P) term matters: fees peak at 50c and fall toward either end of the
-    book. Dropping it (as `.claude/CLAUDE.md` did) overstates the fee near 50c by
-    2x and understates it at the extremes.
 
-    Check against the documented example: 100 contracts at 50c
-        0.0175 * 100 * 0.5 * 0.5 = 0.4375  ->  ceil(43.75)/100 = $0.44   ✓
+def _fee_one_leg(rate: float, price_cents: float, contracts: int) -> float:
+    """Kalshi fee for a single leg, in DOLLARS:
 
-    This previously returned 0.0 on the claim that resting orders are free, which
-    contradicted both the project docs and the dashboard implementation. Every
-    backtest run before this change was gross of fees.
+        fee = ceil(rate x C x P x (1-P) x 100) / 100      P = price/100
+
+    The P(1-P) term is part of Kalshi's published formula; fees peak at 50c and fall
+    toward both ends of the book. Dropping it overstates the fee ~2x at the midpoint.
+    Worked example: 100 contracts at 50c maker, 0.0175 x 100 x 0.5 x 0.5 = 0.4375 ->
+    ceil(43.75)/100 = $0.44.
+
+    Computed in Decimal, NOT float. In float64 the product lands a few ulp above an
+    exact cent and `ceil` then rounds a whole cent up, contradicting Kalshi's published
+    table on three of five taker rows: 0.07*100*0.5*0.5*100 evaluates to
+    175.00000000000003, so 100 contracts at 50c taker returned $1.76 instead of $1.75
+    (likewise $0.10 -> $0.64 not $0.63, and $0.20 -> $1.13 not $1.12). Both this
+    function and the `kalshi_fee` added by PR #54 had the defect, and `.claude/CLAUDE.md`
+    on main documented the wrong $1.76 as if it were correct. See tests/test_fees.py.
+
+    This matches live-trader/inference/dashboard.py::kalshiMakerFee.
     """
-    p = price_cents / 100.0
-    return math.ceil(rate * contracts * p * (1.0 - p) * 100.0) / 100.0
+    p = Decimal(str(price_cents)) / Decimal(100)
+    raw_cents = Decimal(str(rate)) * Decimal(contracts) * p * (Decimal(1) - p) * Decimal(100)
+    return math.ceil(raw_cents) / 100.0
 
 
-def _compute_maker_fees(entry_price: float, exit_price: float, contracts: int) -> float:
+def _compute_fees(
+    entry_price: float,
+    exit_price: float,
+    contracts: int,
+    exit_reason: str,
+) -> float:
+    """Round-trip fees. Entry is always a resting limit (maker); the exit leg's rate
+    depends on how we got out.
+
+    Previously returned 0.0 unconditionally, which silently zeroed the taker cost on
+    every stop-out — i.e. on the losers.
+
+    Supersedes `_compute_maker_fees` from PR #54, which charged maker on both legs. Its
+    own docstring conceded that stop-losses cross the book at 4x the rate and that it did
+    not model them, so its output was a floor rather than a cost. Since stop_loss is the
+    single most common exit reason, that floor sat well under the real number.
     """
-    Round-trip fee in DOLLARS: maker in, maker out.
-
-    Conservative in one direction and optimistic in another. Take-profit exits do
-    rest as makers, but stop-loss exits cross the book as takers at 4x the rate,
-    and this does not model that. Treat the result as a floor on true cost.
-    """
-    return (
-        kalshi_fee(contracts, entry_price, MAKER_FEE_RATE)
-        + kalshi_fee(contracts, exit_price, MAKER_FEE_RATE)
-    )
+    entry_fee = _fee_one_leg(MAKER_FEE_RATE, entry_price, contracts)
+    exit_rate = MAKER_FEE_RATE if exit_reason in _MAKER_EXIT_REASONS else TAKER_FEE_RATE
+    exit_fee  = _fee_one_leg(exit_rate, exit_price, contracts)
+    return entry_fee + exit_fee
 
 
 # ── Per-game replay ──────────────────────────────────────────────────────────
@@ -251,6 +375,7 @@ def _run_game(
     min_run_length: int = 1,
     hold_seconds: int = 120,
     traj_aggregator: str = "final",
+    prod_features: bool = False,
 ) -> list[ClosedPosition]:
     """Replay one game and return all closed positions."""
     if game_ticks.empty:
@@ -273,9 +398,15 @@ def _run_game(
     for _, row in game_poss.iterrows():
         wct: pd.Timestamp = row["wall_clock_ts"]
 
-        # Skip garbage time
-        if row.get("is_blowout", False) or row.get("is_garbage_time", False):
-            continue
+        # No garbage-time skip here. `_filter_to_traded_regime` in run_backtest already
+        # excluded overtime and |score_diff| > blowout_margin_pts, using the same 30-pt
+        # margin from trading.yaml that training and the live gate use.
+        #
+        # Filtering again on the stored `is_blowout` / `is_garbage_time` columns would be
+        # STRICTER than training, not equivalent to it: those columns are computed with a
+        # 20-pt margin, and per skills/feature-engineering.md they discard 28,627 rows the
+        # system would really trade. Stacking both gates made the backtest refuse
+        # possessions the live agent accepts, which understates the trade population.
 
         # Get market features at wall_clock_ts + feed_delay_s (every possession)
         market_feats = _get_market_features_at_delay(
@@ -302,6 +433,8 @@ def _run_game(
 
         # Build 83-dim feature vector and run inference
         fd = _build_feature_dict(row, market_feats)
+        if prod_features:
+            fd = _apply_prod_feature_gaps(fd)
         output = predictor.predict(fd)
 
         # Entry filter: Head A gate
@@ -331,12 +464,26 @@ def _run_game(
             run_signed = fd.get("run_signed_points", 0.0)
             entry_side = 1 if run_signed >= 0 else -1
 
-        # Simulate exit from entry point
-        future_ticks = enriched_ticks[enriched_ticks["ts"] > wct]
-        future_poss  = game_poss[game_poss["wall_clock_ts"] > wct]
+        # Simulate exit from the moment the position can actually exist.
+        #
+        # The entry price was read at wct + feed_delay_s, so the exit search must start
+        # there too. Anchoring it at wct let a position exit up to feed_delay_s BEFORE
+        # it entered, harvesting price movement that had already happened — which was
+        # the entire measured "edge" (see CLAUDE.md).
+        entry_tick, entry_anchor_ts = _tick_at_delay(enriched_ticks, wct, feed_delay_s)
+        entry_tick_age_s = (
+            (entry_anchor_ts - entry_tick["ts"]).total_seconds() if entry_tick is not None else 0.0
+        )
+
+        # Single source of truth for where the exit window opens. Everything below —
+        # the tick/possession windows, the call, and the invariant — reads this one name.
+        exit_search_start = entry_anchor_ts
+
+        future_ticks = enriched_ticks[enriched_ticks["ts"] > exit_search_start]
+        future_poss  = game_poss[game_poss["wall_clock_ts"] > exit_search_start]
 
         sim = simulate_exit(
-            entry_wall_clock=wct,
+            entry_wall_clock=exit_search_start,
             entry_yes_bid=yes_bid,
             entry_run_team=row.get("current_run_team", None),
             future_ticks=future_ticks,
@@ -347,22 +494,82 @@ def _run_game(
             max_seconds=hold_seconds,
         )
 
-        # gross is CENTS per contract. Multiply by contracts and divide by 100 to
-        # reach dollars. The /100 was missing, so every reported P&L was 100x too
-        # large: a 3c move on 100 contracts is $3.00, not $300. A 100-contract
-        # position cannot swing more than $100 in total, since a contract settles
-        # between $0 and $1.
-        gross = entry_side * (sim.exit_price - yes_bid)
-        gross_dollars = gross * contracts / 100.0
-        fees  = _compute_maker_fees(yes_bid, sim.exit_price, contracts)
-        net   = gross_dollars - fees
+        # Take-profits rest a maker limit at entry + TP (PR #50), so the fill cannot be
+        # better than that limit. simulate_exit reports the price of the tick that
+        # breached the threshold, which overshot the limit by up to 19c on this sample
+        # and booked the overshoot as profit we could never have collected.
+        exit_price = sim.exit_price
+        if sim.exit_reason == "take_profit":
+            exit_price = yes_bid + entry_side * tp
+
+        # Invariant: a position cannot exit before it existed.
+        #
+        # This is asserted on the INPUTS to simulate_exit, not on its output. The previous
+        # form — `entry_anchor_ts + offset < wct + feed_delay_s` — was a tautology: the
+        # anchor IS `wct + feed_delay_s`, so the test reduced to `offset < 0`, duplicating
+        # the clause beside it. Measured 2026-08-05: with the original three-line bug
+        # restored the backtest ran to completion, 178 trades at 30.9% with a 0.03s minimum
+        # hold, and the guard never fired. `skills/backtesting.md` claimed it was "verified
+        # to fire when the bug is reintroduced"; it was not.
+        exit_abs_ts = exit_search_start + pd.Timedelta(seconds=sim.exit_time_offset_s)
+
+        if sim.exit_time_offset_s < 0:
+            raise RuntimeError(
+                f"negative hold in game {game_id} @ {wct}: {sim.exit_time_offset_s}s"
+            )
+
+        # (a) The window must open no earlier than the entry anchor. Fires if
+        #     exit_search_start is re-pointed at wct.
+        if exit_search_start < wct + pd.Timedelta(seconds=feed_delay_s):
+            raise RuntimeError(
+                f"exit window opens before entry in game {game_id} @ {wct}: "
+                f"exit_search_start={exit_search_start}, "
+                f"anchor={wct + pd.Timedelta(seconds=feed_delay_s)} (feed_delay={feed_delay_s}s)"
+            )
+
+        # (b) Nothing reachable by the exit search may predate the anchor. Fires if the
+        #     future_ticks / future_poss filters are widened back to wct — the actual
+        #     historical defect, which let a position close on movement that had already
+        #     happened before it opened.
+        if not future_ticks.empty and future_ticks["ts"].min() <= exit_search_start:
+            raise RuntimeError(
+                f"exit search can see pre-entry ticks in game {game_id} @ {wct}: "
+                f"earliest={future_ticks['ts'].min()}, anchor={exit_search_start}"
+            )
+        if not future_poss.empty and future_poss["wall_clock_ts"].min() <= exit_search_start:
+            raise RuntimeError(
+                f"exit search can see pre-entry possessions in game {game_id} @ {wct}: "
+                f"earliest={future_poss['wall_clock_ts'].min()}, anchor={exit_search_start}"
+            )
+
+        # (c) A tick-driven exit must land on a real tick. simulate_exit measures its
+        #     offset from whatever anchor it was handed, so if the call site is anchored
+        #     at wct while the windows stay at the anchor, every implied exit timestamp
+        #     is shifted by feed_delay_s and lands between ticks. time_gate exits resolve
+        #     at the deadline rather than a tick, so they are exempt.
+        if sim.exit_reason != "time_gate" and not future_ticks.empty:
+            gap_s = (future_ticks["ts"] - exit_abs_ts).abs().min().total_seconds()
+            if gap_s > 1e-3:
+                raise RuntimeError(
+                    f"exit does not land on a tick in game {game_id} @ {wct}: "
+                    f"exit_ts={exit_abs_ts} is {gap_s:.3f}s from the nearest tick "
+                    f"(reason={sim.exit_reason}) — the exit window and the entry anchor "
+                    f"have drifted apart"
+                )
+
+        # gross is CENTS per contract; pnl_dollars converts. A 3c move on 100 contracts
+        # is $3.00, not $300 — a 100-contract position cannot swing more than $100 total.
+        # Note this uses the TP-clamped exit_price above, not sim.exit_price.
+        gross = entry_side * (exit_price - yes_bid)
+        fees  = _compute_fees(yes_bid, exit_price, contracts, sim.exit_reason)
+        net   = pnl_dollars(gross, contracts) - fees
 
         positions.append(ClosedPosition(
             game_id       = game_id,
             possession_id = int(row.get("possession_id", row.get("event_id", 0))),
             wall_clock_ts = wct,
             entry_price   = yes_bid,
-            exit_price    = sim.exit_price,
+            exit_price    = exit_price,
             exit_reason   = sim.exit_reason,
             entry_side    = entry_side,
             hold_time_s   = sim.exit_time_offset_s,
@@ -376,10 +583,14 @@ def _run_game(
             quarter         = int(row.get("period", 0)),
             score_diff      = int(row.get("score_diff", 0)),
             run_length      = int(row.get("current_run_length", 0)),
+            fees            = fees,
+            entry_tick_age_s = entry_tick_age_s,
         ))
 
-        # Block new entries until exit time
-        position_exit_ts = wct + pd.Timedelta(seconds=sim.exit_time_offset_s)
+        # Block new entries until exit time. Measured from the entry anchor, not wct —
+        # otherwise the guard clears feed_delay_s early and lets the next position open
+        # while this one is still open.
+        position_exit_ts = exit_abs_ts
 
     logger.info("Game %s: %d trades", game_id, len(positions))
     return positions
@@ -440,19 +651,31 @@ def run_backtest(
     hold_seconds: int = 120,
     only_game: str | None = None,
     traj_aggregator: str = "final",
+    prod_features: bool = False,
 ) -> BacktestSummary:
-    logger.info("Connecting to MotherDuck...")
-    conn = _connect_motherduck()
-
     logger.info("Loading data...")
-    all_poss  = _load_possession_flat(conn)
-    all_ticks = _load_kalshi_ticks(conn)
-    pregame   = _load_pregame(conn)
-    conn.close()
+    all_poss, all_ticks, pregame = _load_data()
 
     # Derive features and join pregame
-    all_poss = _add_derived_features(all_poss)
+    # Order matters: _add_derived_features needs `expected_pace` (for pace_ref), which
+    # _join_pregame supplies. dataset.py:276 raises if called the other way round.
     all_poss = _join_pregame(all_poss, pregame)
+    all_poss = _add_derived_features(all_poss)
+
+    # Restrict to the regime the agent will actually trade — the same call, in the same
+    # position, as build_dataloaders (dataset.py:926). Training drops overtime,
+    # |score_diff| > blowout_margin_pts and NULL-pace rows; without this the backtest
+    # scored the model on rows it never saw in training and the live gates would refuse.
+    #
+    # Runs after the derived features so the within-game rolling windows are still built
+    # from the complete possession sequence, and before the tick join so dropped rows
+    # never reach it. `_filter_to_traded_regime` logs its own before/after breakdown.
+    n_before = len(all_poss)
+    all_poss = _filter_to_traded_regime(all_poss)
+    logger.info(
+        "Traded-regime filter (backtest): %d → %d possession rows (%.1f%% dropped)",
+        n_before, len(all_poss), 100.0 * (n_before - len(all_poss)) / n_before if n_before else 0.0,
+    )
 
     # Assign game_id to ticks via ticker → game lookup
     all_ticks = _select_home_best_contract(all_ticks, all_poss)
@@ -518,6 +741,7 @@ def run_backtest(
             min_run_length=min_run_length,
             hold_seconds=hold_seconds,
             traj_aggregator=traj_aggregator,
+            prod_features=prod_features,
         )
         all_positions.extend(positions)
 
@@ -530,8 +754,8 @@ def run_backtest(
             exit_reasons={}, by_quarter={}, by_score_bucket={}, by_run_length={},
         )
 
-    # gross_pnl is cents/contract; /100 converts to dollars, matching net_pnl.
-    total_gross = sum(p.gross_pnl * contracts / 100.0 for p in all_positions)
+    # gross_pnl is cents/contract; pnl_dollars converts, matching net_pnl.
+    total_gross = sum(pnl_dollars(p.gross_pnl, contracts) for p in all_positions)
     total_net   = sum(p.net_pnl for p in all_positions)
     win_rate    = sum(1 for p in all_positions if p.net_pnl > 0) / len(all_positions)
     avg_hold    = np.mean([p.hold_time_s for p in all_positions])
@@ -566,7 +790,15 @@ def _print_summary(
     print(f"  Win rate:        {summary.win_rate:.1%}")
     print(f"  Avg hold time:   {summary.avg_hold_time_s:.1f}s")
     print(f"  Total gross PnL: ${summary.total_gross_pnl:+.2f}  (per {contracts} contracts)")
-    print(f"  Total net PnL:   ${summary.total_net_pnl:+.2f}  (after maker fees)")
+    print(f"  Total fees:      ${sum(p.fees for p in summary.positions):.2f}  "
+          f"(maker entry + maker TP / taker stop)")
+    print(f"  Total net PnL:   ${summary.total_net_pnl:+.2f}  (after fees)")
+    if summary.positions:
+        ages = [p.entry_tick_age_s for p in summary.positions]
+        print(f"  Entry tick age:  median {float(np.median(ages)):.1f}s | "
+              f"p90 {float(np.percentile(ages, 90)):.1f}s | max {max(ages):.1f}s")
+        print(f"  Min hold time:   {min(p.hold_time_s for p in summary.positions):.2f}s "
+              f"(must be >= 0; exit-before-entry raises)")
     print(f"\n  Exit reasons:")
     for reason, count in sorted(summary.exit_reasons.items(), key=lambda x: -x[1]):
         pct = count / summary.n_trades * 100
@@ -609,6 +841,10 @@ if __name__ == "__main__":
         help="path to scaler pickle",
     )
     parser.add_argument("--save-csv", action="store_true", help="save positions to CSV")
+    parser.add_argument("--prod-features", action="store_true",
+                        help="zero the pregame/lineup features production does not actually "
+                             "deliver, to measure what live would really have traded "
+                             "(see _PROD_ZERO_FEATURES)")
     parser.add_argument("--game",     type=str, default=None,
                         help="run backtest on a single game_id only (e.g. 0042500311)")
     args = parser.parse_args()
@@ -627,6 +863,7 @@ if __name__ == "__main__":
         hold_seconds       = args.hold_seconds,
         only_game          = args.game,
         traj_aggregator    = args.traj_aggregator,
+        prod_features      = args.prod_features,
     )
 
     label = (

@@ -164,7 +164,7 @@ def main() -> None:
             continue
 
         n_wins = sum(1 for p in all_positions if p.net_pnl > 0)
-        gross = sum(p.gross_pnl * contracts for p in all_positions)
+        gross = sum(pnl_dollars(p.gross_pnl, contracts) for p in all_positions)
         net   = sum(p.net_pnl for p in all_positions)
         avg_hold = float(np.mean([p.hold_time_s for p in all_positions]))
         median_abs_traj = float(np.median([abs(p.traj_used) for p in all_positions]))
