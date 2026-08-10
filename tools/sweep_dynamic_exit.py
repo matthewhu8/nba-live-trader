@@ -42,6 +42,7 @@ from backtesting.mmoe_backtest import (
     _connect_motherduck,
     _get_market_features_at_delay,
     _join_pregame,
+    _tick_at_delay,
     _load_kalshi_ticks,
     _load_possession_flat,
     _load_pregame,
@@ -157,11 +158,20 @@ def _run_one_variant(
             # streak/reversal rules compare apples-to-apples mid-trade.
             entry_traj_for_compare = aggregate_traj(output.trajectory, streak_compare_aggregator)
 
-            future_ticks = enriched_ticks[enriched_ticks["ts"] > wct]
-            future_poss = game_poss[game_poss["wall_clock_ts"] > wct]
+            # Anchor the exit search where the position can first exist. `yes_bid` above was
+            # read at `wct + FEED_DELAY_SECONDS_NBA`, so searching from `wct` let a position
+            # close on movement that preceded both its entry and the observation of its entry
+            # price — defect 1 verbatim, surviving here until 2026-08-10 because this file was
+            # never part of the backtest fix. `_tick_at_delay` is the single source of truth
+            # for the anchor, shared with `mmoe_backtest._run_game`, so the two cannot drift.
+            _, entry_anchor_ts = _tick_at_delay(enriched_ticks, wct, FEED_DELAY_SECONDS_NBA)
+            exit_search_start = entry_anchor_ts
+
+            future_ticks = enriched_ticks[enriched_ticks["ts"] > exit_search_start]
+            future_poss = game_poss[game_poss["wall_clock_ts"] > exit_search_start]
 
             sim = simulate_exit_dynamic(
-                entry_wall_clock=wct,
+                entry_wall_clock=exit_search_start,
                 entry_yes_bid=yes_bid,
                 entry_run_team=row.get("current_run_team", None),
                 future_ticks=future_ticks,
@@ -213,7 +223,12 @@ def _run_one_variant(
                 variant=variant_name,
             ))
 
-            position_exit_ts = wct + pd.Timedelta(seconds=sim.exit_time_offset_s)
+            # From the anchor, not `wct`: `exit_time_offset_s` is measured from whatever
+            # anchor simulate_exit_dynamic was handed. Anchoring this at `wct` cleared the
+            # overlap guard FEED_DELAY_SECONDS_NBA early and let the next position open while
+            # this one was still live — the same second-order bug the backtest fix had to
+            # correct alongside the exit window.
+            position_exit_ts = exit_search_start + pd.Timedelta(seconds=sim.exit_time_offset_s)
 
     return trades
 

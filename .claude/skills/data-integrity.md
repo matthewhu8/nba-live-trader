@@ -147,6 +147,29 @@ Retraining is unblocked. Read the comparability note in `model-provenance.md` fi
 loss mask is a threshold on the labels themselves, so pre- and post-Level-2 `loss_b` figures
 are not comparable in either direction.
 
+### What Level 2 did NOT fix — possession-driven exits still have no feed delay
+
+**This section was here before Level 2 and was wrongly deleted by it. Restored 2026-08-10.**
+Level 2 fixed the *entry* anchor, which governs which possessions the exit search can reach.
+It did not delay the possession *events* themselves.
+
+`simulate_exit` still selects `poss_so_far = window_possessions[wall_clock_ts <= tick["ts"]]`,
+comparing raw possession wall clock against tick time, so a momentum flip or garbage-time
+transition is acted on the moment its wall clock passes — not `feed_delay_s` later, when a live
+trader would learn of it. Measured 2026-08-10: entry anchored at `T0+20`, run flips at
+possession wall clock `T0+30`, first tick at `T0+35` → `momentum_flip` at `T0+35`, though the
+flip is not knowable until `T0+50`. `dynamic_exit.simulate_exit_dynamic` has the same shape,
+where it also gates re-inference (`window_poss.iloc[i]["wall_clock_ts"] <= tick["ts"]`).
+
+**It is material: `momentum_flip` is 32.6% of exits in the current baseline.** Fixing it will
+move the −$324.35 figure, which is why it is a scoped decision rather than a patch — it is a
+modelling change, not a measurement bug. Note it cuts both ways: these exits currently fire
+early, which is sometimes favourable and sometimes not, so the sign of the correction is not
+predictable.
+
+Whoever takes it: the trigger belongs at `wall_clock_ts + feed_delay_s` in both simulators at
+once, or the label path and the sweep path diverge on exit timing.
+
 ## Checklist before trusting any measurement
 
 - [ ] Does the cache contain every raw input the config's derived features need, non-null?

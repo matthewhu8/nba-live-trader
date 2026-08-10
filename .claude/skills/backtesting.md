@@ -200,18 +200,23 @@ Adding the reason to the maker set cannot move the main backtest — `simulate_e
 the five `EXIT_REASONS`, none of them the widened variant — and the −$324.35 baseline was
 re-run after the change to confirm it (unchanged to the digit).
 
-> 🔴 **`tools/sweep_dynamic_exit.py` STILL HAS THE HEADLINE ANCHOR DEFECT.** Found by review
-> 2026-08-10, unfixed. `yes_bid` comes from `_get_market_features_at_delay(..., delay_s=20)`
-> at `:121-128`, but the exit search is anchored at `wct`: `future_ticks = enriched_ticks[ts >
-> wct]` and `entry_wall_clock=wct` at `:160-164`. That is defect 1 verbatim — a spike 5s after
-> `wct` books a take-profit on movement that preceded the position. `simulate_exit_dynamic` is
-> internally inconsistent about it too: it re-infers at `poss_row.wall_clock_ts +
-> feed_delay_s` while measuring `elapsed_s` from an un-delayed anchor.
->
-> The clamp and fee fixes above make these sweeps *look* trustworthy while leaving them
-> anti-causal, which is worse than leaving them visibly broken. **Do not run or cite a
-> dynamic-exit sweep until this anchor is fixed** — a streak/reversal variant selected on this
-> output is being chosen for pre-entry movement.
+**`tools/sweep_dynamic_exit.py` carried the headline anchor defect until 2026-08-10.** Found by
+review; it was never part of the original backtest fix. `yes_bid` was read at `wct + 20s` while
+the exit search started at `wct`, so a spike inside the delay window booked a take-profit on
+movement that preceded the position. Now anchored via `_tick_at_delay`, the same single source
+of truth `mmoe_backtest._run_game` uses.
+
+Its overlap guard had the matching second-order bug — `position_exit_ts = wct + offset` cleared
+20s early and let the next position open while the current one was still live. Now measured from
+the anchor.
+
+**Every dynamic-exit sweep result predating 2026-08-10 is void**, on three independent counts:
+anti-causal entry anchor, unclamped take-profit, and taker fees charged on widened exits.
+
+> ⚠️ Still open for both simulators: **possession-driven exits (`momentum_flip`,
+> `garbage_time`) have no feed delay** — they fire the moment a possession's wall clock passes,
+> ~20s before a live trader could know. 32.6% of baseline exits. Fixing it moves −$324.35, so
+> it is a scoped decision; see `data-integrity.md`.
 
 ### Never estimate a fix by filtering
 
