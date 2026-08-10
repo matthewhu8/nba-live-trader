@@ -112,7 +112,14 @@ def simulate_exit(
         entry_yes_bid: yes_bid at entry (cents)
         entry_run_team: current_run_team value at entry ("home", "away", or None)
         future_ticks: all ticks for this game with ts > entry_wall_clock, sorted by ts
-        future_possessions: all possessions for this game after entry, sorted by wall_clock_ts
+        future_possessions: possessions for this game whose KNOWABLE time
+            (`wall_clock_ts + feed_delay_s`) is after the entry anchor. Note this
+            deliberately includes possessions whose raw `wall_clock_ts` PRECEDES the anchor:
+            one occurring inside the delay window is learned about during the hold and must
+            stay reachable. Filtering the caller's frame on `wall_clock_ts > entry_wall_clock`
+            drops exactly those and silently reintroduces the 2026-08-10 defect — a required
+            `feed_delay_s` does not catch it, because the error is in the caller's filter.
+            Order does not matter; this function sorts by knowable time itself.
         tp: take profit threshold in cents
         sl: stop loss threshold in cents
         entry_side: +1 for BUY YES (home run), -1 for BUY NO (away run)
@@ -136,8 +143,20 @@ def simulate_exit(
     # T0+35 → momentum_flip booked at T0+35, though the flip is not knowable until T0+50.
     # `momentum_flip` was 32.6% of baseline exits, so this was material.
     #
-    # Precomputed once here rather than per tick: the loop below used to re-filter the whole
-    # possession frame on every tick.
+    # Only the `+ delay` shift is hoisted out of the tick loop; the loop below still filters
+    # the whole frame per tick, so this stays O(n_ticks x n_poss). Said otherwise in an earlier
+    # revision of this comment, which was wrong.
+    #
+    # Sorted by `_knowable_ts` because the loop reads `poss_so_far.iloc[-1]` — positionally —
+    # to get the most recent knowable possession. Neither caller guarantees that order:
+    # build_trajectory_targets sorts by `wall_clock_ts`, and mmoe_backtest._run_game sorts by
+    # `event_id`, which is NaN on 3,179 of 14,239 cached rows and therefore leaves
+    # `wall_clock_ts` non-monotonic in 15 of 71 games (trailing period-1 rows land after
+    # period 4/5). Without this sort, `iloc[-1]` silently reads `current_run_team` /
+    # `is_blowout` / `is_garbage_time` off the wrong possession. Measured on the 181-trade
+    # baseline: 3 trades had a non-ascending window, all three agreeing on `current_run_team`
+    # by luck, so the bug was latent rather than visible. `simulate_exit_dynamic` sorts for
+    # the same reason — that is what keeps the two in lockstep.
     delay = pd.Timedelta(seconds=feed_delay_s)
     if future_possessions.empty:
         window_possessions = future_possessions.copy()
@@ -146,6 +165,7 @@ def simulate_exit(
         in_window = knowable_ts <= deadline
         window_possessions = future_possessions.loc[in_window].copy()
         window_possessions["_knowable_ts"] = knowable_ts.loc[in_window]
+        window_possessions = window_possessions.sort_values("_knowable_ts")
 
     exit_price = entry_yes_bid
     exit_reason = "time_gate"

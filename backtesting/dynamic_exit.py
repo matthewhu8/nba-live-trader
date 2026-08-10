@@ -74,7 +74,12 @@ def simulate_exit_dynamic(
     entry_yes_bid:           float,
     entry_run_team:          Optional[str],
     future_ticks:            pd.DataFrame,            # ts > entry_wall_clock, sorted
-    future_possessions:      pd.DataFrame,            # wall_clock_ts > entry, sorted, with full possession_flat columns
+    future_possessions:      pd.DataFrame,            # possessions whose KNOWABLE time
+                                                      # (wall_clock_ts + feed_delay_s) is after
+                                                      # the entry anchor — which includes ones
+                                                      # whose raw wall clock precedes it. Any
+                                                      # order; re-sorted internally by knowable
+                                                      # time. Full possession_flat columns.
     enriched_ticks_for_game: pd.DataFrame,            # full enriched ticks dataframe (with market feature cols)
     *,
     predictor:               MMoEPredictor,
@@ -93,7 +98,10 @@ def simulate_exit_dynamic(
     streak_widen_at:         int = 2,
     streak_widen_cents:      float = 3.0,
     # Plumbing for per-possession feature rebuild
-    feed_delay_s:            int = FEED_DELAY_SECONDS_NBA,
+    # Required, no default, matching simulate_exit: this value must equal the one the caller
+    # used to build `future_possessions`, and a default lets those drift silently the moment a
+    # caller gains a --delay flag (mmoe_backtest already has one).
+    feed_delay_s:            int,
     prev_yes_bid_init:       float = 50.0,
     prev_spread_init:        float = 1.0,
 ) -> DynamicExitResult:

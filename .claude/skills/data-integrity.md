@@ -156,7 +156,8 @@ once, keyed on a precomputed `_knowable_ts = wall_clock_ts + feed_delay_s`.
 
 **It cost $22.57: −$324.35 → −$346.92** on the same config (181 trades both, 26.0% → 25.4%,
 avg hold 70.7s → 76.3s, flip 59 → 53, stop 74 → 79). The early flips were acting as a lucky
-exit; holding 20s longer converts 6 of them into stop-outs. This is the expected shape of an
+exit; holding 20s longer changes the outcome of 6 of them (5 → `stop_loss`, 1 →
+`take_profit`). This is the expected shape of an
 honest correction — the old number was flattered by acting on information it did not have.
 
 The filter also **widens**, which is the counter-intuitive half: a possession inside the delay
@@ -167,7 +168,11 @@ reverted defect while being correct, because the tick filter stays at the anchor
 market data observed live; possessions are game state on a delayed feed. Both call sites are
 written in the unreduced form so that distinction survives review.
 
-The original description, for the record:
+**Historical, as of 2026-08-09 — none of the code below exists any more.** Kept because
+this section was once deleted while the bug was live. Do not act on it; verify against
+the current source first. (Grepping this file and concluding the bug is live is exactly
+how the deletion went wrong the first time.)
+
 
 `simulate_exit` still selects `poss_so_far = window_possessions[wall_clock_ts <= tick["ts"]]`,
 comparing raw possession wall clock against tick time, so a momentum flip or garbage-time

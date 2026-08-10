@@ -14,21 +14,27 @@ python -m backtesting.mmoe_backtest \
   --traj-aggregator mean
 ```
 
-**Baseline @ `fix/backtest-exit-window` merged with `origin/main` (2026-08-05):**
+**Each row states the ref it reproduces on. Check out that ref before comparing.**
 
-| | trades | win rate | gross | fees | net | avg hold |
+| ref | trades | win rate | gross | fees | net | avg hold |
 |---|---|---|---|---|---|---|
-| **current** (possession delay, 2026-08-10) | 181 | 25.4% | −$30.00 | $316.92 | **−$346.92** | 76.3s |
-| previous (entry anchor only) | 181 | 26.0% | −$6.00 | $318.35 | −$324.35 | 70.7s |
+| `main` @ `f2912b5` (PR #56) | 181 | 26.0% | −$6.00 | $318.35 | **−$324.35** | 70.7s |
+| `fix/possession-event-delay` (unmerged) | 181 | 25.4% | −$30.00 | $316.92 | **−$346.92** | 76.3s |
 
-**−$324.35 is superseded by −$346.92.** The two differ only by the possession-event feed delay:
-`momentum_flip` and `garbage_time` used to fire the instant a possession's raw wall clock
-passed, ~20s before a live trader could know. Delaying them holds positions ~6s longer on
-average, and 6 of the 59 flips become stop-outs instead (flip 32.6% → 29.3%, stop 40.9% →
-43.6%). The early flips were functioning as a lucky exit, so removing them costs $22.57.
+**On `main` today the number is −$324.35.** −$346.92 is what it becomes once the
+possession-event delay branch lands, and quoting it against `main` will not reproduce.
 
-Trade count is identical at 181 — worth noting, since longer holds should bind the overlap
-guard more often. It appears the guard rarely binds in this config.
+The two differ only by that delay: `momentum_flip` and `garbage_time` used to fire the instant
+a possession's raw wall clock passed, ~20s before a live trader could know. Delaying them holds
+positions ~6s longer on average, and 6 of the 59 flips resolve differently — **5 become
+`stop_loss` and 1 becomes `take_profit`** (flip 59→53, stop 74→79, TP 44→45). The early flips
+were functioning as a lucky exit, so removing them costs $22.57.
+
+Both runs trade the **identical** set of 181 `(game_id, possession_id)` pairs, verified by
+diffing the result CSVs — so the 57 longer holds displaced no subsequent entry at all. (An
+earlier revision guessed "the guard rarely binds"; that was speculation, and with a ~45s median
+possession gap it was not even the likely explanation. Check it, don't guess — this file's own
+history with an unverified guard claim is three sections down.)
 
 100 contracts, TP=5 / SL=3, 20s feed delay, local parquet cache (71 games / 14,239 possessions
 / 770,054 ticks, Apr 15 – May 17 2026). The per-trade CI **[−$2.40, −$1.17]** was computed on

@@ -105,6 +105,12 @@ def _run_one_variant(
 ) -> list[Trade]:
     trades: list[Trade] = []
 
+    # One delay for the whole run, read by all four call sites below: the entry-price lookup,
+    # the exit anchor, the possession filter and simulate_exit_dynamic. Separate references to
+    # the module constant would let a future --delay flag change some and not others, and the
+    # entry price and the exit window drifting apart is precisely defect 1.
+    feed_delay_s = FEED_DELAY_SECONDS_NBA
+
     for game_id in tradeable:
         game_poss = per_game_poss[game_id]
         enriched_ticks = per_game_enriched_ticks[game_id]
@@ -124,7 +130,7 @@ def _run_one_variant(
                 wall_clock_ts=wct,
                 prev_yes_bid=prev_yes_bid,
                 prev_spread=prev_spread,
-                delay_s=FEED_DELAY_SECONDS_NBA,
+                delay_s=feed_delay_s,
             )
             yes_bid = market_feats["yes_bid"]
             if yes_bid > 0:
@@ -164,7 +170,7 @@ def _run_one_variant(
             # price — defect 1 verbatim, surviving here until 2026-08-10 because this file was
             # never part of the backtest fix. `_tick_at_delay` is the single source of truth
             # for the anchor, shared with `mmoe_backtest._run_game`, so the two cannot drift.
-            _, entry_anchor_ts = _tick_at_delay(enriched_ticks, wct, FEED_DELAY_SECONDS_NBA)
+            _, entry_anchor_ts = _tick_at_delay(enriched_ticks, wct, feed_delay_s)
             exit_search_start = entry_anchor_ts
 
             future_ticks = enriched_ticks[enriched_ticks["ts"] > exit_search_start]
@@ -172,7 +178,7 @@ def _run_one_variant(
             # simulators — see exit_simulator.build_trajectory_targets for why this differs
             # from the tick filter above and why it is not the reverted defect.
             future_poss = game_poss[
-                game_poss["wall_clock_ts"] + pd.Timedelta(seconds=FEED_DELAY_SECONDS_NBA)
+                game_poss["wall_clock_ts"] + pd.Timedelta(seconds=feed_delay_s)
                 > exit_search_start
             ]
 
@@ -195,7 +201,7 @@ def _run_one_variant(
                 streak_enabled=streak_enabled,
                 streak_widen_at=2,
                 streak_widen_cents=3.0,
-                feed_delay_s=FEED_DELAY_SECONDS_NBA,
+                feed_delay_s=feed_delay_s,
                 prev_yes_bid_init=prev_yes_bid,
                 prev_spread_init=prev_spread,
             )

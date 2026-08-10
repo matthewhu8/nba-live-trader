@@ -548,19 +548,28 @@ def _run_game(
                 f"exit search can see pre-entry ticks in game {game_id} @ {wct}: "
                 f"earliest={future_ticks['ts'].min()}, anchor={exit_search_start}"
             )
-        #     For possessions the quantity is the KNOWABLE time, not the raw wall clock. A
-        #     possession inside the delay window is legitimately reachable — we learn of it
-        #     during the hold — so asserting on raw wall clock here would reject correct
-        #     behaviour. What must never happen is acting on a possession whose knowable time
-        #     predates the anchor.
-        if not future_poss.empty:
+        #     Both filters make their own clause true by construction, so like clause (a)
+        #     these are TRIPWIRES against a future edit to the filter expressions, not
+        #     coverage. Do not read them as verifying anything about the current code — that
+        #     misreading is what let the original three-line defect run clean for two days
+        #     (STATE_2026-08-05 §3.9).
+        #
+        # (b2) The possession invariant that is NOT a tautology: a possession-driven exit
+        #      cannot resolve before the earliest possession event we could have known about.
+        #      `exit_abs_ts` comes from simulate_exit's own offset while `earliest_knowable`
+        #      comes from the input frame, so the two are independent — this fires if the
+        #      trigger inside simulate_exit is re-keyed to raw `wall_clock_ts`, which is the
+        #      real regression risk here. An earlier revision asserted
+        #      `earliest_knowable <= exit_search_start`, which the filter above had already
+        #      guaranteed false; it could never have fired.
+        if sim.exit_reason in ("momentum_flip", "garbage_time") and not future_poss.empty:
             earliest_knowable = (
                 future_poss["wall_clock_ts"] + pd.Timedelta(seconds=feed_delay_s)
             ).min()
-            if earliest_knowable <= exit_search_start:
+            if exit_abs_ts < earliest_knowable:
                 raise RuntimeError(
-                    f"exit search can see pre-entry possessions in game {game_id} @ {wct}: "
-                    f"earliest knowable={earliest_knowable}, anchor={exit_search_start} "
+                    f"{sim.exit_reason} in game {game_id} @ {wct} resolved at {exit_abs_ts}, "
+                    f"before the earliest knowable possession event {earliest_knowable} "
                     f"(feed_delay={feed_delay_s}s)"
                 )
 
