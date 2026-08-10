@@ -54,6 +54,25 @@ class EpochMetrics:
     dir_acc_b:  float = 0.0
     brier_c:    float = 0.0
 
+    # Head B comparability instrumentation. `loss_b` is a Huber average taken over rows
+    # selected by a threshold on the labels themselves (`_compute_loss`: mean |traj| >
+    # 0.02), so a change to the exit simulator moves both the target values and the row
+    # population. A raw loss_b or rmse_b from before such a change is therefore not
+    # comparable to one from after — neither the quantity nor the denominator held still.
+    # These three make the comparison recoverable after the fact:
+    head_b_rows:           int = 0    # rows clearing the mask (the hidden variable)
+    head_b_rows_total:     int = 0    # market rows considered, for the retention rate
+    rmse_b_zero:           float = 0.0    # predict-nothing reference, over head_b_mask
+    rmse_b_per_checkpoint: list[float] = field(default_factory=list)
+    # `rmse_b` above is computed over `mkt_mask`; `rmse_b_zero` over the strictly narrower
+    # `head_b_mask`. Ratioing those two compares different row populations, and the bias is
+    # systematic: the zero-reference sees only large-target rows while rmse_b is diluted by
+    # the ~42% of market rows whose trajectory is ~0. A head predicting ~0 everywhere would
+    # then print a flattering ratio while being exactly a zero predictor on the rows it is
+    # trained on. This field is `rmse_b` recomputed over `head_b_mask` so the ratio is
+    # apples-to-apples.
+    rmse_b_masked:         float = 0.0
+
 
 @dataclass
 class TrainResult:
@@ -220,6 +239,33 @@ def _evaluate(
     if run_mask.sum() > 0:
         brier_c = float(((haz_pred[run_mask] - haz_true[run_mask]) ** 2).mean())
 
+    # Head B comparability instrumentation — see EpochMetrics. Computed against the same
+    # mask `_compute_loss` optimises (has_market_data AND mean |traj| > 0.02), NOT the
+    # looser `mkt_mask` used for rmse_b above, because the traj_signal term is the part
+    # that shifts when the labels change.
+    #
+    # Per-checkpoint RMSE matters specifically here: at a 20s feed delay the old labels
+    # put traj_0 and traj_1 at 12s and 24s, i.e. straddling the entry anchor, so those two
+    # carried the most contamination. Aggregate RMSE averages away exactly the effect
+    # under test.
+    traj_signal       = np.abs(traj_true).mean(axis=1) > 0.02
+    head_b_mask       = mkt_mask & traj_signal
+    head_b_rows       = int(head_b_mask.sum())
+    head_b_rows_total = int(mkt_mask.sum())
+    rmse_b_zero = rmse_b_masked = 0.0
+    rmse_b_per_checkpoint: list[float] = []
+    if head_b_rows > 0:
+        masked_true = traj_true[head_b_mask]
+        d = traj_pred[head_b_mask] - masked_true
+        # Both over head_b_mask, so the ratio below compares like with like. RMSE of a model
+        # predicting 0.0 everywhere is sqrt(mean(target^2)); if rmse_b_masked is not
+        # comfortably below it, Head B has learned nothing worth keeping.
+        rmse_b_masked = float(np.sqrt((d ** 2).mean()))
+        rmse_b_zero = float(np.sqrt((masked_true ** 2).mean()))
+        rmse_b_per_checkpoint = [
+            float(np.sqrt((d[:, k] ** 2).mean())) for k in range(d.shape[1])
+        ]
+
     n = max(n_batches, 1)
     return EpochMetrics(
         loss_total = total_loss / n,
@@ -230,6 +276,11 @@ def _evaluate(
         rmse_b     = rmse_b,
         dir_acc_b  = dir_acc_b,
         brier_c    = brier_c,
+        head_b_rows           = head_b_rows,
+        head_b_rows_total     = head_b_rows_total,
+        rmse_b_zero           = rmse_b_zero,
+        rmse_b_per_checkpoint = rmse_b_per_checkpoint,
+        rmse_b_masked         = rmse_b_masked,
     )
 
 
@@ -339,12 +390,33 @@ def train(
             val_metrics.rmse_b, val_metrics.dir_acc_b, val_metrics.brier_c,
         )
 
+        # Head B mask retention and the predict-nothing reference. Logged every epoch
+        # because RMSE_B above cannot be read on its own: the mask is a function of the
+        # labels, so a "better" RMSE_B may only mean Head B is being scored on fewer,
+        # easier rows. `vs_zero` under 1.0 means the head beats predicting nothing.
+        if val_metrics.head_b_rows_total > 0:
+            logger.info(
+                "         Head B rows %d/%d (%.1f%% retained) | RMSE_B(masked)/zero-pred = %.3f",
+                val_metrics.head_b_rows, val_metrics.head_b_rows_total,
+                100.0 * val_metrics.head_b_rows / val_metrics.head_b_rows_total,
+                (val_metrics.rmse_b_masked / val_metrics.rmse_b_zero)
+                if val_metrics.rmse_b_zero > 0 else float("nan"),
+            )
+
         if val_metrics.loss_total < best_val_loss:
             best_val_loss = val_metrics.loss_total
             best_epoch    = epoch
             epochs_no_improve = 0
             torch.save({"epoch": epoch, "model_state": model.state_dict(), "val_loss": best_val_loss}, save_path)
             logger.info("  ✓ New best val loss %.4f — saved to %s", best_val_loss, save_path)
+            # Per-checkpoint RMSE beside the checkpoint it describes. The early entries
+            # (traj_0/traj_1 at 12s/24s) sit closest to the entry anchor and are where a
+            # feed-delay regression in the labels would show up first.
+            if val_metrics.rmse_b_per_checkpoint:
+                logger.info(
+                    "    RMSE_B per checkpoint: %s",
+                    " ".join(f"{v:.3f}" for v in val_metrics.rmse_b_per_checkpoint),
+                )
         else:
             epochs_no_improve += 1
             if epochs_no_improve >= patience:

@@ -227,7 +227,15 @@ def simulate_exit_dynamic(
         # TP / SL
         move = entry_side * (current_bid - entry_yes_bid)
         if move >= effective_tp:
-            exit_price = current_bid
+            # Clamp to the resting limit, matching exit_simulator.simulate_exit. Booking
+            # `current_bid` credited the overshoot past the limit as profit that PR #50's
+            # resting order could never have collected — and because the streak rule widens
+            # the target, the overshoot scaled with the very knob these sweeps exist to tune.
+            #
+            # `effective_tp`, not `tp`: once the streak rule widens the target the order is
+            # re-posted at `entry + effective_tp`, so that is the price a fill can achieve.
+            # Clamping to `tp` here would under-credit every widened exit instead.
+            exit_price = entry_yes_bid + entry_side * effective_tp
             exit_reason = "take_profit_widened" if tp_widened else "take_profit"
             exit_time_offset_s = elapsed_s
             break

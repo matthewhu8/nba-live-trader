@@ -17,6 +17,13 @@ Price lookup rule: for each checkpoint time t, use the FIRST tick with ts >= t
 (merge_asof direction="forward"). This ensures we see price after the event,
 not before — no lookahead bias.
 
+Entry anchor: every offset here is measured from `wall_clock_ts + feed_delay_seconds`,
+never from `wall_clock_ts`. The entry price is read at that anchor by the backward asof
+join in `dataset._join_ticks_to_possessions`, so the exit search, the checkpoint grid and
+the time gate all have to start there as well. Anchoring at `wall_clock_ts` made the
+labels anti-causal rather than merely early: TP and SL resolved against ticks that
+preceded the price the position entered at.
+
 Trade direction:
   - Home run prediction → BUY YES → favorable = price up → entry_side=+1
   - Away run prediction → BUY NO  → favorable = price down → entry_side=-1
@@ -158,6 +165,18 @@ def simulate_exit(
             exit_time_offset_s = elapsed_s
             break
 
+    # Take-profits rest a maker limit at entry + TP (PR #50), so the fill cannot be better
+    # than that limit. The loop above reports the price of the tick that *breached* the
+    # threshold, which overshot by a median 6c (max 24c) on the 2026-08-03 sample.
+    #
+    # Clamped here rather than in the caller so that the trajectory below and
+    # simulated_pnl both see the collectable price. `mmoe_backtest._run_game` used to
+    # clamp its own copy after this function returned, which corrected its P&L but left
+    # the Head B labels over-credited: the post-exit checkpoints freeze at `exit_price`,
+    # so the uncollectable overshoot was being learned as the target.
+    if exit_reason == "take_profit":
+        exit_price = entry_yes_bid + entry_side * tp
+
     # Build 10-checkpoint trajectory with exit clipping. Checkpoints span the hold
     # window evenly, so a 120s scalp and a 600s swing both yield 10 comparable points.
     trajectory: list[float] = []
@@ -168,6 +187,19 @@ def simulate_exit(
         checkpoint_ts = entry_wall_clock + pd.Timedelta(seconds=checkpoint_s)
         if checkpoint_ts <= exit_abs_ts:
             price = _lookup_price_at_or_after(future_ticks, checkpoint_ts, exit_price)
+            # Clamping `exit_price` alone does not close the overshoot leak. Checkpoints at
+            # or before the exit are looked up forward, so whenever no tick falls between a
+            # checkpoint and the breach, the checkpoint resolves to the *breaching* tick and
+            # carries its uncollectable price. Measured: entry 50c, ticks at +10s (50c) and
+            # +30s (64c), tp=5 — exit_price clamps to 55 but traj_0 and traj_1 both reported
+            # logit_delta(50, 64) = 0.5754 against the collectable 0.2007.
+            #
+            # On a take-profit path the position ceased to exist at the resting limit, so no
+            # checkpoint can report a move beyond it. `exit_price` already *is* that limit
+            # here, which makes it the cap. Direction-agnostic via entry_side, so BUY NO
+            # (favourable = price down) is capped at entry - tp.
+            if exit_reason == "take_profit" and entry_side * (price - entry_yes_bid) > tp:
+                price = exit_price
         else:
             # After exit: freeze at exit price
             price = exit_price
@@ -188,6 +220,13 @@ def build_trajectory_targets(
     entry_rows: pd.DataFrame,
     all_ticks: pd.DataFrame,
     all_possessions: pd.DataFrame,
+    # Keyword-only from here. `feed_delay_seconds` as the 4th *positional* parameter meant a
+    # call written against the old signature — build_trajectory_targets(rows, ticks, poss,
+    # 5.0, 3.0) — silently bound feed_delay_seconds=5.0 and tp=3.0, and pd.Timedelta accepts
+    # the float without complaint. Keyword-only makes that a TypeError, which is the point of
+    # having no default in the first place.
+    *,
+    feed_delay_seconds: int,
     tp: float = 5.0,
     sl: float = 3.0,
     horizon_seconds: int = DEFAULT_HORIZON_SECONDS,
@@ -203,6 +242,12 @@ def build_trajectory_targets(
         all_ticks: all Kalshi ticks (main.kalshi_ticks), must have ts, game_id, yes_bid
         all_possessions: all possessions (features.possession_flat), must have
                          game_id, wall_clock_ts, current_run_team, is_blowout, is_garbage_time
+        feed_delay_seconds: lag from game event to actionable, in seconds. Required, with
+                         no default, deliberately: omitting it is precisely the defect this
+                         parameter exists to prevent, so a new call site has to state it.
+                         Must be the same value `dataset._join_ticks_to_possessions` used
+                         to attach `yes_bid`, or the entry price and the exit window are
+                         anchored at different moments.
 
     Returns:
         entry_rows with added columns:
@@ -234,18 +279,37 @@ def build_trajectory_targets(
             continue
 
         for idx, row in game_entries.iterrows():
-            entry_ts: pd.Timestamp = pd.Timestamp(row["wall_clock_ts"])
+            # The exit window opens when the position can first exist, not at the
+            # possession's wall clock. `yes_bid` on this row was read at
+            # `wall_clock_ts + feed_delay_seconds` by the backward asof join in
+            # dataset._join_ticks_to_possessions, so anchoring here at `wall_clock_ts`
+            # let TP/SL resolve against ticks that preceded the entry price — the labels
+            # were anti-causal, not merely early, and Head B learned that as signal.
+            #
+            # This single name feeds all four downstream uses: both `future_*` filters,
+            # the checkpoint grid, and the time gate (simulate_exit computes
+            # `deadline = entry_wall_clock + horizon`, so the hold is a true
+            # `horizon_seconds` measured from entry once the anchor is right — it used to
+            # be `wall_clock_ts + horizon`, i.e. 100s of real hold at a 20s delay).
+            #
+            # No staleness bound is needed here, unlike the backtest's `_tick_at_delay`:
+            # dataset.py has already dropped every row whose asof found no tick within
+            # MARKET_STALENESS_TOLERANCE_SECONDS of the anchor, so each row reaching this
+            # loop carries a bid that was genuinely observable at `entry_anchor_ts`.
+            entry_anchor_ts: pd.Timestamp = pd.Timestamp(
+                row["wall_clock_ts"]
+            ) + pd.Timedelta(seconds=feed_delay_seconds)
             entry_bid = float(row["yes_bid"])
             entry_run_team = row.get("current_run_team", None)
 
             run_encoded = row.get("current_run_team_encoded", 0)
             entry_side = 1 if run_encoded >= 0 else -1
 
-            future_ticks = game_ticks[game_ticks["ts"] > entry_ts]
-            future_poss = game_poss[game_poss["wall_clock_ts"] > entry_ts]
+            future_ticks = game_ticks[game_ticks["ts"] > entry_anchor_ts]
+            future_poss = game_poss[game_poss["wall_clock_ts"] > entry_anchor_ts]
 
             sim = simulate_exit(
-                entry_wall_clock=entry_ts,
+                entry_wall_clock=entry_anchor_ts,
                 entry_yes_bid=entry_bid,
                 entry_run_team=entry_run_team,
                 future_ticks=future_ticks,

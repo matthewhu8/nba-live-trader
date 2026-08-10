@@ -307,7 +307,13 @@ def pnl_dollars(price_move_cents: float, contracts: int) -> float:
 # Exits that rest a limit order and therefore pay the maker rate. Every other exit
 # reason crosses the book to get out now, so it pays taker — see CLAUDE.md Phase 6:
 # resting maker take-profits (PR #50), stops cross the book.
-_MAKER_EXIT_REASONS = frozenset({"take_profit"})
+#
+# `take_profit_widened` is emitted only by `dynamic_exit.simulate_exit_dynamic`, whose streak
+# rule re-posts the limit further out — still a resting order, so still maker. It was missing
+# here, so `tools/sweep_dynamic_exit.py` charged the 4x taker rate on precisely the exits the
+# streak rule is designed to produce. Adding it cannot move the main backtest: `simulate_exit`
+# only ever emits the five EXIT_REASONS, none of which is the widened variant.
+_MAKER_EXIT_REASONS = frozenset({"take_profit", "take_profit_widened"})
 
 
 def _fee_one_leg(rate: float, price_cents: float, contracts: int) -> float:
@@ -494,13 +500,12 @@ def _run_game(
             max_seconds=hold_seconds,
         )
 
-        # Take-profits rest a maker limit at entry + TP (PR #50), so the fill cannot be
-        # better than that limit. simulate_exit reports the price of the tick that
-        # breached the threshold, which overshot the limit by up to 19c on this sample
-        # and booked the overshoot as profit we could never have collected.
+        # The take-profit clamp (PR #50 rests the limit at entry + TP, so the fill cannot
+        # beat it) now lives inside simulate_exit, applied before the trajectory is built.
+        # It was here until Level 2, which fixed the P&L but left the Head B labels
+        # over-credited — the post-exit checkpoints froze at the unclamped price. Behaviour
+        # at this call site is unchanged; the clamp is simply no longer duplicated.
         exit_price = sim.exit_price
-        if sim.exit_reason == "take_profit":
-            exit_price = yes_bid + entry_side * tp
 
         # Invariant: a position cannot exit before it existed.
         #
@@ -559,7 +564,10 @@ def _run_game(
 
         # gross is CENTS per contract; pnl_dollars converts. A 3c move on 100 contracts
         # is $3.00, not $300 — a 100-contract position cannot swing more than $100 total.
-        # Note this uses the TP-clamped exit_price above, not sim.exit_price.
+        # `exit_price` is `sim.exit_price` — the TP clamp lives inside simulate_exit now, so
+        # do NOT re-add a clamp here. It would be a no-op in this file, but the same reasoning
+        # applied to sweep_dynamic_exit.py (where the limit is `effective_tp`, not `tp`) would
+        # under-credit every widened exit.
         gross = entry_side * (exit_price - yes_bid)
         fees  = _compute_fees(yes_bid, exit_price, contracts, sim.exit_reason)
         net   = pnl_dollars(gross, contracts) - fees

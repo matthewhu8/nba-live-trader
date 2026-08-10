@@ -24,10 +24,15 @@ Per-trade edge **−$1.79**, game-clustered bootstrap 95% CI **[−$2.40, −$1.
 < 0.0001 over 10,000 resamples. 100 contracts, TP=5 / SL=3, 20s feed delay, local parquet
 cache (71 games / 14,239 possessions / 770,054 ticks, Apr 15 – May 17 2026).
 
-> ⚠️ **This measures a model trained on defective labels.** `exit_simulator.py` still
-> generates Head B/C training targets with no feed delay (see `data-integrity.md`), so the
-> number describes the current pipeline honestly but says nothing about whether the strategy
-> could work once the labels are fixed. Do not read an improvement or a regression into it.
+> ⚠️ **This measures a model trained on defective labels.** The checkpoint predates Level 2
+> (2026-08-10), which fixed the exit simulator's missing feed delay — so the number describes
+> that pipeline honestly but says nothing about whether the strategy could work once the model
+> is retrained on corrected labels. Do not read an improvement or a regression into it.
+>
+> It is still the **live yardstick**: Level 2 changed only the label builder, not the features,
+> the cache or this measurement path, and the figure reproduced to the digit after that change.
+> Compare any retrained model against it end-to-end in dollars — not via `loss_b`, which moved
+> for reasons unrelated to quality (`data-integrity.md`).
 
 ### Superseded numbers — do not quote
 
@@ -174,6 +179,44 @@ measured *from* the anchor and a legitimate 1s hold exists.
 **General rule this cost us:** an invariant written in terms of quantities that are equal by
 construction is not an invariant. Before trusting a guard, reintroduce the bug and watch it
 fail — over the full population, not one synthetic row.
+
+### `dynamic_exit.py` had two widened-TP errors — both fixed 2026-08-10
+
+`simulate_exit_dynamic` booked `exit_price = current_bid` on `take_profit` and
+`take_profit_widened` with no clamp — the same defect 2 as `exit_simulator.py`, in a module
+Level 2 did not initially touch. Now clamps to `entry + entry_side * effective_tp`
+(**`effective_tp`, not `tp`**: the streak rule re-posts the limit further out, so clamping to
+`tp` would under-credit every widened exit).
+
+Found while fixing it: **`take_profit_widened` was missing from `_MAKER_EXIT_REASONS`**, so
+`tools/sweep_dynamic_exit.py` charged the 4x taker rate on exactly the exits the streak rule
+exists to produce. A widened TP is still a resting order, so it is still maker.
+
+The two errors pushed in **opposite** directions — gross over-credited, fees over-charged — so
+the net effect on any historical sweep figure is not signed. Treat every pre-2026-08-10
+dynamic-exit sweep result as unusable rather than as biased in a known direction.
+
+Adding the reason to the maker set cannot move the main backtest — `simulate_exit` only emits
+the five `EXIT_REASONS`, none of them the widened variant — and the −$324.35 baseline was
+re-run after the change to confirm it (unchanged to the digit).
+
+**`tools/sweep_dynamic_exit.py` carried the headline anchor defect until 2026-08-10.** Found by
+review; it was never part of the original backtest fix. `yes_bid` was read at `wct + 20s` while
+the exit search started at `wct`, so a spike inside the delay window booked a take-profit on
+movement that preceded the position. Now anchored via `_tick_at_delay`, the same single source
+of truth `mmoe_backtest._run_game` uses.
+
+Its overlap guard had the matching second-order bug — `position_exit_ts = wct + offset` cleared
+20s early and let the next position open while the current one was still live. Now measured from
+the anchor.
+
+**Every dynamic-exit sweep result predating 2026-08-10 is void**, on three independent counts:
+anti-causal entry anchor, unclamped take-profit, and taker fees charged on widened exits.
+
+> ⚠️ Still open for both simulators: **possession-driven exits (`momentum_flip`,
+> `garbage_time`) have no feed delay** — they fire the moment a possession's wall clock passes,
+> ~20s before a live trader could know. 32.6% of baseline exits. Fixing it moves −$324.35, so
+> it is a scoped decision; see `data-integrity.md`.
 
 ### Never estimate a fix by filtering
 
