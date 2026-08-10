@@ -1007,6 +1007,9 @@ def build_dataloaders(
             tp=tp,
             sl=sl,
             horizon_seconds=horizon_seconds,
+            # Must match the delay the tick join above used to attach yes_bid, or the
+            # entry price and the exit window are anchored at different moments.
+            feed_delay_seconds=feed_delay_seconds,
         )
 
         # Ensure market feature columns exist on bball_only (filled with 0)

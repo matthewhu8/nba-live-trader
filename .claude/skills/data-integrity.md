@@ -120,15 +120,32 @@ Two documented attempts to fix this — `bdf3a1c` (phase reorder) and `7b6b39f`
 (`_run_pregame_prefill_sync`) — both failed. Neither the missing-row nor the swallowed-error
 path is fixed as of 2026-08-03.
 
-## Known remaining bias — deliberately unfixed
+## The exit-simulator feed delay — FIXED 2026-08-10 (Level 2)
 
-`models/targets/exit_simulator.py` evaluates momentum-flip and garbage-time exits at each
-possession's `wall_clock_ts` with **no feed delay**, so those exits fire ~20s earlier than a
-live trader could act. 27.5% of corrected exits are momentum flips, so it is material.
+`build_trajectory_targets` anchored every offset at each possession's `wall_clock_ts` with
+**no feed delay**, while `yes_bid` on the same row came from the asof join at
+`wall_clock_ts + feed_delay_seconds`. The labels were therefore anti-causal, not merely
+early: TP and SL resolved against ticks that preceded the price the position entered at.
 
-It is unfixed on purpose: that file also generates Head B and Head C **training labels**, so
-changing it invalidates the current checkpoints and requires a retrain. Scope it as its own
-task, alongside any retrain — not as a backtest patch.
+Now anchored at `wall_clock_ts + feed_delay_seconds`, which is a **required** argument with
+no default — omitting it is the defect, so a new call site has to state it. The one name
+feeds both `future_*` filters, the checkpoint grid and the time gate, so the hold is a true
+`horizon_seconds` from entry (it was `wall_clock_ts + horizon`, i.e. 100s of real hold at a
+20s delay). The take-profit clamp moved inside `simulate_exit` in the same change, so the
+post-exit checkpoints freeze at the collectable price rather than the overshoot.
+
+Verified in both directions: reverting the anchor fails 4 tests in
+`test_backtest_invariants.py`, reverting the clamp fails 3. The backtest baseline is
+unchanged at 181 trades / −$324.35, as expected — it clamped its own copy already.
+
+**Head C was never affected.** Both this file and `CLAUDE.md` claimed the simulator built
+"Head B and Head C" labels. Head C's hazards come from `kalshi_targets.add_hazard_targets`,
+indexed over the next N *scoring possessions* rather than wall clock, and never touch the
+exit simulator. Only `traj_0..9` (Head B) moved.
+
+Retraining is unblocked. Read the comparability note in `model-provenance.md` first: Head B's
+loss mask is a threshold on the labels themselves, so pre- and post-Level-2 `loss_b` figures
+are not comparable in either direction.
 
 ## Checklist before trusting any measurement
 

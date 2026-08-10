@@ -125,3 +125,46 @@ Relevant to future architecture work: an MMoE over 58 tabular features can survi
 effective Head B rows. A recurrent or sequence model cannot — and with a 55%-corrupt val set
 you could not detect the overfitting. Joint coverage, not model capacity, is the binding
 constraint.
+
+## Head B metrics are not comparable across Level 2 (2026-08-10)
+
+Level 2 re-anchored the exit simulator at `wall_clock_ts + feed_delay`. Three things moved at
+once, so **no pre-Level-2 Head B figure can be compared to a post-Level-2 one** — including
+the 62.5% dir acc in `CLAUDE.md`:
+
+1. **The targets changed.** The checkpoint grid shifted 20s later. `traj_0` was `wct+12s` —
+   eight seconds *before* the position could exist — and is now a genuine 12s-ahead forecast.
+2. **The row population changed too**, which is the part that gets missed.
+   `trainer.py::_compute_loss` masks Head B to rows where `mean |traj| > 0.02` — a threshold on
+   the very labels that moved. The anti-causal early TP/SL hits were exactly the
+   high-magnitude rows that cleared it; many now exit flat and drop out. `loss_b` is an
+   average of a different quantity over a different set of rows, with a different denominator.
+3. **Selection is on total val loss** (`trainer.py:281-282`), so a change in `loss_b`'s scale
+   re-weights the criterion and shifts which epoch gets kept — for reasons unrelated to any
+   head improving. Head A and Head C are individually well-defined across the change; *which
+   checkpoint you have* is not.
+
+Direction is not predictable either: removing the leakage makes the task genuinely harder
+(loss up) while shrinking target variance pushes MSE down (loss down). Do not read the sign.
+
+### What to do instead
+
+**Score the existing checkpoint on the new labels.** Level 2 touched only the label builder —
+features, the scaler and the cache are untouched — so `models/saved/mmoe_delay20.pt` can be
+evaluated against regenerated targets with no retrain, inference only. Old-model/new-truth vs
+new-model/new-truth share targets, mask and rows, and the gap quantifies how much of Head B's
+apparent skill *was* the leakage. That is the most informative number Level 2 can produce.
+
+Three instrumentation fields on `EpochMetrics` support this, logged every epoch:
+
+- `head_b_rows` / `head_b_rows_total` — mask retention. The hidden variable behind (2); a
+  large drop is itself the finding about how much training signal was anti-causal.
+- `rmse_b_zero` — RMSE of predicting 0.0 everywhere. `rmse_b` has no absolute meaning once the
+  target variance moves; the logged `RMSE_B/zero-pred` ratio does. Above 1.0 means Head B is
+  worse than predicting nothing.
+- `rmse_b_per_checkpoint` — logged beside each saved checkpoint. `traj_0`/`traj_1` (12s/24s
+  against a 20s delay) straddled the anchor and carried the most contamination; the aggregate
+  averages away the effect under test.
+
+And compare end-to-end in dollars against the backtest baseline, which did **not** move
+(`backtesting.md`).

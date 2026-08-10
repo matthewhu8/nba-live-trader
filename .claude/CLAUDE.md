@@ -55,9 +55,13 @@ divide by 100. A 100-contract position cannot swing more than $100 total.
   - MMoE (58-feat, 2026-08-03): Head A AUCPR 0.1590, Head B dir acc 62.5%, Head C Brier 0.0860
   - Entry gates: `|traj_final| ≥ 0.08`, `run_length ≥ 2`, price 30-70¢, no garbage time
 
-> 🔴 **The exit-window fix is BACKTEST-ONLY. `exit_simulator.py:237` still builds Head B/C
-> training labels with no feed delay** — including the 62.5% dir acc that picked the deployed
-> checkpoint. **Do not retrain until Level 2 lands.** See `skills/data-integrity.md`.
+> 🟡 **Level 2 landed 2026-08-10: the exit simulator now anchors labels at
+> `wall_clock_ts + feed_delay`.** Retraining is unblocked, but **every existing Head B number
+> was measured on anti-causal labels** — including the 62.5% dir acc that picked the deployed
+> checkpoint. Head C was never affected (its hazards come from `kalshi_targets.py`, not the
+> exit simulator; the old "Head B/C" wording here was wrong). Head B's loss mask is a
+> threshold on the labels, so pre/post `loss_b` is **not comparable** — score the old
+> checkpoint on the new labels instead. See `skills/data-integrity.md`.
 >
 > ⚠️ **Baseline: 181 trades / 26.0% / −$324.35**, per-trade −$1.79 CI [−$2.40, −$1.17].
 > `+$37,409`, `+$16,100` and `−$136.42` are all superseded — **do not quote them.**

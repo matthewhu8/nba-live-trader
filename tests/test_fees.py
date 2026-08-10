@@ -106,6 +106,21 @@ def test_take_profit_exit_pays_maker():
     assert fees == pytest.approx(expected)
 
 
+def test_widened_take_profit_also_pays_maker():
+    """`take_profit_widened` (dynamic_exit's streak rule) re-posts the limit further out —
+    still a resting order, so still maker.
+
+    It was missing from `_MAKER_EXIT_REASONS`, so `tools/sweep_dynamic_exit.py` charged the
+    4x taker rate on exactly the exits the streak rule exists to produce. Fixed 2026-08-10
+    alongside that module's unclamped take-profit.
+    """
+    fees = _compute_fees(entry_price=50, exit_price=58, contracts=100,
+                         exit_reason="take_profit_widened")
+    expected = _fee_one_leg(MAKER_FEE_RATE, 50, 100) + _fee_one_leg(MAKER_FEE_RATE, 58, 100)
+    assert fees == pytest.approx(expected)
+    assert "take_profit_widened" in _MAKER_EXIT_REASONS
+
+
 @pytest.mark.parametrize("reason", ["stop_loss", "momentum_flip", "garbage_time", "time_gate"])
 def test_crossing_exits_pay_taker(reason):
     """Everything that is not a resting TP crosses the book at 4x the rate.
