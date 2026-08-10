@@ -51,8 +51,7 @@ binds"; it binds within 3s. Check it, don't guess — this file's own history wi
 guard claim is three sections down.)
 
 100 contracts, TP=5 / SL=3, 20s feed delay, local parquet cache (71 games / 14,239 possessions
-/ 770,054 ticks, Apr 15 – May 17 2026). The per-trade CI **[−$2.40, −$1.17]** was computed on
-the −$324.35 run and has **not** been recomputed; treat it as indicative only.
+/ 770,054 ticks, Apr 15 – May 17 2026).
 
 > ⚠️ **This measures a model trained on defective labels.** The checkpoint predates Level 2
 > (2026-08-10), which fixed the exit simulator's missing feed delay — so the number describes
