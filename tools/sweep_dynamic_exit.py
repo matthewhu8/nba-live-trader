@@ -40,6 +40,7 @@ from backtesting.mmoe_backtest import (
     pnl_dollars,
     _compute_market_features_for_game,
     _connect_motherduck,
+    _filter_to_traded_regime,
     _get_market_features_at_delay,
     _join_pregame,
     _tick_at_delay,
@@ -95,6 +96,7 @@ def _run_one_variant(
     entry_aggregator:           str,
     streak_compare_aggregator:  str,
     min_abs_traj:               float,
+    run_prob_threshold:         float,
     use_traj_for_side:          bool,
     reversal_enabled:           bool,
     streak_enabled:             bool,
@@ -122,8 +124,13 @@ def _run_one_variant(
         for _, row in game_poss.iterrows():
             wct = row["wall_clock_ts"]
 
-            if row.get("is_blowout", False) or row.get("is_garbage_time", False):
-                continue
+            # No per-row garbage-time skip. `_filter_to_traded_regime` in main() already
+            # excluded overtime and |score_diff| > blowout_margin_pts using the same 30-pt
+            # margin training and the live gate use. Filtering again on the stored
+            # `is_blowout` / `is_garbage_time` columns would be STRICTER: they use a 20-pt
+            # margin and per feature-engineering.md discard 28,627 rows the system would
+            # really trade. Level 1 removed this same double-gate from mmoe_backtest; the
+            # sweep kept it, which is one of the ways the two diverged.
 
             market_feats = _get_market_features_at_delay(
                 enriched_game_ticks=enriched_ticks,
@@ -147,6 +154,12 @@ def _run_one_variant(
             fd = _build_feature_dict(row, market_feats)
             output = predictor.predict(fd)
 
+            # Head A gate. The sweep had none at all — `--threshold` was wired to
+            # min_abs_traj — so it admitted a population the backtest would never trade,
+            # independently of every other divergence. Same order as _run_game: Head A, then
+            # the price band, then the Head B magnitude filter.
+            if output.run_prob < run_prob_threshold:
+                continue
             if not (30 <= yes_bid <= 70):
                 continue
 
@@ -249,8 +262,14 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--aggregator", choices=list(TRAJ_AGGREGATORS), required=True,
                         help="entry-signal aggregator (Phase 1 winner)")
+    # `--threshold` used to mean min_abs_traj here while meaning the Head A gate in
+    # mmoe_backtest — the same flag name for two different quantities. Aligned with the
+    # backtest, which is safe because this script has never run successfully, so no recorded
+    # invocation depends on the old meaning.
     parser.add_argument("--threshold", type=float, required=True,
-                        help="min |traj_used| at entry (Phase 1 winner)")
+                        help="Head A gate: min run_prob at entry (matches mmoe_backtest)")
+    parser.add_argument("--min-abs-traj", type=float, default=0.08,
+                        help="Head B gate: min |traj_used| at entry (matches mmoe_backtest)")
     parser.add_argument("--use-traj-for-side", action="store_true",
                         help="set BUY direction from traj sign (Phase 1 winner)")
     parser.add_argument("--streak-compare", choices=list(TRAJ_AGGREGATORS), default="final",
@@ -271,8 +290,16 @@ def main() -> None:
     pregame = _load_pregame(conn)
     conn.close()
 
-    all_poss = _add_derived_features(all_poss)
+    # Order matters and was reversed here, which `_add_derived_features`' guard (added in
+    # 35de8ab) turned into a hard failure — this script has not run since. Before the guard it
+    # silently computed the pace shrinkage against a missing `expected_pace`, so any sweep
+    # output predating it is wrong on that count too. Same order as build_dataset now.
     all_poss = _join_pregame(all_poss, pregame)
+    all_poss = _add_derived_features(all_poss)
+    # Was missing entirely, so the sweep evaluated a different population from the backtest.
+    # Runs after the derived features so the within-game rolling windows are built from the
+    # complete possession sequence, exactly as build_dataset and run_backtest do.
+    all_poss = _filter_to_traded_regime(all_poss)
     all_ticks = _select_home_best_contract(all_ticks, all_poss)
 
     all_poss["game_date"] = pd.to_datetime(all_poss["game_date"])
@@ -326,7 +353,8 @@ def main() -> None:
             predictor=predictor,
             entry_aggregator=args.aggregator,
             streak_compare_aggregator=args.streak_compare,
-            min_abs_traj=args.threshold,
+            min_abs_traj=args.min_abs_traj,
+            run_prob_threshold=args.threshold,
             use_traj_for_side=args.use_traj_for_side,
             reversal_enabled=rev,
             streak_enabled=streak,
