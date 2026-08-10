@@ -16,13 +16,23 @@ python -m backtesting.mmoe_backtest \
 
 **Baseline @ `fix/backtest-exit-window` merged with `origin/main` (2026-08-05):**
 
-| trades | win rate | gross | fees | net | games |
-|---|---|---|---|---|---|
-| 181 | 26.0% | −$6.00 | $318.35 | **−$324.35** | 44 of 69 |
+| | trades | win rate | gross | fees | net | avg hold |
+|---|---|---|---|---|---|---|
+| **current** (possession delay, 2026-08-10) | 181 | 25.4% | −$30.00 | $316.92 | **−$346.92** | 76.3s |
+| previous (entry anchor only) | 181 | 26.0% | −$6.00 | $318.35 | −$324.35 | 70.7s |
 
-Per-trade edge **−$1.79**, game-clustered bootstrap 95% CI **[−$2.40, −$1.17]**, P(edge ≥ 0)
-< 0.0001 over 10,000 resamples. 100 contracts, TP=5 / SL=3, 20s feed delay, local parquet
-cache (71 games / 14,239 possessions / 770,054 ticks, Apr 15 – May 17 2026).
+**−$324.35 is superseded by −$346.92.** The two differ only by the possession-event feed delay:
+`momentum_flip` and `garbage_time` used to fire the instant a possession's raw wall clock
+passed, ~20s before a live trader could know. Delaying them holds positions ~6s longer on
+average, and 6 of the 59 flips become stop-outs instead (flip 32.6% → 29.3%, stop 40.9% →
+43.6%). The early flips were functioning as a lucky exit, so removing them costs $22.57.
+
+Trade count is identical at 181 — worth noting, since longer holds should bind the overlap
+guard more often. It appears the guard rarely binds in this config.
+
+100 contracts, TP=5 / SL=3, 20s feed delay, local parquet cache (71 games / 14,239 possessions
+/ 770,054 ticks, Apr 15 – May 17 2026). The per-trade CI **[−$2.40, −$1.17]** was computed on
+the −$324.35 run and has **not** been recomputed; treat it as indicative only.
 
 > ⚠️ **This measures a model trained on defective labels.** The checkpoint predates Level 2
 > (2026-08-10), which fixed the exit simulator's missing feed delay — so the number describes
@@ -213,10 +223,8 @@ the anchor.
 **Every dynamic-exit sweep result predating 2026-08-10 is void**, on three independent counts:
 anti-causal entry anchor, unclamped take-profit, and taker fees charged on widened exits.
 
-> ⚠️ Still open for both simulators: **possession-driven exits (`momentum_flip`,
-> `garbage_time`) have no feed delay** — they fire the moment a possession's wall clock passes,
-> ~20s before a live trader could know. 32.6% of baseline exits. Fixing it moves −$324.35, so
-> it is a scoped decision; see `data-integrity.md`.
+Possession-driven exits now carry the feed delay too (2026-08-10) — that is the −$346.92 vs
+−$324.35 difference above.
 
 ### Never estimate a fix by filtering
 

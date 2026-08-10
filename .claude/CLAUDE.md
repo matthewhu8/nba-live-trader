@@ -63,8 +63,10 @@ divide by 100. A 100-contract position cannot swing more than $100 total.
 > threshold on the labels, so pre/post `loss_b` is **not comparable** — score the old
 > checkpoint on the new labels instead. See `skills/data-integrity.md`.
 >
-> ⚠️ **Baseline: 181 trades / 26.0% / −$324.35**, per-trade −$1.79 CI [−$2.40, −$1.17].
-> `+$37,409`, `+$16,100` and `−$136.42` are all superseded — **do not quote them.**
+> ⚠️ **Baseline: 181 trades / 25.4% / −$346.92** (2026-08-10, possession-event feed delay).
+> `+$37,409`, `+$16,100`, `−$136.42` and now **−$324.35** are all superseded — **do not quote
+> them.** −$324.35 was the same code minus the possession delay; the CI [−$2.40, −$1.17] was
+> computed on it and has not been recomputed.
 > **Always quote the config with the number**; a wrong command sat beside `−$136.42` for two
 > days. Command, provenance and the four defects: `skills/backtesting.md`.
 >

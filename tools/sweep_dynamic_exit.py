@@ -168,7 +168,13 @@ def _run_one_variant(
             exit_search_start = entry_anchor_ts
 
             future_ticks = enriched_ticks[enriched_ticks["ts"] > exit_search_start]
-            future_poss = game_poss[game_poss["wall_clock_ts"] > exit_search_start]
+            # Possessions on knowable time (wall clock + feed delay), matching both
+            # simulators — see exit_simulator.build_trajectory_targets for why this differs
+            # from the tick filter above and why it is not the reverted defect.
+            future_poss = game_poss[
+                game_poss["wall_clock_ts"] + pd.Timedelta(seconds=FEED_DELAY_SECONDS_NBA)
+                > exit_search_start
+            ]
 
             sim = simulate_exit_dynamic(
                 entry_wall_clock=exit_search_start,

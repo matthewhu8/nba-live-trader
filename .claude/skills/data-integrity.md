@@ -147,11 +147,27 @@ Retraining is unblocked. Read the comparability note in `model-provenance.md` fi
 loss mask is a threshold on the labels themselves, so pre- and post-Level-2 `loss_b` figures
 are not comparable in either direction.
 
-### What Level 2 did NOT fix — possession-driven exits still have no feed delay
+### Possession-driven exits — FIXED 2026-08-10, on `fix/possession-event-delay`
 
-**This section was here before Level 2 and was wrongly deleted by it. Restored 2026-08-10.**
+**This section was here before Level 2, wrongly deleted by it, restored, and now resolved.**
 Level 2 fixed the *entry* anchor, which governs which possessions the exit search can reach.
-It did not delay the possession *events* themselves.
+It did not delay the possession *events* themselves. That is now done, in both simulators at
+once, keyed on a precomputed `_knowable_ts = wall_clock_ts + feed_delay_s`.
+
+**It cost $22.57: −$324.35 → −$346.92** on the same config (181 trades both, 26.0% → 25.4%,
+avg hold 70.7s → 76.3s, flip 59 → 53, stop 74 → 79). The early flips were acting as a lucky
+exit; holding 20s longer converts 6 of them into stop-outs. This is the expected shape of an
+honest correction — the old number was flattered by acting on information it did not have.
+
+The filter also **widens**, which is the counter-intuitive half: a possession inside the delay
+window has a raw wall clock *before* the anchor but becomes knowable *during* the hold, so
+`wall_clock_ts > anchor` dropped events a live trader would have acted on. The correct filter
+is on knowable time, which reduces algebraically to `wall_clock_ts > wct` — resembling the
+reverted defect while being correct, because the tick filter stays at the anchor. Ticks are
+market data observed live; possessions are game state on a delayed feed. Both call sites are
+written in the unreduced form so that distinction survives review.
+
+The original description, for the record:
 
 `simulate_exit` still selects `poss_so_far = window_possessions[wall_clock_ts <= tick["ts"]]`,
 comparing raw possession wall clock against tick time, so a momentum flip or garbage-time
@@ -161,14 +177,11 @@ possession wall clock `T0+30`, first tick at `T0+35` → `momentum_flip` at `T0+
 flip is not knowable until `T0+50`. `dynamic_exit.simulate_exit_dynamic` has the same shape,
 where it also gates re-inference (`window_poss.iloc[i]["wall_clock_ts"] <= tick["ts"]`).
 
-**It is material: `momentum_flip` is 32.6% of exits in the current baseline.** Fixing it will
-move the −$324.35 figure, which is why it is a scoped decision rather than a patch — it is a
-modelling change, not a measurement bug. Note it cuts both ways: these exits currently fire
-early, which is sometimes favourable and sometimes not, so the sign of the correction is not
-predictable.
-
-Whoever takes it: the trigger belongs at `wall_clock_ts + feed_delay_s` in both simulators at
-once, or the label path and the sweep path diverge on exit timing.
+It was material: `momentum_flip` was 32.6% of exits. Calling it a "modelling change" rather
+than a bug (as an earlier revision of this file did) was too soft — the 20s is CDN polling
+latency for game events, which is exactly how possessions and the score reach us, so the same
+delay demonstrably applies. The entry signal already worked this way. Applying it to exit-side
+possession events is the consistent completion of that, not a judgement call.
 
 ## Checklist before trusting any measurement
 

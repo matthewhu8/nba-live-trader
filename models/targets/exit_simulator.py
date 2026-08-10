@@ -97,6 +97,8 @@ def simulate_exit(
     entry_run_team: Optional[str],
     future_ticks: pd.DataFrame,
     future_possessions: pd.DataFrame,
+    *,
+    feed_delay_s: int,
     tp: float = 5.0,
     sl: float = 3.0,
     entry_side: int = 1,
@@ -115,13 +117,35 @@ def simulate_exit(
         sl: stop loss threshold in cents
         entry_side: +1 for BUY YES (home run), -1 for BUY NO (away run)
         max_seconds: time gate override in seconds (defaults to MAX_SECONDS=120)
+        feed_delay_s: lag before a possession event is knowable. `entry_wall_clock` is
+            already the anchor, so this is needed separately: it times the *possession*
+            events (momentum flip, garbage time), not the entry.
     """
     hold_limit = max_seconds if max_seconds is not None else MAX_SECONDS
     deadline = entry_wall_clock + pd.Timedelta(seconds=hold_limit)
     window_ticks = future_ticks[future_ticks["ts"] <= deadline].copy()
-    window_possessions = future_possessions[
-        future_possessions["wall_clock_ts"] <= deadline
-    ].copy()
+
+    # Possession events reach us feed_delay_s after they happen — the same CDN polling lag
+    # that defines the entry anchor, because possessions and the score arrive on that feed
+    # while ticks are market data we already observe live. So a possession is *knowable* at
+    # `wall_clock_ts + feed_delay_s`, and that is the time the momentum-flip and
+    # garbage-time rules must compare against.
+    #
+    # Before this, both rules fired the instant a possession's raw wall clock passed. Measured
+    # 2026-08-10: entry anchored T0+20, run flips at possession wall clock T0+30, first tick
+    # T0+35 → momentum_flip booked at T0+35, though the flip is not knowable until T0+50.
+    # `momentum_flip` was 32.6% of baseline exits, so this was material.
+    #
+    # Precomputed once here rather than per tick: the loop below used to re-filter the whole
+    # possession frame on every tick.
+    delay = pd.Timedelta(seconds=feed_delay_s)
+    if future_possessions.empty:
+        window_possessions = future_possessions.copy()
+    else:
+        knowable_ts = future_possessions["wall_clock_ts"] + delay
+        in_window = knowable_ts <= deadline
+        window_possessions = future_possessions.loc[in_window].copy()
+        window_possessions["_knowable_ts"] = knowable_ts.loc[in_window]
 
     exit_price = entry_yes_bid
     exit_reason = "time_gate"
@@ -132,10 +156,13 @@ def simulate_exit(
         current_bid = float(tick["yes_bid"])
         elapsed_s = (tick["ts"] - entry_wall_clock).total_seconds()
 
-        # Check garbage time via possession state at this point in time
-        poss_so_far = window_possessions[
-            window_possessions["wall_clock_ts"] <= tick["ts"]
-        ]
+        # Possession state we could actually have known by this tick — keyed on
+        # `_knowable_ts` (wall clock + feed delay), not the raw wall clock.
+        poss_so_far = (
+            window_possessions[window_possessions["_knowable_ts"] <= tick["ts"]]
+            if not window_possessions.empty
+            else window_possessions
+        )
         if not poss_so_far.empty:
             last_poss = poss_so_far.iloc[-1]
             if last_poss.get("is_blowout", False) or last_poss.get("is_garbage_time", False):
@@ -306,10 +333,23 @@ def build_trajectory_targets(
             entry_side = 1 if run_encoded >= 0 else -1
 
             future_ticks = game_ticks[game_ticks["ts"] > entry_anchor_ts]
-            future_poss = game_poss[game_poss["wall_clock_ts"] > entry_anchor_ts]
+            # Possessions are selected on when they become KNOWABLE, not on their raw wall
+            # clock: one occurring inside the delay window is learned about *during* the hold
+            # and must stay reachable, where the old `> entry_anchor_ts` dropped it outright.
+            #
+            # This reduces algebraically to `wall_clock_ts > wall_clock_ts_of_entry`, which
+            # LOOKS like the reverted defect. It is not. The tick filter above stays at the
+            # anchor: ticks are market data we observe live, possessions are game state on a
+            # delayed feed, so the two filters legitimately differ. Written in knowable form
+            # rather than the reduced form so that intent survives the next reader.
+            future_poss = game_poss[
+                game_poss["wall_clock_ts"] + pd.Timedelta(seconds=feed_delay_seconds)
+                > entry_anchor_ts
+            ]
 
             sim = simulate_exit(
                 entry_wall_clock=entry_anchor_ts,
+                feed_delay_s=feed_delay_seconds,
                 entry_yes_bid=entry_bid,
                 entry_run_team=entry_run_team,
                 future_ticks=future_ticks,
