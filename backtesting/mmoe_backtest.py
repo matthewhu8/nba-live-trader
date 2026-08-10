@@ -486,10 +486,17 @@ def _run_game(
         exit_search_start = entry_anchor_ts
 
         future_ticks = enriched_ticks[enriched_ticks["ts"] > exit_search_start]
-        future_poss  = game_poss[game_poss["wall_clock_ts"] > exit_search_start]
+        # Possessions on when they become KNOWABLE (wall clock + feed delay), not on raw wall
+        # clock — see the matching comment in exit_simulator.build_trajectory_targets. Reduces
+        # to `> wct`, which resembles the reverted defect but is correct here because the tick
+        # filter above stays at the anchor. Guard (b) below is stated on the same quantity.
+        future_poss  = game_poss[
+            game_poss["wall_clock_ts"] + pd.Timedelta(seconds=feed_delay_s) > exit_search_start
+        ]
 
         sim = simulate_exit(
             entry_wall_clock=exit_search_start,
+            feed_delay_s=feed_delay_s,
             entry_yes_bid=yes_bid,
             entry_run_team=row.get("current_run_team", None),
             future_ticks=future_ticks,
@@ -541,11 +548,30 @@ def _run_game(
                 f"exit search can see pre-entry ticks in game {game_id} @ {wct}: "
                 f"earliest={future_ticks['ts'].min()}, anchor={exit_search_start}"
             )
-        if not future_poss.empty and future_poss["wall_clock_ts"].min() <= exit_search_start:
-            raise RuntimeError(
-                f"exit search can see pre-entry possessions in game {game_id} @ {wct}: "
-                f"earliest={future_poss['wall_clock_ts'].min()}, anchor={exit_search_start}"
-            )
+        #     Both filters make their own clause true by construction, so like clause (a)
+        #     these are TRIPWIRES against a future edit to the filter expressions, not
+        #     coverage. Do not read them as verifying anything about the current code — that
+        #     misreading is what let the original three-line defect run clean for two days
+        #     (STATE_2026-08-05 §3.9).
+        #
+        # (b2) The possession invariant that is NOT a tautology: a possession-driven exit
+        #      cannot resolve before the earliest possession event we could have known about.
+        #      `exit_abs_ts` comes from simulate_exit's own offset while `earliest_knowable`
+        #      comes from the input frame, so the two are independent — this fires if the
+        #      trigger inside simulate_exit is re-keyed to raw `wall_clock_ts`, which is the
+        #      real regression risk here. An earlier revision asserted
+        #      `earliest_knowable <= exit_search_start`, which the filter above had already
+        #      guaranteed false; it could never have fired.
+        if sim.exit_reason in ("momentum_flip", "garbage_time") and not future_poss.empty:
+            earliest_knowable = (
+                future_poss["wall_clock_ts"] + pd.Timedelta(seconds=feed_delay_s)
+            ).min()
+            if exit_abs_ts < earliest_knowable:
+                raise RuntimeError(
+                    f"{sim.exit_reason} in game {game_id} @ {wct} resolved at {exit_abs_ts}, "
+                    f"before the earliest knowable possession event {earliest_knowable} "
+                    f"(feed_delay={feed_delay_s}s)"
+                )
 
         # (c) A tick-driven exit must land on a real tick. simulate_exit measures its
         #     offset from whatever anchor it was handed, so if the call site is anchored

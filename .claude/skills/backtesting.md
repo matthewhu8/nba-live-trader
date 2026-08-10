@@ -14,15 +14,44 @@ python -m backtesting.mmoe_backtest \
   --traj-aggregator mean
 ```
 
-**Baseline @ `fix/backtest-exit-window` merged with `origin/main` (2026-08-05):**
+**Each row states the ref it reproduces on. Check out that ref before comparing.**
 
-| trades | win rate | gross | fees | net | games |
-|---|---|---|---|---|---|
-| 181 | 26.0% | −$6.00 | $318.35 | **−$324.35** | 44 of 69 |
+| ref | trades | win rate | gross | fees | net | avg hold |
+|---|---|---|---|---|---|---|
+| `main` @ `f2912b5` (PR #56) | 181 | 26.0% | −$6.00 | $318.35 | **−$324.35** | 70.7s |
+| `fix/possession-event-delay` (unmerged) | 181 | 25.4% | −$30.00 | $316.92 | **−$346.92** | 76.3s |
 
-Per-trade edge **−$1.79**, game-clustered bootstrap 95% CI **[−$2.40, −$1.17]**, P(edge ≥ 0)
-< 0.0001 over 10,000 resamples. 100 contracts, TP=5 / SL=3, 20s feed delay, local parquet
-cache (71 games / 14,239 possessions / 770,054 ticks, Apr 15 – May 17 2026).
+**On `main` today the number is −$324.35.** −$346.92 is what it becomes once the
+possession-event delay branch lands, and quoting it against `main` will not reproduce.
+
+The two differ only by that delay: `momentum_flip` and `garbage_time` used to fire the instant
+a possession's raw wall clock passed, ~20s before a live trader could know. Delaying them holds
+positions ~6s longer on average, and 6 of the 59 flips resolve differently — **5 become
+`stop_loss` and 1 becomes `take_profit`** (flip 59→53, stop 74→79, TP 44→45). The early flips
+were functioning as a lucky exit, so removing them costs $22.57.
+
+Per-trade edge, `tools/bootstrap_ci.py` (10,000 game-clustered resamples, seed 0):
+
+| ref | per-trade | 95% CI | P(edge >= 0) |
+|---|---|---|---|
+| `main` @ `f2912b5` | −$1.79 | [−$2.41, −$1.17] | < 1e-4 |
+| + possession delay | −$1.92 | [−$2.55, −$1.28] | < 1e-4 |
+| **paired delta** | **−$0.12** | **[−$0.235, −$0.003]** | 0.023 |
+
+The delta excludes zero, but only just — a 20s timing correction applied to a third of all
+exits is worth ~12c per trade. Useful calibration for how much room mechanical measurement
+fixes have left.
+
+Both runs trade the **identical** set of 181 `(game_id, possession_id)` pairs, so the 57 longer
+holds displaced no subsequent entry — **but only by 2.6s at the tightest pair**. That is
+contingent, not structural: 58 holds lengthened by a mean 17.4s and 44 of 137 consecutive-entry
+gaps tightened; the tightest gaps simply did not belong to the trades that moved. Do not assume
+the trade set is stable under timing changes. (An earlier revision guessed "the guard rarely
+binds"; it binds within 3s. Check it, don't guess — this file's own history with an unverified
+guard claim is three sections down.)
+
+100 contracts, TP=5 / SL=3, 20s feed delay, local parquet cache (71 games / 14,239 possessions
+/ 770,054 ticks, Apr 15 – May 17 2026).
 
 > ⚠️ **This measures a model trained on defective labels.** The checkpoint predates Level 2
 > (2026-08-10), which fixed the exit simulator's missing feed delay — so the number describes
@@ -210,13 +239,44 @@ Its overlap guard had the matching second-order bug — `position_exit_ts = wct 
 20s early and let the next position open while the current one was still live. Now measured from
 the anchor.
 
-**Every dynamic-exit sweep result predating 2026-08-10 is void**, on three independent counts:
-anti-causal entry anchor, unclamped take-profit, and taker fees charged on widened exits.
+**Every dynamic-exit sweep result predating 2026-08-10 is void**, on *four* independent counts:
+anti-causal entry anchor, unclamped take-profit, taker fees on widened exits — and the script
+could not run at all, because `main()` called `_add_derived_features` before `_join_pregame`
+(the guard in `35de8ab` made that a hard crash; before the guard it silently computed the pace
+shrinkage against a missing `expected_pace`).
 
-> ⚠️ Still open for both simulators: **possession-driven exits (`momentum_flip`,
-> `garbage_time`) have no feed delay** — they fire the moment a possession's wall clock passes,
-> ~20s before a live trader could know. 32.6% of baseline exits. Fixing it moves −$324.35, so
-> it is a scoped decision; see `data-integrity.md`.
+Three further divergences from the backtest, all fixed 2026-08-10: no `_filter_to_traded_regime`
+at all; a per-row `is_blowout`/`is_garbage_time` skip that Level 1 had already removed from the
+backtest as too strict (20-pt margin vs the gate's 30); and **no Head A gate** — `--threshold`
+was wired to `min_abs_traj`. `--threshold` now means the Head A gate and `--min-abs-traj` the
+Head B one, matching `mmoe_backtest`.
+
+**Validated against the backtest 2026-08-10.** The sweep reads the warehouse (133 tradeable val
+games) where the backtest reads the local cache (71 games), so compare rates, not totals:
+
+| | trades | games | trades/game | net/trade |
+|---|---|---|---|---|
+| sweep baseline | 333 | 133 | 2.50 | −$1.85 |
+| backtest | 181 | 71 | 2.55 | −$1.92 |
+
+Within ~4% on both. The two tools now agree on a trade population.
+
+### Dynamic exit rules do nothing — measured
+
+| variant | per-trade | 95% CI | vs baseline (paired) |
+|---|---|---|---|
+| baseline | −$1.852 | [−2.264, −1.433] | — |
+| reversal_only | −$1.885 | [−2.286, −1.485] | −0.013 [−0.080, +0.049] |
+| streak_only | −$1.894 | [−2.312, −1.462] | +0.007 [−0.064, +0.068] |
+| both_on | −$1.879 | [−2.281, −1.471] | −0.008 [−0.098, +0.080] |
+
+Every paired CI includes zero, and the rules alter only 8–21 of 333 trades. This is the
+predicted result, not a surprise: post-run drift is 0.094c against 1.76c of cost, and **no
+stopping rule can extract value from a driftless process.** Do not spend more time on exit-rule
+variants at this horizon.
+
+Possession-driven exits now carry the feed delay too (2026-08-10) — that is the −$346.92 vs
+−$324.35 difference above.
 
 ### Never estimate a fix by filtering
 

@@ -74,7 +74,12 @@ def simulate_exit_dynamic(
     entry_yes_bid:           float,
     entry_run_team:          Optional[str],
     future_ticks:            pd.DataFrame,            # ts > entry_wall_clock, sorted
-    future_possessions:      pd.DataFrame,            # wall_clock_ts > entry, sorted, with full possession_flat columns
+    future_possessions:      pd.DataFrame,            # possessions whose KNOWABLE time
+                                                      # (wall_clock_ts + feed_delay_s) is after
+                                                      # the entry anchor — which includes ones
+                                                      # whose raw wall clock precedes it. Any
+                                                      # order; re-sorted internally by knowable
+                                                      # time. Full possession_flat columns.
     enriched_ticks_for_game: pd.DataFrame,            # full enriched ticks dataframe (with market feature cols)
     *,
     predictor:               MMoEPredictor,
@@ -93,7 +98,10 @@ def simulate_exit_dynamic(
     streak_widen_at:         int = 2,
     streak_widen_cents:      float = 3.0,
     # Plumbing for per-possession feature rebuild
-    feed_delay_s:            int = FEED_DELAY_SECONDS_NBA,
+    # Required, no default, matching simulate_exit: this value must equal the one the caller
+    # used to build `future_possessions`, and a default lets those drift silently the moment a
+    # caller gains a --delay flag (mmoe_backtest already has one).
+    feed_delay_s:            int,
     prev_yes_bid_init:       float = 50.0,
     prev_spread_init:        float = 1.0,
 ) -> DynamicExitResult:
@@ -114,9 +122,22 @@ def simulate_exit_dynamic(
     deadline = entry_wall_clock + pd.Timedelta(seconds=hold_limit)
 
     window_ticks = future_ticks[future_ticks["ts"] <= deadline].copy()
-    window_poss = future_possessions[
-        future_possessions["wall_clock_ts"] <= deadline
-    ].sort_values("wall_clock_ts").reset_index(drop=True)
+
+    # Possession events are knowable only at `wall_clock_ts + feed_delay_s` — the same rule
+    # as exit_simulator.simulate_exit, kept in lockstep deliberately: if the two simulators
+    # disagree about exit timing, the label path and the sweep path stop being comparable.
+    # This gates re-inference as well as the momentum-flip and garbage-time rules, so the
+    # dynamic rules can no longer act on a possession before it was observable.
+    _delay = pd.Timedelta(seconds=feed_delay_s)
+    if future_possessions.empty:
+        window_poss = future_possessions.copy()
+        window_poss["_knowable_ts"] = pd.Series(dtype="datetime64[ns, UTC]")
+    else:
+        _knowable = future_possessions["wall_clock_ts"] + _delay
+        _in_window = _knowable <= deadline
+        window_poss = future_possessions.loc[_in_window].copy()
+        window_poss["_knowable_ts"] = _knowable.loc[_in_window]
+        window_poss = window_poss.sort_values("_knowable_ts").reset_index(drop=True)
 
     exit_price = entry_yes_bid
     exit_reason = "time_gate"
@@ -148,7 +169,7 @@ def simulate_exit_dynamic(
         # Each crossed possession triggers one re-inference + dynamic-rule update.
         while (
             next_poss_idx < len(window_poss)
-            and window_poss.iloc[next_poss_idx]["wall_clock_ts"] <= tick["ts"]
+            and window_poss.iloc[next_poss_idx]["_knowable_ts"] <= tick["ts"]
         ):
             poss_row = window_poss.iloc[next_poss_idx]
             next_poss_idx += 1

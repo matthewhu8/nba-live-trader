@@ -25,7 +25,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from models.mmoe.dataset import MARKET_STALENESS_TOLERANCE_SECONDS  # noqa: E402
 from backtesting.dynamic_exit import simulate_exit_dynamic  # noqa: E402
-from backtesting.mmoe_backtest import _tick_at_delay  # noqa: E402
+from backtesting.mmoe_backtest import (  # noqa: E402
+    _compute_market_features_for_game,
+    _tick_at_delay,
+)
 from models.targets.exit_simulator import (  # noqa: E402
     _logit_delta,
     build_trajectory_targets,
@@ -72,6 +75,9 @@ def test_exit_window_cannot_resolve_before_the_anchor():
         entry_run_team=None,
         future_ticks=ticks[ticks["ts"] > anchor],
         future_possessions=pd.DataFrame(columns=["wall_clock_ts"]),
+        # Immaterial here (no possessions), but simulate_exit now requires it: the
+        # delay times possession events, which these fixtures deliberately omit.
+        feed_delay_s=20,
         tp=5, sl=3, entry_side=1, max_seconds=240,
     )
     assert correct.exit_reason != "take_profit"
@@ -84,6 +90,9 @@ def test_exit_window_cannot_resolve_before_the_anchor():
         entry_run_team=None,
         future_ticks=ticks[ticks["ts"] > T0],
         future_possessions=pd.DataFrame(columns=["wall_clock_ts"]),
+        # Immaterial here (no possessions), but simulate_exit now requires it: the
+        # delay times possession events, which these fixtures deliberately omit.
+        feed_delay_s=20,
         tp=5, sl=3, entry_side=1, max_seconds=240,
     )
     assert buggy.exit_reason == "take_profit"
@@ -125,6 +134,9 @@ def test_do_not_assert_hold_time_exceeds_feed_delay():
         entry_run_team=None,
         future_ticks=ticks,
         future_possessions=pd.DataFrame(columns=["wall_clock_ts"]),
+        # Immaterial here (no possessions), but simulate_exit now requires it: the
+        # delay times possession events, which these fixtures deliberately omit.
+        feed_delay_s=20,
         tp=5, sl=3, entry_side=1, max_seconds=240,
     )
     assert res.exit_reason == "stop_loss"
@@ -156,6 +168,9 @@ def test_take_profit_overshoot_is_clamped_to_the_resting_limit(entry_side):
         entry_run_team=None,
         future_ticks=ticks,
         future_possessions=pd.DataFrame(columns=["wall_clock_ts"]),
+        # Immaterial here (no possessions), but simulate_exit now requires it: the
+        # delay times possession events, which these fixtures deliberately omit.
+        feed_delay_s=20,
         tp=tp, sl=3, entry_side=entry_side, max_seconds=240,
     )
     assert sim.exit_reason == "take_profit"
@@ -200,6 +215,9 @@ def test_pre_exit_checkpoints_cannot_report_a_move_beyond_the_tp_limit(entry_sid
         entry_run_team=None,
         future_ticks=ticks,
         future_possessions=pd.DataFrame(columns=["wall_clock_ts"]),
+        # Immaterial here (no possessions), but simulate_exit now requires it: the
+        # delay times possession events, which these fixtures deliberately omit.
+        feed_delay_s=20,
         tp=tp, sl=3, entry_side=entry_side, max_seconds=120,
     )
     assert sim.exit_reason == "take_profit"
@@ -222,6 +240,9 @@ def test_non_tp_exits_are_not_clamped():
         entry_run_team=None,
         future_ticks=ticks,
         future_possessions=pd.DataFrame(columns=["wall_clock_ts"]),
+        # Immaterial here (no possessions), but simulate_exit now requires it: the
+        # delay times possession events, which these fixtures deliberately omit.
+        feed_delay_s=20,
         tp=5, sl=3, entry_side=1, max_seconds=240,
     )
     assert sim.exit_reason == "stop_loss"
@@ -363,6 +384,71 @@ def test_label_take_profit_trajectory_freezes_at_the_clamped_price():
         assert res.at[0, f"traj_{i}"] == pytest.approx(_logit_delta(50, 55))
 
 
+# ── Possession events are knowable only after the feed delay ─────────────────
+
+
+def _flip_possession(wall_clock_offset, team="away"):
+    """One possession whose run team differs from the entry's, so it trips momentum_flip."""
+    return pd.DataFrame({
+        "game_id":          [GAME],
+        "wall_clock_ts":    pd.to_datetime([T0 + pd.Timedelta(seconds=wall_clock_offset)], utc=True),
+        "current_run_team": [team],
+        "is_blowout":       [False],
+        "is_garbage_time":  [False],
+    })
+
+
+def test_momentum_flip_waits_for_the_feed_delay():
+    """A flip at possession wall clock T0+30 is not knowable until T0+50.
+
+    Level 2 fixed the entry anchor but left both rules firing the instant a possession's raw
+    wall clock passed, so the flip booked at T0+35 — 15s before it could be known. Possessions
+    and the score arrive on the same CDN feed that defines the entry anchor, so the same delay
+    applies. momentum_flip was 32.6% of baseline exits.
+    """
+    anchor = T0 + pd.Timedelta(seconds=20)
+    ticks = _ticks([(35, 50), (55, 50), (90, 50)])
+    poss = _flip_possession(30)
+
+    delayed = simulate_exit(
+        entry_wall_clock=anchor, entry_yes_bid=50, entry_run_team="home",
+        future_ticks=ticks, future_possessions=poss,
+        feed_delay_s=20, tp=5, sl=3, entry_side=1, max_seconds=120,
+    )
+    assert delayed.exit_reason == "momentum_flip"
+    # Knowable at T0+50; the first tick at or after that is T0+55, i.e. 35s past the anchor.
+    assert delayed.exit_time_offset_s == 35
+
+    # Control — the defect restored. The flip is acted on at its raw wall clock.
+    undelayed = simulate_exit(
+        entry_wall_clock=anchor, entry_yes_bid=50, entry_run_team="home",
+        future_ticks=ticks, future_possessions=poss,
+        feed_delay_s=0, tp=5, sl=3, entry_side=1, max_seconds=120,
+    )
+    assert undelayed.exit_reason == "momentum_flip"
+    assert undelayed.exit_time_offset_s == 15
+
+
+def test_possessions_inside_the_delay_window_stay_reachable():
+    """The filter widens as well as shifts, which is the counter-intuitive half.
+
+    A possession at wall clock T0+10 sits *before* the T0+20 anchor, so the old
+    `wall_clock_ts > anchor` filter dropped it outright — yet a live trader learns of it at
+    T0+30, during the hold, and would act on it. Exercised through the real label path so the
+    caller's filter is under test, not just simulate_exit.
+    """
+    ticks = _game_ticks([(35, 50), (60, 50), (130, 50), (260, 50)])
+    poss = _flip_possession(10)
+
+    res = build_trajectory_targets(
+        entry_rows=_entry_rows(), all_ticks=ticks, all_possessions=poss,
+        feed_delay_seconds=20, tp=5.0, sl=3.0, horizon_seconds=120,
+    )
+    assert res.at[0, "exit_reason"] == "momentum_flip"
+    # Knowable at T0+30, first tick at or after is T0+35 → 15s past the T0+20 anchor.
+    assert res.at[0, "exit_time_offset_s"] == pytest.approx(15)
+
+
 def test_dynamic_exit_clamps_take_profit_to_the_resting_limit():
     """`dynamic_exit.py` carried the same unclamped take-profit, in a module Level 2 did not
     touch at first. Only `tools/sweep_dynamic_exit.py` consumes it, so no label or baseline
@@ -385,9 +471,100 @@ def test_dynamic_exit_clamps_take_profit_to_the_resting_limit():
         enriched_ticks_for_game=ticks,
         predictor=None,
         entry_traj_for_compare=0.10,
+        feed_delay_s=20,
         tp=5.0, sl=3.0, entry_side=1, max_seconds=240,
     )
     assert sim.exit_reason == "take_profit"
     assert sim.exit_price == 55        # entry + tp, not the 64c print
     assert sim.simulated_pnl == pytest.approx(5.0)
     assert not sim.tp_widened
+
+
+def test_most_recent_knowable_possession_survives_unsorted_input():
+    """`poss_so_far.iloc[-1]` is positional, so `simulate_exit` must sort by knowable time.
+
+    Neither caller guarantees the order: `build_trajectory_targets` sorts by `wall_clock_ts`,
+    but `_run_game` sorts by `event_id`, which is NaN on 3,179 of 14,239 cached rows and so
+    leaves `wall_clock_ts` non-monotonic in 15 of 71 games. Found by review 2026-08-10; 3 of
+    the 181 baseline trades had such a window, all agreeing on `current_run_team` by luck, so
+    the bug was latent. Here the rows are fed out of order deliberately.
+    """
+    anchor = T0 + pd.Timedelta(seconds=20)
+    ticks = _ticks([(35, 50), (65, 50), (200, 50)])
+    # Reversed: the LAST row positionally is the earlier possession, which still matches the
+    # entry's run team. Unsorted, `iloc[-1]` reads it and the flip is never seen.
+    poss = pd.concat([_flip_possession(40, "away"), _flip_possession(10, "home")])
+
+    sim = simulate_exit(
+        entry_wall_clock=anchor,
+        entry_yes_bid=50,
+        entry_run_team="home",
+        future_ticks=ticks,
+        future_possessions=poss,
+        feed_delay_s=20, tp=5, sl=3, entry_side=1, max_seconds=120,
+    )
+    assert sim.exit_reason == "momentum_flip"
+    # The away possession is knowable at T0+60; the first tick at or after is T0+65.
+    assert sim.exit_time_offset_s == 45
+
+
+class _StubPredictor:
+    """Returns a fixed trajectory with the entry's sign, so reversal never fires and one
+    same-sign streak is logged without reaching `streak_widen_at=2`."""
+
+    def predict(self, feature_dict):
+        class _Out:
+            trajectory = [0.10] * 10
+            run_prob = 0.5
+        return _Out()
+
+
+def test_dynamic_exit_gates_possessions_on_knowable_time():
+    """Covers `simulate_exit_dynamic`'s non-empty possession branch, which had none.
+
+    The only other test touching this function passes an empty frame, so `_knowable_ts`, the
+    internal sort, and the re-inference gate were all unexecuted — in the module that carries
+    the lockstep guarantee with `simulate_exit`. Needs a predictor stub because crossing a
+    possession triggers re-inference.
+
+    A possession at T0+10 is knowable at T0+30, so the flip resolves on the T0+35 tick
+    (15s past the T0+20 anchor) rather than the T0+25 one.
+    """
+    anchor = T0 + pd.Timedelta(seconds=20)
+    raw = pd.DataFrame({
+        "ts": pd.to_datetime([T0 + pd.Timedelta(seconds=s) for s in (5, 25, 35, 60)], utc=True),
+        "yes_bid":       [50.0] * 4,
+        "yes_ask":       [51.0] * 4,
+        "yes_last":      [50.0] * 4,
+        "volume":        [100, 200, 300, 400],
+        "open_interest": [1000] * 4,
+    })
+    enriched = _compute_market_features_for_game(raw)
+    enriched["ts"] = pd.to_datetime(enriched["ts"], utc=True)
+
+    poss = _flip_possession(10)
+    poss["current_run_length"] = [3]
+
+    def run(delay):
+        return simulate_exit_dynamic(
+            entry_wall_clock=anchor,
+            entry_yes_bid=50.0,
+            entry_run_team="home",
+            future_ticks=enriched[enriched["ts"] > anchor],
+            future_possessions=poss,
+            enriched_ticks_for_game=enriched,
+            predictor=_StubPredictor(),
+            entry_traj_for_compare=0.10,
+            feed_delay_s=delay,
+            tp=5.0, sl=3.0, entry_side=1, max_seconds=120,
+        )
+
+    delayed = run(20)
+    assert delayed.exit_reason == "momentum_flip"
+    assert delayed.exit_time_offset_s == 15
+    assert delayed.n_reinference == 1      # the gate let exactly one possession through
+
+    # Control — knowable time collapses to the raw wall clock and the flip resolves a tick early.
+    undelayed = run(0)
+    assert undelayed.exit_reason == "momentum_flip"
+    assert undelayed.exit_time_offset_s == 5
