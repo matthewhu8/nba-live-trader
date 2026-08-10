@@ -564,7 +564,10 @@ def _run_game(
 
         # gross is CENTS per contract; pnl_dollars converts. A 3c move on 100 contracts
         # is $3.00, not $300 — a 100-contract position cannot swing more than $100 total.
-        # Note this uses the TP-clamped exit_price above, not sim.exit_price.
+        # `exit_price` is `sim.exit_price` — the TP clamp lives inside simulate_exit now, so
+        # do NOT re-add a clamp here. It would be a no-op in this file, but the same reasoning
+        # applied to sweep_dynamic_exit.py (where the limit is `effective_tp`, not `tp`) would
+        # under-credit every widened exit.
         gross = entry_side * (exit_price - yes_bid)
         fees  = _compute_fees(yes_bid, exit_price, contracts, sim.exit_reason)
         net   = pnl_dollars(gross, contracts) - fees

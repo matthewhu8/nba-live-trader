@@ -187,6 +187,19 @@ def simulate_exit(
         checkpoint_ts = entry_wall_clock + pd.Timedelta(seconds=checkpoint_s)
         if checkpoint_ts <= exit_abs_ts:
             price = _lookup_price_at_or_after(future_ticks, checkpoint_ts, exit_price)
+            # Clamping `exit_price` alone does not close the overshoot leak. Checkpoints at
+            # or before the exit are looked up forward, so whenever no tick falls between a
+            # checkpoint and the breach, the checkpoint resolves to the *breaching* tick and
+            # carries its uncollectable price. Measured: entry 50c, ticks at +10s (50c) and
+            # +30s (64c), tp=5 — exit_price clamps to 55 but traj_0 and traj_1 both reported
+            # logit_delta(50, 64) = 0.5754 against the collectable 0.2007.
+            #
+            # On a take-profit path the position ceased to exist at the resting limit, so no
+            # checkpoint can report a move beyond it. `exit_price` already *is* that limit
+            # here, which makes it the cap. Direction-agnostic via entry_side, so BUY NO
+            # (favourable = price down) is capped at entry - tp.
+            if exit_reason == "take_profit" and entry_side * (price - entry_yes_bid) > tp:
+                price = exit_price
         else:
             # After exit: freeze at exit price
             price = exit_price
@@ -207,6 +220,12 @@ def build_trajectory_targets(
     entry_rows: pd.DataFrame,
     all_ticks: pd.DataFrame,
     all_possessions: pd.DataFrame,
+    # Keyword-only from here. `feed_delay_seconds` as the 4th *positional* parameter meant a
+    # call written against the old signature — build_trajectory_targets(rows, ticks, poss,
+    # 5.0, 3.0) — silently bound feed_delay_seconds=5.0 and tp=3.0, and pd.Timedelta accepts
+    # the float without complaint. Keyword-only makes that a TypeError, which is the point of
+    # having no default in the first place.
+    *,
     feed_delay_seconds: int,
     tp: float = 5.0,
     sl: float = 3.0,

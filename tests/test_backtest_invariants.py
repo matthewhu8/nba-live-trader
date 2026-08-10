@@ -175,6 +175,43 @@ def test_take_profit_overshoot_is_clamped_to_the_resting_limit(entry_side):
         assert value == pytest.approx(_logit_delta(entry, clamped))
 
 
+@pytest.mark.parametrize("entry_side", [1, -1])
+def test_pre_exit_checkpoints_cannot_report_a_move_beyond_the_tp_limit(entry_side):
+    """Clamping `exit_price` alone does not close the overshoot leak, and the sibling test
+    above cannot see it — there the exit lands at 10s so every checkpoint is post-exit and
+    takes the frozen path.
+
+    Checkpoints at or before the exit are looked up *forward*, so when no tick falls between
+    a checkpoint and the breach they resolve to the breaching tick itself and carry its
+    uncollectable price. Found by review 2026-08-10: with ticks at +10s/+30s and a 120s
+    horizon, traj_0 and traj_1 reported logit_delta(50, 64) = 0.5754 against the collectable
+    0.2007. On a take-profit path the position ceased to exist at the limit, so no checkpoint
+    may exceed it.
+    """
+    tp, entry = 5.0, 50.0
+    breach = entry + entry_side * (tp + 9)
+    anchor = T0 + pd.Timedelta(seconds=20)
+    # The 30s breach is the first tick at or after the 12s and 24s checkpoints.
+    ticks = _ticks([(20 + 10, entry), (20 + 30, breach)])
+
+    sim = simulate_exit(
+        entry_wall_clock=anchor,
+        entry_yes_bid=entry,
+        entry_run_team=None,
+        future_ticks=ticks,
+        future_possessions=pd.DataFrame(columns=["wall_clock_ts"]),
+        tp=tp, sl=3, entry_side=entry_side, max_seconds=120,
+    )
+    assert sim.exit_reason == "take_profit"
+    assert sim.exit_time_offset_s == 30      # checkpoints 12s and 24s are PRE-exit
+    assert sim.exit_price == entry + entry_side * tp
+
+    capped = _logit_delta(entry, entry + entry_side * tp)
+    for i, value in enumerate(sim.trajectory):
+        assert value == pytest.approx(capped), f"traj_{i} exceeded the resting limit"
+        assert abs(value) < abs(_logit_delta(entry, breach))
+
+
 def test_non_tp_exits_are_not_clamped():
     """Only take_profit rests a limit; stops fill wherever the book is."""
     ticks = _ticks([(30, 40), (60, 40)])

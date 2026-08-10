@@ -62,8 +62,16 @@ class EpochMetrics:
     # These three make the comparison recoverable after the fact:
     head_b_rows:           int = 0    # rows clearing the mask (the hidden variable)
     head_b_rows_total:     int = 0    # market rows considered, for the retention rate
-    rmse_b_zero:           float = 0.0    # predict-nothing reference, gives rmse_b a scale
+    rmse_b_zero:           float = 0.0    # predict-nothing reference, over head_b_mask
     rmse_b_per_checkpoint: list[float] = field(default_factory=list)
+    # `rmse_b` above is computed over `mkt_mask`; `rmse_b_zero` over the strictly narrower
+    # `head_b_mask`. Ratioing those two compares different row populations, and the bias is
+    # systematic: the zero-reference sees only large-target rows while rmse_b is diluted by
+    # the ~42% of market rows whose trajectory is ~0. A head predicting ~0 everywhere would
+    # then print a flattering ratio while being exactly a zero predictor on the rows it is
+    # trained on. This field is `rmse_b` recomputed over `head_b_mask` so the ratio is
+    # apples-to-apples.
+    rmse_b_masked:         float = 0.0
 
 
 @dataclass
@@ -244,13 +252,15 @@ def _evaluate(
     head_b_mask       = mkt_mask & traj_signal
     head_b_rows       = int(head_b_mask.sum())
     head_b_rows_total = int(mkt_mask.sum())
-    rmse_b_zero = 0.0
+    rmse_b_zero = rmse_b_masked = 0.0
     rmse_b_per_checkpoint: list[float] = []
     if head_b_rows > 0:
         masked_true = traj_true[head_b_mask]
         d = traj_pred[head_b_mask] - masked_true
-        # RMSE of a model that predicts 0.0 everywhere: sqrt(mean(target^2)). If rmse_b
-        # is not comfortably below this, Head B has learned nothing worth keeping.
+        # Both over head_b_mask, so the ratio below compares like with like. RMSE of a model
+        # predicting 0.0 everywhere is sqrt(mean(target^2)); if rmse_b_masked is not
+        # comfortably below it, Head B has learned nothing worth keeping.
+        rmse_b_masked = float(np.sqrt((d ** 2).mean()))
         rmse_b_zero = float(np.sqrt((masked_true ** 2).mean()))
         rmse_b_per_checkpoint = [
             float(np.sqrt((d[:, k] ** 2).mean())) for k in range(d.shape[1])
@@ -270,6 +280,7 @@ def _evaluate(
         head_b_rows_total     = head_b_rows_total,
         rmse_b_zero           = rmse_b_zero,
         rmse_b_per_checkpoint = rmse_b_per_checkpoint,
+        rmse_b_masked         = rmse_b_masked,
     )
 
 
@@ -385,10 +396,10 @@ def train(
         # easier rows. `vs_zero` under 1.0 means the head beats predicting nothing.
         if val_metrics.head_b_rows_total > 0:
             logger.info(
-                "         Head B rows %d/%d (%.1f%% retained) | RMSE_B/zero-pred = %.3f",
+                "         Head B rows %d/%d (%.1f%% retained) | RMSE_B(masked)/zero-pred = %.3f",
                 val_metrics.head_b_rows, val_metrics.head_b_rows_total,
                 100.0 * val_metrics.head_b_rows / val_metrics.head_b_rows_total,
-                (val_metrics.rmse_b / val_metrics.rmse_b_zero)
+                (val_metrics.rmse_b_masked / val_metrics.rmse_b_zero)
                 if val_metrics.rmse_b_zero > 0 else float("nan"),
             )
 

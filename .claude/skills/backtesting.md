@@ -200,6 +200,19 @@ Adding the reason to the maker set cannot move the main backtest — `simulate_e
 the five `EXIT_REASONS`, none of them the widened variant — and the −$324.35 baseline was
 re-run after the change to confirm it (unchanged to the digit).
 
+> 🔴 **`tools/sweep_dynamic_exit.py` STILL HAS THE HEADLINE ANCHOR DEFECT.** Found by review
+> 2026-08-10, unfixed. `yes_bid` comes from `_get_market_features_at_delay(..., delay_s=20)`
+> at `:121-128`, but the exit search is anchored at `wct`: `future_ticks = enriched_ticks[ts >
+> wct]` and `entry_wall_clock=wct` at `:160-164`. That is defect 1 verbatim — a spike 5s after
+> `wct` books a take-profit on movement that preceded the position. `simulate_exit_dynamic` is
+> internally inconsistent about it too: it re-infers at `poss_row.wall_clock_ts +
+> feed_delay_s` while measuring `elapsed_s` from an un-delayed anchor.
+>
+> The clamp and fee fixes above make these sweeps *look* trustworthy while leaving them
+> anti-causal, which is worse than leaving them visibly broken. **Do not run or cite a
+> dynamic-exit sweep until this anchor is fixed** — a streak/reversal variant selected on this
+> output is being chosen for pre-entry movement.
+
 ### Never estimate a fix by filtering
 
 Dropping sub-20s trades from the biased run suggested -$2,600. Actually re-running gave +$62
