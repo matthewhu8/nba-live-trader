@@ -30,11 +30,25 @@ positions ~6s longer on average, and 6 of the 59 flips resolve differently — *
 `stop_loss` and 1 becomes `take_profit`** (flip 59→53, stop 74→79, TP 44→45). The early flips
 were functioning as a lucky exit, so removing them costs $22.57.
 
-Both runs trade the **identical** set of 181 `(game_id, possession_id)` pairs, verified by
-diffing the result CSVs — so the 57 longer holds displaced no subsequent entry at all. (An
-earlier revision guessed "the guard rarely binds"; that was speculation, and with a ~45s median
-possession gap it was not even the likely explanation. Check it, don't guess — this file's own
-history with an unverified guard claim is three sections down.)
+Per-trade edge, `tools/bootstrap_ci.py` (10,000 game-clustered resamples, seed 0):
+
+| ref | per-trade | 95% CI | P(edge >= 0) |
+|---|---|---|---|
+| `main` @ `f2912b5` | −$1.79 | [−$2.41, −$1.17] | < 1e-4 |
+| + possession delay | −$1.92 | [−$2.55, −$1.28] | < 1e-4 |
+| **paired delta** | **−$0.12** | **[−$0.235, −$0.003]** | 0.023 |
+
+The delta excludes zero, but only just — a 20s timing correction applied to a third of all
+exits is worth ~12c per trade. Useful calibration for how much room mechanical measurement
+fixes have left.
+
+Both runs trade the **identical** set of 181 `(game_id, possession_id)` pairs, so the 57 longer
+holds displaced no subsequent entry — **but only by 2.6s at the tightest pair**. That is
+contingent, not structural: 58 holds lengthened by a mean 17.4s and 44 of 137 consecutive-entry
+gaps tightened; the tightest gaps simply did not belong to the trades that moved. Do not assume
+the trade set is stable under timing changes. (An earlier revision guessed "the guard rarely
+binds"; it binds within 3s. Check it, don't guess — this file's own history with an unverified
+guard claim is three sections down.)
 
 100 contracts, TP=5 / SL=3, 20s feed delay, local parquet cache (71 games / 14,239 possessions
 / 770,054 ticks, Apr 15 – May 17 2026). The per-trade CI **[−$2.40, −$1.17]** was computed on
