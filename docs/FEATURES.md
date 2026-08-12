@@ -65,7 +65,7 @@ L2 ablation revealed strong per-head specialization that the shared-input MMoE a
 | **B — Trajectory (entry signal)** | MARKET only | Market ablation: DirAcc 0.600 → 0.552 (-7.9%). All other groups left DirAcc flat or +. |
 | **C — Hazard (exit timing)** | CONTEXT (non-foul subset) | Context ablation: Brier +22.6%. Anchored by score/time/period features. |
 
-**Architectural implication**: Head B currently sees all 83 features but only needs 14. With only 24K joint training rows, the extra 69 features are likely overfitting noise. A model variant that restricts Head B's input to the 14 market features (or routes via per-head input projections) is plausibly a bigger win than feature-level pruning.
+**Architectural implication**: Head B currently sees all 83 features but only needs 14. With only 15,383 joint rows in Head B's train split, from 97 games (measured 2026-08-11, `docs/DATA_INVENTORY.md`), the extra 69 features are likely overfitting noise. A model variant that restricts Head B's input to the 14 market features (or routes via per-head input projections) is plausibly a bigger win than feature-level pruning.
 
 ---
 

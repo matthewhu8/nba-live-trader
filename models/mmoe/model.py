@@ -2,13 +2,25 @@
 MMoE (Multi-gate Mixture-of-Experts) model.
 
 Architecture:
-  - 3 shared experts (Linear 83→64→64, BN + ReLU + Dropout)
-  - 3 per-task gates (Linear 83→3, Softmax) — one per head
+  - 58 raw features -> learned market encoder (14->4) -> 48-dim expert input
+  - 3 shared experts (Linear 48→64→64, BN + ReLU + Dropout)
+  - 3 per-task gates (Linear 48→3, Softmax) — one per head
   - Head A: P(run) binary classifier  [sigmoid output]
   - Head B: 10-checkpoint price trajectory [raw output, log-odds delta units]
   - Head C: 10-horizon discrete survival hazard [sigmoid output per horizon]
 
-Total parameters: ~37K (includes BatchNorm) — well-matched to the 24K joint rows in the training set.
+Total parameters: 30,090 (counted, includes BatchNorm), of which the three experts
+hold 22,656 (75.3%) and the heads 6,933 (23.0%).
+
+Sizing context, measured 2026-08-11 (see docs/DATA_INVENTORY.md):
+  - Heads A and C train on all 428,759 rows. Capacity is not the constraint there.
+  - Head B and the market encoder train only on the 37,180 joint rows from 232
+    games, and `trainer.py` masks Head B further to |traj| > 0.02. Rows within a
+    game are heavily autocorrelated, so the effective independent sample size for
+    the trading head is closer to the game count than the row count.
+The old "~37K params, well-matched to 24K joint rows" note here was wrong on both
+numbers and asserted a fit that has never been tested. Run the width/expert
+ablation before treating the current size as justified.
 """
 
 import torch

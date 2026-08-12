@@ -437,7 +437,7 @@ def _run_game(
         if int(row.get("current_run_length", 0)) < min_run_length:
             continue
 
-        # Build 83-dim feature vector and run inference
+        # Build 58-dim feature vector and run inference
         fd = _build_feature_dict(row, market_feats)
         if prod_features:
             fd = _apply_prod_feature_gaps(fd)

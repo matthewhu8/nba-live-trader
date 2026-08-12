@@ -32,39 +32,41 @@ Target arrays are mapped:
 
 ## 3. Feature Normalization (Split Scaler)
 
-All 83 features are normalized with a `StandardScaler` before being fed into the model. However, a single scaler fit on all training rows produces distorted statistics for the 14 market features, because **94% of training rows have no Kalshi data** — their market features are zero-filled. This is the "split scaler problem."
+All 58 features (33 physics + 11 pregame + 14 market — see `docs/FEATURE_CONSOLIDATION.md`) are normalized with a `StandardScaler` before being fed into the model. However, a single scaler fit on all training rows produces distorted statistics for the 14 market features, because **91% of training rows have no Kalshi data** - their market features are zero-filled. This is the "split scaler problem."
 
 ### The Problem
 
 The training set is a mix of two datasets:
 
+Counts measured 2026-08-11 (`docs/DATA_INVENTORY.md`); the `~409K / ~24K` figures previously here were about two months stale.
+
 | Dataset | Rows | Market features |
 |---|---|---|
-| Basketball-only | ~409K (94%) | All zeros (`has_market_data=0`) |
-| Joint (basketball + Kalshi) | ~24K (6%) | Real prices (`has_market_data=1`) |
+| Basketball-only | 391,579 (91.3%) | All zeros (`has_market_data=0`) |
+| Joint (basketball + Kalshi) | 37,180 (8.7%) | Real prices (`has_market_data=1`) |
 
 A naive `StandardScaler.fit()` on all rows learns heavily distorted statistics. For `yes_bid`:
-- **Global fit:** mean ≈ 3¢, std ≈ 12 (dominated by the 94% zeros)
+- **Global fit:** mean 2.4¢, std 12.8 (dominated by the 91% zeros; measured 2026-08-11)
 - **At inference** (always `has_market_data=1`): a typical bid of 50¢ → z-score = (50−3)/12 = **+3.9**
 
-Every single live possession is evaluated with market features at +2 to +6 standard deviations. The model only ever saw those z-scores on 6% of training data, meaning it makes price-related decisions from a consistently out-of-distribution input region.
+Every single live possession is evaluated with market features at +2 to +6 standard deviations. The model only ever saw those z-scores on 8.7% of training data, meaning it makes price-related decisions from a consistently out-of-distribution input region. After the refit the market scaler gives `yes_bid` mean 52.3¢, std 31.1 (measured 2026-08-11 on 15,383 joint train rows).
 
 ### The Fix (Implemented in `dataset.py`)
 
-After fitting the scaler on all rows (which correctly calibrates the 69 physics + pregame features), the scaler's `mean_` and `scale_` for the 13 price/liquidity market features (indices 69–81) are **replaced** with statistics computed from joint rows only:
+After fitting the scaler on all rows (which correctly calibrates the 44 physics + pregame features), the scaler's `mean_` and `scale_` for the 13 price/liquidity market features (indices 44–56) are **replaced** with statistics computed from joint rows only:
 
 ```
-market_start = 69   # PHYSICS_COLS(58) + PREGAME_COLS(11)
-market_end   = 81   # excludes has_market_data at index 82
+market_start = 44   # PHYSICS_COLS(33) + PREGAME_COLS(11)
+market_end   = 57   # excludes has_market_data at index 57
 
-aux_scaler.fit(X[joint_rows_only, 69:81])
-scaler.mean_[69:81]  = aux_scaler.mean_
-scaler.scale_[69:81] = aux_scaler.scale_
+aux_scaler.fit(X[joint_rows_only, 44:57])
+scaler.mean_[44:57]  = aux_scaler.mean_
+scaler.scale_[44:57] = aux_scaler.scale_
 ```
 
 After this correction, `yes_bid=50` → z ≈ 0.0 at inference. The model sees market prices in the same distribution it trained on.
 
-### Why `has_market_data` (index 82) Is Not Corrected
+### Why `has_market_data` (index 57) Is Not Corrected
 
 `has_market_data` is intentionally kept at global scaling (mean≈0.06, std≈0.24). This means:
 - Live inference (value=1.0) → z ≈ +3.9

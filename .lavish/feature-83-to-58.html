@@ -1,0 +1,797 @@
+<title>83 → 58: The MMoE Feature Consolidation</title>
+<meta name="description" content="Every one of the 83 original MMoE inputs, the exact formula that replaced it, and the learned market encoder — sourced directly from transforms.py, dataset.py, and feature_config.py.">
+
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/daisyui.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/themes.css">
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.2.4/dist/index.global.js"></script>
+
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  :where(.grid, .flex) > * { min-width: 0; }
+  :where(p, h1, h2, h3, h4, li, dd, td, th, .badge) { overflow-wrap: anywhere; }
+  :where(img, svg, video, canvas, iframe) { max-width: 100%; height: auto; }
+  body { background: var(--color-base-100); }
+  .formula {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.92rem;
+    background: color-mix(in oklch, var(--color-base-content) 6%, transparent);
+    border: 1px solid color-mix(in oklch, var(--color-base-content) 12%, transparent);
+    border-radius: 0.5rem;
+    padding: 0.6rem 0.85rem;
+    white-space: pre-wrap;
+    line-height: 1.55;
+  }
+  .old-chip {
+    font-family: ui-monospace, monospace;
+    font-size: 0.72rem;
+    padding: 0.1rem 0.45rem;
+    border-radius: 0.3rem;
+    background: color-mix(in oklch, var(--color-error) 12%, transparent);
+    color: var(--color-error);
+    border: 1px solid color-mix(in oklch, var(--color-error) 25%, transparent);
+    display: inline-block;
+    margin: 0.12rem;
+  }
+  .new-chip {
+    font-family: ui-monospace, monospace;
+    font-size: 0.74rem;
+    padding: 0.14rem 0.5rem;
+    border-radius: 0.3rem;
+    background: color-mix(in oklch, var(--color-success) 14%, transparent);
+    color: var(--color-success);
+    border: 1px solid color-mix(in oklch, var(--color-success) 28%, transparent);
+    display: inline-block;
+    margin: 0.12rem;
+    font-weight: 600;
+  }
+  .drop-chip {
+    font-family: ui-monospace, monospace;
+    font-size: 0.72rem;
+    padding: 0.1rem 0.45rem;
+    border-radius: 0.3rem;
+    background: color-mix(in oklch, var(--color-base-content) 8%, transparent);
+    color: color-mix(in oklch, var(--color-base-content) 55%, transparent);
+    text-decoration: line-through;
+    display: inline-block;
+    margin: 0.12rem;
+  }
+  .section-anchor { scroll-margin-top: 5.5rem; }
+  #file-transforms, #file-encoder { font-size: 0.82rem; }
+</style>
+
+<div data-theme="night" class="min-h-screen">
+
+<div class="navbar bg-base-200/80 backdrop-blur sticky top-0 z-40 border-b border-base-content/10 px-4 lg:px-8">
+  <div class="navbar-start">
+    <span class="font-bold text-sm lg:text-base">83 → 58 Feature Consolidation</span>
+  </div>
+  <div class="navbar-end hidden md:flex gap-1 text-xs">
+    <a href="#overview" class="btn btn-ghost btn-xs">Overview</a>
+    <a href="#pregame" class="btn btn-ghost btn-xs">Pregame</a>
+    <a href="#market" class="btn btn-ghost btn-xs">Market</a>
+    <a href="#physics" class="btn btn-ghost btn-xs">Physics</a>
+    <a href="#mastertable" class="btn btn-ghost btn-xs">All 83 → 58</a>
+    <a href="#source" class="btn btn-ghost btn-xs">Source</a>
+  </div>
+</div>
+
+<main class="max-w-6xl mx-auto p-5 lg:p-10 space-y-14">
+
+  <!-- HERO -->
+  <section id="overview" class="section-anchor space-y-6">
+    <div class="hero bg-base-200 rounded-box border border-base-content/10">
+      <div class="hero-content flex-col text-center py-10">
+        <h1 class="text-3xl lg:text-4xl font-bold">From 83 raw inputs to a 48-dim expert vector</h1>
+        <p class="text-base-content/70 max-w-2xl mt-2">
+          Two separate steps, run by two separate mechanisms. Step 1 is offline, deterministic,
+          hand-written math (<code class="text-xs">models/features/transforms.py</code>) that shrinks
+          83 columns to 58. Step 2 happens live inside the model — a single learned linear layer
+          that shrinks the 14 market columns to 4, giving the experts 48 numbers to work with.
+        </p>
+      </div>
+    </div>
+
+    <div class="stats stats-vertical lg:stats-horizontal shadow w-full bg-base-200 border border-base-content/10">
+      <div class="stat">
+        <div class="stat-title">Original inputs</div>
+        <div class="stat-value text-3xl">83</div>
+        <div class="stat-desc">58 physics + 11 pregame + 14 market</div>
+      </div>
+      <div class="stat">
+        <div class="stat-title">After hand-consolidation</div>
+        <div class="stat-value text-3xl text-success">58</div>
+        <div class="stat-desc">33 physics + 11 pregame (unchanged) + 14 market (unchanged)</div>
+      </div>
+      <div class="stat">
+        <div class="stat-title">After the learned encoder</div>
+        <div class="stat-value text-3xl text-primary">48</div>
+        <div class="stat-desc">44 pass through + 14 market → 4 (nn.Linear)</div>
+      </div>
+    </div>
+
+    <div class="alert alert-info alert-soft text-sm">
+      <span>
+        <strong>Only the physics block was hand-consolidated.</strong> Pregame (11) and market (14)
+        columns are the exact same columns before and after — market just gets compressed later,
+        by a trained neural layer instead of a formula, because nobody has a confident hand-written
+        formula for how bid/ask/spread/volume should combine.
+      </span>
+    </div>
+
+    <div class="bg-base-200 rounded-box border border-base-content/10 p-4 lg:p-6 overflow-x-auto">
+      <pre class="mermaid">
+flowchart TD
+  A["83 raw columns"] --> P["11 pregame columns<br/>(unchanged)"]
+  A --> M["14 market columns<br/>(unchanged)"]
+  A --> PH["58 physics columns"]
+
+  PH -->|"hand-written formulas<br/>models/features/transforms.py"| PH2["33 physics columns"]
+
+  P --> S1["58 total: 33 physics + 11 pregame + 14 market"]
+  M --> S1
+  PH2 --> S1
+
+  S1 -->|"pass through unchanged"| E1["44 numbers"]
+  S1 -->|"learned nn.Linear(14 → 4)<br/>inside MMoEModel"| E2["4 numbers"]
+
+  E1 --> S2["48-dim expert input"]
+  E2 --> S2
+      </pre>
+    </div>
+  </section>
+
+  <!-- PREGAME -->
+  <section id="pregame" class="section-anchor space-y-4">
+    <div class="flex items-center gap-3">
+      <h2 class="text-2xl font-bold">Pregame block — 11 → 11 (unchanged)</h2>
+      <span class="badge badge-ghost">no consolidation</span>
+    </div>
+    <p class="text-base-content/70 text-sm max-w-3xl">
+      These are one-time, per-game numbers computed before tip-off from each team's trailing form.
+      None of them were touched by the consolidation — every one of the 11 columns below is read
+      as-is, joined onto every possession row by <code class="text-xs">game_id</code>.
+    </p>
+    <div class="overflow-x-auto rounded-box border border-base-content/10 bg-base-200">
+      <table class="table table-zebra table-sm">
+        <thead><tr><th>#</th><th>Column</th><th>What it is</th></tr></thead>
+        <tbody>
+          <tr><td>1</td><td class="font-mono">team_net_rating_delta</td><td>Home net rating minus away (std ≈ 5.2)</td></tr>
+          <tr><td>2</td><td class="font-mono">home_off_rating</td><td>EWMA offensive rating entering the game</td></tr>
+          <tr><td>3</td><td class="font-mono">away_off_rating</td><td>Same, away team</td></tr>
+          <tr><td>4</td><td class="font-mono">home_def_rating</td><td>EWMA defensive rating entering the game</td></tr>
+          <tr><td>5</td><td class="font-mono">away_def_rating</td><td>Same, away team</td></tr>
+          <tr><td>6</td><td class="font-mono">roster_rapm_gap</td><td>RAPM-based home-minus-away roster quality gap</td></tr>
+          <tr><td>7</td><td class="font-mono">missing_rapm_impact</td><td>Impact of missing/resting players (std ≈ 13.9)</td></tr>
+          <tr><td>8</td><td class="font-mono">rest_advantage</td><td>Rest-days differential, home minus away</td></tr>
+          <tr><td>9</td><td class="font-mono">expected_pace</td><td>Expected pace in secs/possession (also reused inside the new <code>pace_ref</code> physics formula, see below)</td></tr>
+          <tr><td>10</td><td class="font-mono">form_delta</td><td>Recent-form differential, home minus away</td></tr>
+          <tr><td>11</td><td class="font-mono">has_pregame_data</td><td>Flag: 1 for 2025-26 rows, 0 for 2024-25 (zero-filled)</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- MARKET -->
+  <section id="market" class="section-anchor space-y-4">
+    <div class="flex items-center gap-3 flex-wrap">
+      <h2 class="text-2xl font-bold">Market block — 14 raw → 4 learned</h2>
+      <span class="badge badge-primary badge-soft">learned, not hand-written</span>
+    </div>
+    <p class="text-base-content/70 text-sm max-w-3xl">
+      The 14 raw columns themselves are untouched — no formula runs on them the way physics
+      features get combined. Instead, all 14 are fed through one small trained layer that learns
+      its own 4-number summary during training.
+    </p>
+    <div class="overflow-x-auto rounded-box border border-base-content/10 bg-base-200">
+      <table class="table table-zebra table-sm">
+        <thead><tr><th>#</th><th>Column</th><th>Group</th><th>What it is</th></tr></thead>
+        <tbody>
+          <tr><td>1</td><td class="font-mono">yes_bid</td><td rowspan="5" class="align-middle text-base-content/60">Raw LOB state</td><td>Current best bid on YES</td></tr>
+          <tr><td>2</td><td class="font-mono">yes_ask</td><td>Current best ask on YES</td></tr>
+          <tr><td>3</td><td class="font-mono">spread</td><td><code>yes_ask − yes_bid</code></td></tr>
+          <tr><td>4</td><td class="font-mono">yes_last</td><td>Last traded price</td></tr>
+          <tr><td>5</td><td class="font-mono">open_interest</td><td>Open contracts outstanding</td></tr>
+          <tr><td>6</td><td class="font-mono">trade_volume_60s</td><td rowspan="3" class="align-middle text-base-content/60">Liquidity regime</td><td>Rolling 60s sum of traded volume</td></tr>
+          <tr><td>7</td><td class="font-mono">time_since_last_trade_ms</td><td>Milliseconds since the last volume &gt; 0 tick</td></tr>
+          <tr><td>8</td><td class="font-mono">open_interest_change_60s</td><td>Δ open interest over the last 60s</td></tr>
+          <tr><td>9</td><td class="font-mono">d_yes_bid</td><td rowspan="4" class="align-middle text-base-content/60">Price velocity</td><td>Change from previous possession's tick</td></tr>
+          <tr><td>10</td><td class="font-mono">d_spread</td><td>Change in spread from previous possession's tick</td></tr>
+          <tr><td>11</td><td class="font-mono">bid_velocity_30s</td><td><code>(bid_now − bid_30s_ago) / 30</code></td></tr>
+          <tr><td>12</td><td class="font-mono">bid_acceleration_30s</td><td><code>velocity_now − velocity_30s_ago</code></td></tr>
+          <tr><td>13</td><td class="font-mono">bid_vs_last_divergence</td><td rowspan="2" class="align-middle text-base-content/60">Divergence / flag</td><td><code>yes_bid − yes_last</code> (stale-order detection)</td></tr>
+          <tr><td>14</td><td class="font-mono">has_market_data</td><td>1 if a Kalshi tick exists for this row, else 0</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card bg-base-200 border border-primary/20">
+      <div class="card-body">
+        <h3 class="card-title text-lg">The learned function: <code class="text-base">nn.Linear(14, 4)</code></h3>
+        <p class="text-sm text-base-content/70">
+          Each of the 4 output numbers is a plain weighted sum of all 14 market inputs, exactly the
+          "one neuron" mechanic from earlier — no activation function is applied at this step, it's
+          purely linear:
+        </p>
+        <div class="formula">for each output i in 1..4:
+    encoded[i] = b[i] + Σ_(j=1..14)  W[i][j] · market_raw[j]
+
+W is a 4×14 matrix of learned weights  → 56 numbers
+b is a 4-length vector of learned biases → 4 numbers
+Total learned parameters in this layer: 56 + 4 = 60</div>
+        <p class="text-sm text-base-content/70 mt-2">
+          <strong>There is no formula to show for what <code>W</code> and <code>b</code> actually are</strong> —
+          unlike every physics feature below, these 60 numbers aren't hand-derived. They start
+          random and are adjusted by backpropagation, alongside every other weight in the network,
+          to whatever values minimize the combined Head A / B / C loss on the training set. That's
+          the literal meaning of "learned": the transformation exists, but no one wrote down what it
+          computes — training found it.
+        </p>
+        <div class="mt-3">
+          <a href="#source" class="link link-primary text-sm">↓ See the real code for this layer</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- PHYSICS -->
+  <section id="physics" class="section-anchor space-y-5">
+    <div class="flex items-center gap-3 flex-wrap">
+      <h2 class="text-2xl font-bold">Physics block — 58 → 33 (hand-consolidated)</h2>
+      <span class="badge badge-success badge-soft">deterministic formulas</span>
+    </div>
+    <p class="text-base-content/70 text-sm max-w-3xl">
+      This is the block that actually shrank. All 33 replacement values are computed by named
+      functions in <code class="text-xs">models/features/transforms.py</code> — plain numpy math, no
+      training involved. Three repeating problems drove the shrinkage, and every subgroup below is
+      an instance of one or more of them:
+    </p>
+    <div class="grid md:grid-cols-3 gap-3">
+      <div class="card bg-base-200 border border-base-content/10">
+        <div class="card-body p-4">
+          <span class="badge badge-warning badge-sm w-fit">Problem 1</span>
+          <p class="text-sm mt-1"><strong>Direction + magnitude split across two columns</strong> when
+          one signed number says the same thing — forces the network to learn a multiplication it's
+          bad at from limited data.</p>
+        </div>
+      </div>
+      <div class="card bg-base-200 border border-base-content/10">
+        <div class="card-body p-4">
+          <span class="badge badge-warning badge-sm w-fit">Problem 2</span>
+          <p class="text-sm mt-1"><strong>Exact algebraic duplicates</strong> — one column was 100%
+          derivable from others already present (e.g. <code class="text-xs">in_bonus == (fouls_until_bonus == 0)</code>),
+          so it added weights without adding information.</p>
+        </div>
+      </div>
+      <div class="card bg-base-200 border border-base-content/10">
+        <div class="card-body p-4">
+          <span class="badge badge-warning badge-sm w-fit">Problem 3</span>
+          <p class="text-sm mt-1"><strong>Broken encodings</strong> — a <code class="text-xs">999</code>
+          sentinel value crushed a 0–70 range into a 0.24-wide z-score band; <code class="text-xs">np.sign()</code>
+          quantization threw away real magnitude.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="join join-vertical w-full">
+
+      <!-- A: Score x time -->
+      <div class="collapse collapse-arrow join-item border border-base-content/10 bg-base-200">
+        <input type="checkbox" checked />
+        <div class="collapse-title font-semibold flex items-center gap-2 flex-wrap">
+          A. Score × time <span class="badge badge-sm">7 → 4</span>
+        </div>
+        <div class="collapse-content space-y-3">
+          <div>
+            <div class="text-xs uppercase text-base-content/50 mb-1">Old (7)</div>
+            <span class="old-chip">score_diff</span><span class="old-chip">period</span>
+            <span class="old-chip">minutes_into_game</span><span class="old-chip">trailing_team_urgency</span>
+            <span class="old-chip">comeback_probability_proxy</span><span class="old-chip">q4_close_game</span>
+            <span class="old-chip">garbage_time_risk</span>
+          </div>
+          <div>
+            <div class="text-xs uppercase text-base-content/50 mb-1">New (4)</div>
+            <span class="new-chip">score_diff</span><span class="new-chip">lead_z</span>
+            <span class="new-chip">time_leverage</span><span class="new-chip">garbage_time_risk</span>
+          </div>
+          <div class="formula">score_diff        = unchanged, passed through
+
+lead_z             = score_diff / sqrt( max(minutes_remaining, 0.5) )
+                     # replaces trailing_team_urgency (|d|/m) and
+                     # comeback_probability_proxy (d²/m) — both threw away
+                     # the sign, so +6 with 1 min left and −6 with 1 min
+                     # left looked identical to the model.
+
+time_leverage      = 1 − sqrt( clip(minutes_remaining_raw / 48, 0, 1) )
+                     # sqrt-scaled clock: replaces the linear
+                     # minutes_into_game AND the hard 0/1 threshold
+                     # q4_close_game with one smooth curve that gives
+                     # late-game minutes more resolution than early ones.
+
+garbage_time_risk  = sigmoid( (|score_diff| − 15) / 5 ) · clip(1 − minutes_remaining_raw/48, 0, 1)
+                     # same formula as before, just centralized so live
+                     # and training compute it identically.</div>
+          <div class="alert alert-soft text-xs py-2">
+            <span>
+              <strong>clip(x, lo, hi)</strong> in proper math notation is
+              <code>min(max(x, lo), hi)</code> — take <code>x</code>, but never let it go below
+              <code>lo</code> or above <code>hi</code>. So
+              <code>clip(minutes_remaining_raw / 48, 0, 1) = min(max(minutes_remaining_raw / 48, 0), 1)</code>:
+              the ratio is computed normally, then floored at 0 and capped at 1 so it can never
+              leave the 0–1 range the <code>sqrt()</code> right outside it needs. This same
+              <code>clip</code> shows up again below in <code>garbage_time_risk</code>,
+              <code>fouls_until_bonus</code>, <code>full_timeouts_remaining</code>, and
+              <code>poss_since_timeout</code> — same <code>min(max(·))</code> meaning every time.
+            </span>
+          </div>
+          <p class="text-xs text-base-content/60"><code>period</code> is still used as a raw input
+          <em>inside</em> these formulas, it's just no longer handed to the network as its own
+          separate column.</p>
+        </div>
+      </div>
+
+      <!-- B: Shot info -->
+      <div class="collapse collapse-arrow join-item border border-base-content/10 bg-base-200">
+        <input type="checkbox" />
+        <div class="collapse-title font-semibold flex items-center gap-2 flex-wrap">
+          B. Shot info <span class="badge badge-sm">2 → 2 (unchanged)</span>
+        </div>
+        <div class="collapse-content space-y-3">
+          <span class="new-chip">shot_value</span><span class="new-chip">shot_distance</span>
+          <p class="text-sm text-base-content/70">No consolidation here — both pass through
+          unchanged. (They're also fed into a separate helper, <code class="text-xs">shot_xppp()</code>,
+          used elsewhere for target-labeling, not as a model input.)</p>
+        </div>
+      </div>
+
+      <!-- C: Runs -->
+      <div class="collapse collapse-arrow join-item border border-base-content/10 bg-base-200">
+        <input type="checkbox" />
+        <div class="collapse-title font-semibold flex items-center gap-2 flex-wrap">
+          C. Runs <span class="badge badge-sm">5 → 3</span>
+        </div>
+        <div class="collapse-content space-y-3">
+          <div>
+            <div class="text-xs uppercase text-base-content/50 mb-1">Old (5)</div>
+            <span class="old-chip">current_run_team_encoded</span><span class="old-chip">current_run_length</span>
+            <span class="old-chip">current_run_points</span><span class="old-chip">current_run_3pt_pct</span>
+            <span class="old-chip">current_run_paint_pct</span>
+          </div>
+          <div>
+            <div class="text-xs uppercase text-base-content/50 mb-1">New (3)</div>
+            <span class="new-chip">run_signed_points</span><span class="new-chip">run_efficiency</span>
+            <span class="new-chip">run_fragility</span>
+          </div>
+          <div class="formula">run_signed_points  = current_run_team_encoded · current_run_points
+                     # +N when home is on the run, −N when away.
+                     # Folds direction and magnitude into one signed number
+                     # (Problem 1).
+
+run_efficiency     = current_run_points / max(current_run_length, 1)
+                     # points per possession within the run — the part of
+                     # "how hot" that's independent of "how long", since
+                     # length and points correlate ~heavily on their own.
+
+run_fragility      = current_run_3pt_pct − current_run_paint_pct
+                     # positive = jumper-driven (likely to revert),
+                     # negative = paint-driven (more repeatable).</div>
+        </div>
+      </div>
+
+      <!-- D: Recent scoring -->
+      <div class="collapse collapse-arrow join-item border border-base-content/10 bg-base-200">
+        <input type="checkbox" />
+        <div class="collapse-title font-semibold flex items-center gap-2 flex-wrap">
+          D. Recent scoring <span class="badge badge-sm">4 → 2</span>
+        </div>
+        <div class="collapse-content space-y-3">
+          <div>
+            <div class="text-xs uppercase text-base-content/50 mb-1">Old (4)</div>
+            <span class="old-chip">home_points_last_5_poss</span><span class="old-chip">away_points_last_5_poss</span>
+            <span class="old-chip">home_points_last_10_poss</span><span class="old-chip">away_points_last_10_poss</span>
+          </div>
+          <div>
+            <div class="text-xs uppercase text-base-content/50 mb-1">New (2)</div>
+            <span class="new-chip">swing_5</span><span class="new-chip">swing_accel</span>
+          </div>
+          <div class="formula">swing_5    = home_points_last_5_poss − away_points_last_5_poss
+             # signed margin swing over the last 5 possessions
+
+full_10    = home_points_last_10_poss − away_points_last_10_poss
+prior      = full_10 − swing_5                 # the "older" half of the 10-window
+swing_accel = swing_5 − prior
+             # recent-half swing minus prior-half swing. The 5- and 10-poss
+             # windows are nested and correlate ~0.7, so feeding both raw is
+             # feeding the same trend twice; expressing the wider window as
+             # an acceleration decorrelates them.</div>
+        </div>
+      </div>
+
+      <!-- E: Pace -->
+      <div class="collapse collapse-arrow join-item border border-base-content/10 bg-base-200">
+        <input type="checkbox" />
+        <div class="collapse-title font-semibold flex items-center gap-2 flex-wrap">
+          E. Pace <span class="badge badge-sm">2 → 2 (restructured)</span>
+        </div>
+        <div class="collapse-content space-y-3">
+          <div>
+            <div class="text-xs uppercase text-base-content/50 mb-1">Old (2)</div>
+            <span class="old-chip">pace_last_10_possessions</span><span class="old-chip">pace_season_baseline</span>
+          </div>
+          <div>
+            <div class="text-xs uppercase text-base-content/50 mb-1">New (2)</div>
+            <span class="new-chip">pace_ref</span><span class="new-chip">pace_surprise</span>
+          </div>
+          <div class="formula">weight(elapsed) = min( elapsed / (elapsed + 40), 0.85 )
+             # weight on the in-game pace mean; starts near 0 (trust the
+             # pregame prior), climbs toward 0.85 by ~40 possessions, and
+             # plateaus there so the prior always keeps a floor of influence
+
+pace_ref        = weight · pace_game_to_date + (1 − weight) · expected_pace
+             # expected_pace is the PREGAME feature (block above) — this is
+             # the one place a physics formula reaches into another block.
+             # An empirical-Bayes blend of "what this game has actually
+             # looked like so far" and "what we expected coming in".
+
+pace_surprise   = pace_last_10_possessions − pace_ref
+             # how much faster/slower the last 10 possessions ran than
+             # the blended reference.</div>
+          <p class="text-xs text-base-content/60">Count didn't shrink here (2→2), but the formula
+          did change — <code class="text-xs">pace_season_baseline</code> (a raw running average) was
+          replaced by <code class="text-xs">pace_ref</code>, a properly shrunk blend that pulls in
+          the pregame prior.</p>
+        </div>
+      </div>
+
+      <!-- F: Shot quality -->
+      <div class="collapse collapse-arrow join-item border border-base-content/10 bg-base-200">
+        <input type="checkbox" />
+        <div class="collapse-title font-semibold flex items-center gap-2 flex-wrap">
+          F. Shot quality <span class="badge badge-sm">8 → 3</span>
+        </div>
+        <div class="collapse-content space-y-3">
+          <div>
+            <div class="text-xs uppercase text-base-content/50 mb-1">Old (8)</div>
+            <span class="old-chip">home_scoring_sustainable</span><span class="old-chip">away_scoring_sustainable</span>
+            <span class="old-chip">home_xPPP_last_5</span><span class="old-chip">away_xPPP_last_5</span>
+            <span class="old-chip">home_actual_vs_expected_PPP</span><span class="old-chip">away_actual_vs_expected_PPP</span>
+            <span class="old-chip">home_shot_quality_trend</span><span class="old-chip">away_shot_quality_trend</span>
+          </div>
+          <div>
+            <div class="text-xs uppercase text-base-content/50 mb-1">New (3)</div>
+            <span class="new-chip">xppp_edge</span><span class="new-chip">luck_edge</span>
+            <span class="new-chip">quality_trend_edge</span>
+          </div>
+          <div class="formula">xppp_edge          = home_xPPP_last_5 − away_xPPP_last_5
+                     # shot-selection quality differential
+
+luck_edge          = home_actual_vs_expected_PPP − away_actual_vs_expected_PPP
+                     # a team scoring ABOVE its shot quality is a
+                     # mean-reversion candidate — closest feature to the
+                     # core trading thesis: the market watches the
+                     # scoreboard, not the shot chart.
+
+home_trend         = home_xPPP_last_5 − home_xPPP_prev_5
+away_trend         = away_xPPP_last_5 − away_xPPP_prev_5
+quality_trend_edge = home_trend − away_trend
+                     # deliberately NOT np.sign() — the old
+                     # home/away_shot_quality_trend columns collapsed to
+                     # {−1, 0, +1} (Problem 3), so a total collapse in shot
+                     # quality and an imperceptible drift looked identical.
+                     # This keeps the real magnitude.</div>
+          <p class="text-xs text-base-content/60"><code class="text-xs">home/away_scoring_sustainable</code>
+          have no successor — they were dropped outright, not folded into anything.</p>
+        </div>
+      </div>
+
+      <!-- G: Foul state -->
+      <div class="collapse collapse-arrow join-item border border-base-content/10 bg-base-200">
+        <input type="checkbox" />
+        <div class="collapse-title font-semibold flex items-center gap-2 flex-wrap">
+          G. Foul state <span class="badge badge-sm">12 → 5</span>
+        </div>
+        <div class="collapse-content space-y-3">
+          <div>
+            <div class="text-xs uppercase text-base-content/50 mb-1">Old (12)</div>
+            <span class="old-chip">home_team_fouls_q</span><span class="old-chip">away_team_fouls_q</span>
+            <span class="old-chip">home_cum_fouls</span><span class="old-chip">away_cum_fouls</span>
+            <span class="old-chip">home_in_bonus</span><span class="old-chip">away_in_bonus</span>
+            <span class="old-chip">home_fouls_until_bonus</span><span class="old-chip">away_fouls_until_bonus</span>
+            <span class="old-chip">home_star_in_foul_trouble</span><span class="old-chip">away_star_in_foul_trouble</span>
+            <span class="old-chip">home_star_on_court</span><span class="old-chip">away_star_on_court</span>
+          </div>
+          <div>
+            <div class="text-xs uppercase text-base-content/50 mb-1">New (5)</div>
+            <span class="new-chip">team_foul_edge</span><span class="new-chip">home_fouls_until_bonus</span>
+            <span class="new-chip">away_fouls_until_bonus</span><span class="new-chip">star_trouble_edge</span>
+            <span class="new-chip">star_on_court_edge</span>
+          </div>
+          <div class="formula">team_foul_edge          = home_team_fouls_q − away_team_fouls_q
+
+fouls_until_bonus(f)    = clip(5 − f, 0, 5)
+home_fouls_until_bonus  = fouls_until_bonus(home_team_fouls_q)
+away_fouls_until_bonus  = fouls_until_bonus(away_team_fouls_q)
+                     # kept UNFOLDED on purpose (not turned into one edge
+                     # column) — the gate at 0 is nonlinear and asymmetric,
+                     # since being in the bonus helps the OPPONENT, not the
+                     # team with the fouls.
+
+star_trouble_edge  = (home_trouble_star_tier > 0) − (away_trouble_star_tier > 0)
+star_on_court_edge = home_star_on_court − away_star_on_court</div>
+          <p class="text-xs text-base-content/60">
+            Dropped (Problem 2, exact duplicates): <code class="text-xs">home/away_cum_fouls</code>
+            (redundant with the per-quarter foul count) and
+            <code class="text-xs">home/away_in_bonus</code>
+            (algebraically <code class="text-xs">== (fouls_until_bonus == 0)</code>, already derivable
+            from the columns kept above).
+          </p>
+        </div>
+      </div>
+
+      <!-- H: Event context -->
+      <div class="collapse collapse-arrow join-item border border-base-content/10 bg-base-200">
+        <input type="checkbox" />
+        <div class="collapse-title font-semibold flex items-center gap-2 flex-wrap">
+          H. Event context <span class="badge badge-sm">6 → 4</span>
+        </div>
+        <div class="collapse-content space-y-3">
+          <div>
+            <div class="text-xs uppercase text-base-content/50 mb-1">Old (6)</div>
+            <span class="old-chip">was_foul</span><span class="old-chip">was_sub</span>
+            <span class="old-chip">had_shooting_foul</span><span class="old-chip">had_personal_foul</span>
+            <span class="old-chip">home_sub_count</span><span class="old-chip">away_sub_count</span>
+          </div>
+          <div>
+            <div class="text-xs uppercase text-base-content/50 mb-1">New (4)</div>
+            <span class="new-chip">was_sub</span><span class="new-chip">had_shooting_foul</span>
+            <span class="new-chip">had_personal_foul</span><span class="new-chip">sub_count_edge</span>
+          </div>
+          <div class="formula">was_sub / had_shooting_foul / had_personal_foul  = unchanged, passed through
+
+sub_count_edge = home_sub_count − away_sub_count</div>
+          <p class="text-xs text-base-content/60">
+            Dropped (Problem 2): <code class="text-xs">was_foul</code> — it was exactly
+            <code class="text-xs">had_shooting_foul OR had_personal_foul</code>, both of which are
+            already present, so it carried zero new information.
+          </p>
+        </div>
+      </div>
+
+      <!-- I: Timeouts -->
+      <div class="collapse collapse-arrow join-item border border-base-content/10 bg-base-200">
+        <input type="checkbox" />
+        <div class="collapse-title font-semibold flex items-center gap-2 flex-wrap">
+          I. Timeouts <span class="badge badge-sm">5 → 4</span>
+        </div>
+        <div class="collapse-content space-y-3">
+          <div>
+            <div class="text-xs uppercase text-base-content/50 mb-1">Old (5)</div>
+            <span class="old-chip">possessions_since_last_timeout</span>
+            <span class="old-chip">home_called_timeout_in_last_3_poss</span>
+            <span class="old-chip">away_called_timeout_in_last_3_poss</span>
+            <span class="old-chip">home_full_timeouts_remaining</span>
+            <span class="old-chip">away_full_timeouts_remaining</span>
+          </div>
+          <div>
+            <div class="text-xs uppercase text-base-content/50 mb-1">New (4)</div>
+            <span class="new-chip">poss_since_timeout</span><span class="new-chip">no_timeout_yet</span>
+            <span class="new-chip">timeout_called_edge</span><span class="new-chip">timeouts_remaining_edge</span>
+          </div>
+          <div class="formula">poss_since_timeout      = min(possessions_since_last_timeout, 30)
+no_timeout_yet          = 1 if possessions_since_last_timeout >= 999 else 0
+                     # 999 was used as a "no timeout yet" SENTINEL (Problem
+                     # 3). Under StandardScaler that dragged 9.4% of rows
+                     # out to z ≈ +3.10, compressing the real 0–70 range
+                     # into a 0.24-wide z-band. Now the count is capped at
+                     # 30 and "no timeout yet" is carried by its own flag
+                     # instead of an out-of-range number.
+
+timeout_called_edge       = home_called_timeout_in_last_3_poss − away_called_timeout_in_last_3_poss
+
+full_timeouts_remaining(u) = clip(4 − u, 0, 4)     # u = timeouts used
+timeouts_remaining_edge    = full_timeouts_remaining(home_timeouts_used)
+                            − full_timeouts_remaining(away_timeouts_used)</div>
+        </div>
+      </div>
+
+      <!-- J: Lineup -->
+      <div class="collapse collapse-arrow join-item border border-base-content/10 bg-base-200">
+        <input type="checkbox" />
+        <div class="collapse-title font-semibold flex items-center gap-2 flex-wrap">
+          J. Lineup <span class="badge badge-sm">7 → 4</span>
+        </div>
+        <div class="collapse-content space-y-3">
+          <div>
+            <div class="text-xs uppercase text-base-content/50 mb-1">Old (7)</div>
+            <span class="old-chip">home_lineup_net_rating</span><span class="old-chip">away_lineup_net_rating</span>
+            <span class="old-chip">lineup_net_rating_delta</span><span class="old-chip">home_lineup_sample_size</span>
+            <span class="old-chip">away_lineup_sample_size</span><span class="old-chip">home_lineup_just_changed</span>
+            <span class="old-chip">away_lineup_just_changed</span>
+          </div>
+          <div>
+            <div class="text-xs uppercase text-base-content/50 mb-1">New (4)</div>
+            <span class="new-chip">lineup_net_rating_delta</span><span class="new-chip">lineup_confidence</span>
+            <span class="new-chip">lineup_changed_edge</span><span class="new-chip">lineup_changed_any</span>
+          </div>
+          <div class="formula">lineup_net_rating_delta = home_lineup_net_rating − away_lineup_net_rating   (kept, unchanged)
+
+lineup_confidence    = log1p( min(home_lineup_sample_size, away_lineup_sample_size) )
+                     # log-scaled confidence driven by the WEAKER side — a
+                     # rating pair is only as trustworthy as its thinner
+                     # sample.
+
+lineup_changed_edge  = home_lineup_just_changed − away_lineup_just_changed
+lineup_changed_any   = max( min(home_lineup_just_changed, 1), min(away_lineup_just_changed, 1) )
+                     # 1 if EITHER side just changed lineup</div>
+          <p class="text-xs text-base-content/60">
+            Dropped (Problem 2): <code class="text-xs">home/away_lineup_net_rating</code> — exact
+            operands of <code class="text-xs">lineup_net_rating_delta</code>, which already existed
+            as its own column, so keeping all three meant the network re-learned a subtraction it
+            was already handed the answer to.
+          </p>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- MASTER TABLE -->
+  <section id="mastertable" class="section-anchor space-y-4">
+    <h2 class="text-2xl font-bold">All 83 → 58, one table</h2>
+    <p class="text-base-content/70 text-sm max-w-3xl">
+      Every original column, grouped by subgroup, with what it became. Struck-through means dropped
+      outright (redundant or algebraic); bold-green means it exists in the new 58, whether kept
+      as-is or computed from a formula above.
+    </p>
+    <div class="overflow-x-auto rounded-box border border-base-content/10 bg-base-200 max-h-[36rem]">
+      <table class="table table-zebra table-sm table-pin-rows">
+        <thead><tr><th>Subgroup</th><th>Old 83-set columns</th><th>New 58-set columns</th></tr></thead>
+        <tbody>
+          <tr><td class="font-semibold align-top">Score × time</td>
+            <td class="align-top"><span class="new-chip">score_diff</span><span class="drop-chip">period</span><span class="drop-chip">minutes_into_game</span><span class="drop-chip">trailing_team_urgency</span><span class="drop-chip">comeback_probability_proxy</span><span class="drop-chip">q4_close_game</span><span class="new-chip">garbage_time_risk</span></td>
+            <td class="align-top"><span class="new-chip">score_diff</span><span class="new-chip">lead_z</span><span class="new-chip">time_leverage</span><span class="new-chip">garbage_time_risk</span></td></tr>
+          <tr><td class="font-semibold align-top">Shot info</td>
+            <td class="align-top"><span class="new-chip">shot_value</span><span class="new-chip">shot_distance</span></td>
+            <td class="align-top"><span class="new-chip">shot_value</span><span class="new-chip">shot_distance</span></td></tr>
+          <tr><td class="font-semibold align-top">Runs</td>
+            <td class="align-top"><span class="drop-chip">current_run_team_encoded</span><span class="drop-chip">current_run_length</span><span class="drop-chip">current_run_points</span><span class="drop-chip">current_run_3pt_pct</span><span class="drop-chip">current_run_paint_pct</span></td>
+            <td class="align-top"><span class="new-chip">run_signed_points</span><span class="new-chip">run_efficiency</span><span class="new-chip">run_fragility</span></td></tr>
+          <tr><td class="font-semibold align-top">Recent scoring</td>
+            <td class="align-top"><span class="drop-chip">home_points_last_5_poss</span><span class="drop-chip">away_points_last_5_poss</span><span class="drop-chip">home_points_last_10_poss</span><span class="drop-chip">away_points_last_10_poss</span></td>
+            <td class="align-top"><span class="new-chip">swing_5</span><span class="new-chip">swing_accel</span></td></tr>
+          <tr><td class="font-semibold align-top">Pace</td>
+            <td class="align-top"><span class="drop-chip">pace_last_10_possessions</span><span class="drop-chip">pace_season_baseline</span></td>
+            <td class="align-top"><span class="new-chip">pace_ref</span><span class="new-chip">pace_surprise</span></td></tr>
+          <tr><td class="font-semibold align-top">Shot quality</td>
+            <td class="align-top"><span class="drop-chip">home_scoring_sustainable</span><span class="drop-chip">away_scoring_sustainable</span><span class="drop-chip">home_xPPP_last_5</span><span class="drop-chip">away_xPPP_last_5</span><span class="drop-chip">home_actual_vs_expected_PPP</span><span class="drop-chip">away_actual_vs_expected_PPP</span><span class="drop-chip">home_shot_quality_trend</span><span class="drop-chip">away_shot_quality_trend</span></td>
+            <td class="align-top"><span class="new-chip">xppp_edge</span><span class="new-chip">luck_edge</span><span class="new-chip">quality_trend_edge</span></td></tr>
+          <tr><td class="font-semibold align-top">Foul state</td>
+            <td class="align-top"><span class="drop-chip">home_team_fouls_q</span><span class="drop-chip">away_team_fouls_q</span><span class="drop-chip">home_cum_fouls</span><span class="drop-chip">away_cum_fouls</span><span class="drop-chip">home_in_bonus</span><span class="drop-chip">away_in_bonus</span><span class="new-chip">home_fouls_until_bonus</span><span class="new-chip">away_fouls_until_bonus</span><span class="drop-chip">home_star_in_foul_trouble</span><span class="drop-chip">away_star_in_foul_trouble</span><span class="drop-chip">home_star_on_court</span><span class="drop-chip">away_star_on_court</span></td>
+            <td class="align-top"><span class="new-chip">team_foul_edge</span><span class="new-chip">home_fouls_until_bonus</span><span class="new-chip">away_fouls_until_bonus</span><span class="new-chip">star_trouble_edge</span><span class="new-chip">star_on_court_edge</span></td></tr>
+          <tr><td class="font-semibold align-top">Event context</td>
+            <td class="align-top"><span class="drop-chip">was_foul</span><span class="new-chip">was_sub</span><span class="new-chip">had_shooting_foul</span><span class="new-chip">had_personal_foul</span><span class="drop-chip">home_sub_count</span><span class="drop-chip">away_sub_count</span></td>
+            <td class="align-top"><span class="new-chip">was_sub</span><span class="new-chip">had_shooting_foul</span><span class="new-chip">had_personal_foul</span><span class="new-chip">sub_count_edge</span></td></tr>
+          <tr><td class="font-semibold align-top">Timeouts</td>
+            <td class="align-top"><span class="drop-chip">possessions_since_last_timeout</span><span class="drop-chip">home_called_timeout_in_last_3_poss</span><span class="drop-chip">away_called_timeout_in_last_3_poss</span><span class="drop-chip">home_full_timeouts_remaining</span><span class="drop-chip">away_full_timeouts_remaining</span></td>
+            <td class="align-top"><span class="new-chip">poss_since_timeout</span><span class="new-chip">no_timeout_yet</span><span class="new-chip">timeout_called_edge</span><span class="new-chip">timeouts_remaining_edge</span></td></tr>
+          <tr><td class="font-semibold align-top">Lineup</td>
+            <td class="align-top"><span class="drop-chip">home_lineup_net_rating</span><span class="drop-chip">away_lineup_net_rating</span><span class="new-chip">lineup_net_rating_delta</span><span class="drop-chip">home_lineup_sample_size</span><span class="drop-chip">away_lineup_sample_size</span><span class="drop-chip">home_lineup_just_changed</span><span class="drop-chip">away_lineup_just_changed</span></td>
+            <td class="align-top"><span class="new-chip">lineup_net_rating_delta</span><span class="new-chip">lineup_confidence</span><span class="new-chip">lineup_changed_edge</span><span class="new-chip">lineup_changed_any</span></td></tr>
+          <tr><td class="font-semibold align-top">Pregame (11)</td>
+            <td class="align-top text-base-content/50 text-xs" colspan="2">Unchanged — see the Pregame section above. Not repeated here.</td></tr>
+          <tr><td class="font-semibold align-top">Market (14)</td>
+            <td class="align-top text-base-content/50 text-xs" colspan="2">Unchanged as raw columns — compressed 14→4 by the learned encoder, not by a formula. See the Market section above.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="stats shadow bg-base-200 border border-base-content/10">
+      <div class="stat py-3">
+        <div class="stat-title text-xs">Physics check</div>
+        <div class="stat-value text-lg">7+2+5+4+2+8+12+6+5+7 = 58 <span class="text-success">→</span> 4+2+3+2+2+3+5+4+4+4 = 33</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- SOURCE -->
+  <section id="source" class="section-anchor space-y-4">
+    <h2 class="text-2xl font-bold">The actual source</h2>
+    <p class="text-base-content/70 text-sm max-w-3xl">
+      Every formula above is a direct read of these two files. Nothing paraphrased — this is the
+      real code that runs in both the offline trainer and the live streamer.
+    </p>
+
+    <div class="tabs tabs-lift">
+      <input type="radio" name="src_tabs" class="tab" aria-label="transforms.py (all 33 formulas)" checked />
+      <div class="tab-content bg-base-200 border-base-300 p-3">
+        <div id="file-transforms"></div>
+      </div>
+
+      <input type="radio" name="src_tabs" class="tab" aria-label="model.py (the learned encoder)" />
+      <div class="tab-content bg-base-200 border-base-300 p-3">
+        <div id="file-encoder"></div>
+      </div>
+    </div>
+  </section>
+
+  <div class="text-center text-xs text-base-content/40 pb-6">
+    Sources: <code>models/features/transforms.py</code> · <code>models/mmoe/dataset.py</code> ·
+    <code>models/mmoe/feature_config.py</code> · <code>models/mmoe/model.py</code> ·
+    commit <code>35de8ab</code> (2026-08-03 consolidation)
+  </div>
+
+</main>
+</div>
+
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.esm.min.mjs";
+  const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
+  const paint = document.createElement("canvas").getContext("2d");
+  function toRgba(color) {
+    paint.clearRect(0, 0, 1, 1);
+    paint.fillStyle = "#000";
+    paint.fillStyle = color;
+    paint.fillRect(0, 0, 1, 1);
+    return paint.getImageData(0, 0, 1, 1).data;
+  }
+  function compositeRgba(fg, bg) {
+    const fa = fg[3] / 255, ba = bg[3] / 255;
+    const a = fa + ba * (1 - fa);
+    if (a === 0) return [0, 0, 0, 0];
+    return [
+      (fg[0]*fa + bg[0]*ba*(1-fa)) / a,
+      (fg[1]*fa + bg[1]*ba*(1-fa)) / a,
+      (fg[2]*fa + bg[2]*ba*(1-fa)) / a,
+      a * 255,
+    ];
+  }
+  function pageIsDark() {
+    const root = document.documentElement;
+    const rootBg = toRgba(getComputedStyle(root).backgroundColor);
+    const bodyBg = document.body ? toRgba(getComputedStyle(document.body).backgroundColor) : [0,0,0,0];
+    const [r,g,b,a] = compositeRgba(bodyBg, rootBg);
+    if (a > 0) return (0.2126*r + 0.7152*g + 0.0722*b) / 255 < 0.5;
+    return darkQuery.matches;
+  }
+  const diagrams = [...document.querySelectorAll(".mermaid")].map((el) => ({ el, src: el.textContent }));
+  let applied, rendering = false, queued = false;
+  function queueRender() { queued = true; if (!rendering) void render(); }
+  async function render() {
+    rendering = true;
+    try {
+      while (queued) {
+        queued = false;
+        const theme = pageIsDark() ? "dark" : "default";
+        if (theme === applied) continue;
+        mermaid.initialize({ startOnLoad: false, theme, securityLevel: "strict" });
+        for (const { el, src } of diagrams) { el.removeAttribute("data-processed"); el.textContent = src; }
+        try { await mermaid.run({ nodes: diagrams.map((d) => d.el) }); }
+        catch (e) { console.error("Mermaid render failed:", e); return; }
+        applied = theme;
+      }
+    } finally {
+      rendering = false;
+      if (queued) queueRender();
+    }
+  }
+  if (document.readyState === "complete") queueRender();
+  else window.addEventListener("load", queueRender, { once: true });
+  new MutationObserver(queueRender).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme","class","style"] });
+  darkQuery.addEventListener("change", queueRender);
+</script>
+
+<script type="module">
+  import { File } from "https://esm.sh/@pierre/diffs@1.2.10?bundle";
+  const theme = { light: "github-light", dark: "github-dark" };
+  const options = { theme, themeType: "dark", overflow: "wrap" };
+
+  const transformsSrc = "\"\"\"\nShared feature transforms \u2014 the single source of truth for every derived quantity\nthat both the offline builder and the live streamer must produce identically.\n\nWhy this module exists\n----------------------\nEvery model input is computed twice: offline in `models/features/*.py` and\n`models/mmoe/dataset.py` (pandas, whole-game, vectorized), and online in\n`live-trader/inference/features.py` (streaming, one possession at a time).\nFour silent train/live divergences were traced to that duplication. Any formula\nthat lives in only one of those files is a future divergence.\n\nEverything here is a pure function of numbers. Because the bodies are numpy\nufunc expressions, the same function serves both callers unchanged:\narrays/Series offline, plain floats online.\n\nRules for anything added here:\n  - No pandas, no I/O, no state. Numbers in, numbers out.\n  - Never branch on `isinstance`. Use numpy ops that work on scalars and arrays.\n  - Every constant that both paths depend on is named here, not duplicated.\n\"\"\"\n\nfrom typing import Union\n\nimport numpy as np\n\n# Accepts plain floats (live path) or numpy arrays / pandas Series (offline path).\n# Return type always matches the input type because every body is a ufunc chain.\nNumeric = Union[float, int, np.ndarray]\n\n\n# \u2500\u2500 Canonical constants \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n# These were previously duplicated (and disagreed) across the offline and live\n# paths. They now exist exactly once.\n\nREGULATION_MINUTES: float = 48.0\nPERIOD_MINUTES: float = 12.0\nPERIOD_SECONDS: float = 720.0\nREGULATION_PERIODS: int = 4\n\n# Floor applied to minutes-remaining before it is used as a divisor. Training has\n# always used 1.0; live used 0.1, which produced up to 10x divergence in the final\n# minute. 1.0 is canonical.\nMIN_MINUTES_REMAINING: float = 1.0\n\n# Lower floor used only by `lead_z`, which divides by sqrt(m) rather than m and so\n# stays well-conditioned closer to the buzzer. Keeps late-game resolution that a\n# 1.0 floor would flatten.\nLEAD_Z_MIN_MINUTES: float = 0.5\n\n# Garbage-time sigmoid: centred at a 15-point margin, 5-point scale.\nGARBAGE_MARGIN_CENTER: float = 15.0\nGARBAGE_MARGIN_SCALE: float = 5.0\n\n# Pace shrinkage: weight on the within-game mean reaches 0.5 at this many elapsed\n# possessions, and plateaus at PACE_MAX_WEIGHT so the pregame prior always retains\n# a floor of influence.\nPACE_SHRINK_POSSESSIONS: float = 40.0\nPACE_MAX_WEIGHT: float = 0.85\nPACE_FALLBACK_SECS: float = 15.0\n\n# possessions_since_last_timeout: 999 was used as a \"no timeout yet\" sentinel and\n# destroyed the column under StandardScaler (9.4% of rows at z=+3.10, compressing\n# the real 0-70 range into a 0.24-wide z band). The count is now capped and the\n# sentinel is carried by a separate binary flag.\nNO_TIMEOUT_SENTINEL: int = 999\nTIMEOUT_POSSESSION_CAP: float = 30.0\n\nFULL_TIMEOUTS_PER_GAME: int = 4\nBONUS_FOUL_THRESHOLD: int = 5\n\n# Expected points per possession by shot type (league averages). Previously these\n# lived only in momentum_features.py; the live path had its own copy.\nXPPP_FREE_THROW: float = 0.75\nXPPP_3PT: float = 1.05\nXPPP_PAINT: float = 1.20\nXPPP_MIDRANGE: float = 0.80\nPAINT_DISTANCE_FT: float = 8.0\n\n\ndef shot_xppp(shot_value: Numeric, shot_distance: Numeric) -> Numeric:\n    \"\"\"Expected points per possession implied by a single shot's type.\"\"\"\n    value = np.asarray(shot_value, dtype=float)\n    distance = np.asarray(shot_distance, dtype=float)\n    return np.where(\n        value == 1.0,\n        XPPP_FREE_THROW,\n        np.where(\n            value == 3.0,\n            XPPP_3PT,\n            np.where(distance < PAINT_DISTANCE_FT, XPPP_PAINT, XPPP_MIDRANGE),\n        ),\n    )\n\n\n# \u2500\u2500 Clock \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\ndef minutes_into_game(period: Numeric, game_clock_secs: Numeric) -> Numeric:\n    \"\"\"Elapsed regulation-equivalent minutes since tip-off.\"\"\"\n    period_arr = np.asarray(period, dtype=float)\n    clock_arr = np.minimum(np.asarray(game_clock_secs, dtype=float), PERIOD_SECONDS)\n    return (period_arr - 1.0) * PERIOD_MINUTES + (PERIOD_SECONDS - clock_arr) / 60.0\n\n\ndef minutes_remaining_raw(period: Numeric, game_clock_secs: Numeric) -> Numeric:\n    \"\"\"\n    Minutes left in regulation, unfloored.\n\n    Overtime periods return only the current period's clock, which is correct:\n    `4 - period` clamps at zero so OT never produces a negative remainder. The\n    live path previously computed `48 - elapsed`, which goes negative in OT and\n    pinned every OT possession to the same floor value.\n    \"\"\"\n    period_arr = np.asarray(period, dtype=float)\n    periods_left = np.maximum(REGULATION_PERIODS - period_arr, 0.0)\n    return periods_left * PERIOD_MINUTES + np.asarray(game_clock_secs, dtype=float) / 60.0\n\n\ndef minutes_remaining(\n    period: Numeric,\n    game_clock_secs: Numeric,\n    floor: float = MIN_MINUTES_REMAINING,\n) -> Numeric:\n    \"\"\"Minutes left in regulation, floored so it is safe as a divisor.\"\"\"\n    return np.maximum(minutes_remaining_raw(period, game_clock_secs), floor)\n\n\ndef time_leverage(period: Numeric, game_clock_secs: Numeric) -> Numeric:\n    \"\"\"\n    Nonlinear game clock: 0.0 at tip-off, 1.0 at the buzzer.\n\n    Uses a sqrt scale so a minute late in the game occupies more of the input\n    range than a minute early. Five minutes of clock spans 0.061 of the range at\n    10-15 minutes elapsed but 0.158 at 40-45 minutes, a 2.6x resolution gain\n    exactly where price sensitivity is highest.\n    \"\"\"\n    raw = minutes_remaining_raw(period, game_clock_secs)\n    ratio = np.clip(raw / REGULATION_MINUTES, 0.0, 1.0)\n    return 1.0 - np.sqrt(ratio)\n\n\n# \u2500\u2500 Score leverage \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\ndef lead_z(score_diff: Numeric, period: Numeric, game_clock_secs: Numeric) -> Numeric:\n    \"\"\"\n    Signed lead in units of remaining scoring randomness: `d / sqrt(m)`.\n\n    If in-game scoring is approximately a random walk, the standard deviation of\n    the remaining margin swing scales with sqrt(minutes remaining), so this is the\n    natural \"how safe is this lead\" quantity and it is the standard win-probability\n    construction.\n\n    Replaces `trailing_team_urgency` (|d|/m) and `comeback_probability_proxy`\n    (d^2/m), both of which discarded the sign: winning by 6 and losing by 6 with a\n    minute left produced numerically identical inputs for opposite trades.\n    \"\"\"\n    m = minutes_remaining(period, game_clock_secs, floor=LEAD_Z_MIN_MINUTES)\n    return np.asarray(score_diff, dtype=float) / np.sqrt(m)\n\n\ndef garbage_time_risk(\n    score_diff: Numeric, period: Numeric, game_clock_secs: Numeric\n) -> Numeric:\n    \"\"\"\n    Continuous 0-1 proximity to garbage time.\n\n    Note the time factor uses the UNFLOORED minutes remaining, matching the\n    original training definition. The live path previously emitted a hard binary\n    requiring period == 4 and clock < 360, so a 25-point Q2 lead scored 0.33 in\n    training and 0.00 live.\n    \"\"\"\n    margin = np.abs(np.asarray(score_diff, dtype=float))\n    sigmoid_in = (margin - GARBAGE_MARGIN_CENTER) / GARBAGE_MARGIN_SCALE\n    sigmoid_out = 1.0 / (1.0 + np.exp(-np.clip(sigmoid_in, -20.0, 20.0)))\n    raw_remaining = minutes_remaining_raw(period, game_clock_secs)\n    time_factor = np.clip(1.0 - raw_remaining / REGULATION_MINUTES, 0.0, 1.0)\n    return sigmoid_out * time_factor\n\n\n# \u2500\u2500 Scoring runs \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\ndef run_signed_points(run_team_encoded: Numeric, run_points: Numeric) -> Numeric:\n    \"\"\"\n    Run size with direction folded in: +N when home is on the run, -N when away.\n\n    Previously the direction (`current_run_team_encoded`) and the magnitude\n    (`current_run_points`) were separate columns, requiring the MLP to learn their\n    product from 24K rows.\n    \"\"\"\n    return np.asarray(run_team_encoded, dtype=float) * np.asarray(run_points, dtype=float)\n\n\ndef run_efficiency(run_points: Numeric, run_length: Numeric) -> Numeric:\n    \"\"\"\n    Points per possession within the current run.\n\n    `run_length` and `run_points` correlate heavily (a k-possession run is roughly\n    2.3k points), so feeding both raw is largely duplicated variance. The ratio is\n    the orthogonal component: how hot the run is, independent of how long.\n    \"\"\"\n    length = np.maximum(np.asarray(run_length, dtype=float), 1.0)\n    return np.asarray(run_points, dtype=float) / length\n\n\ndef run_fragility(run_3pt_pct: Numeric, run_paint_pct: Numeric) -> Numeric:\n    \"\"\"\n    Positive when the run is jumper-driven (likely to revert), negative when it is\n    paint-driven (more repeatable).\n    \"\"\"\n    return np.asarray(run_3pt_pct, dtype=float) - np.asarray(run_paint_pct, dtype=float)\n\n\n# \u2500\u2500 Recent scoring \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\ndef swing_5(home_points_last_5: Numeric, away_points_last_5: Numeric) -> Numeric:\n    \"\"\"Signed margin swing over the last 5 possessions.\"\"\"\n    return np.asarray(home_points_last_5, dtype=float) - np.asarray(away_points_last_5, dtype=float)\n\n\ndef swing_accel(\n    home_points_last_5: Numeric,\n    away_points_last_5: Numeric,\n    home_points_last_10: Numeric,\n    away_points_last_10: Numeric,\n) -> Numeric:\n    \"\"\"\n    Recent-half swing minus prior-half swing.\n\n    The 5- and 10-possession windows are nested and correlate ~0.7, so feeding both\n    levels is feeding the same trend twice. Expressing the wider window as an\n    acceleration decorrelates them.\n    \"\"\"\n    recent = swing_5(home_points_last_5, away_points_last_5)\n    full = np.asarray(home_points_last_10, dtype=float) - np.asarray(away_points_last_10, dtype=float)\n    prior = full - recent\n    return recent - prior\n\n\n# \u2500\u2500 Shot quality \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\ndef xppp_edge(home_xppp_last_5: Numeric, away_xppp_last_5: Numeric) -> Numeric:\n    \"\"\"Shot-selection quality differential, home minus away.\"\"\"\n    return np.asarray(home_xppp_last_5, dtype=float) - np.asarray(away_xppp_last_5, dtype=float)\n\n\ndef luck_edge(\n    home_actual_vs_expected: Numeric, away_actual_vs_expected: Numeric\n) -> Numeric:\n    \"\"\"\n    Signed overperformance against shot quality, home minus away.\n\n    The closest feature in the set to the core thesis: a team scoring above its\n    shot quality is a mean-reversion candidate, and the market is watching the\n    scoreboard rather than the shot chart.\n    \"\"\"\n    return (\n        np.asarray(home_actual_vs_expected, dtype=float)\n        - np.asarray(away_actual_vs_expected, dtype=float)\n    )\n\n\ndef quality_trend_edge(\n    home_xppp_last_5: Numeric,\n    home_xppp_prev_5: Numeric,\n    away_xppp_last_5: Numeric,\n    away_xppp_prev_5: Numeric,\n) -> Numeric:\n    \"\"\"\n    Differential change in shot quality, as a raw magnitude.\n\n    Deliberately not `np.sign()`. The original columns collapsed to {-1, 0, +1},\n    so a shot-quality collapse and an imperceptible drift produced identical\n    inputs. The net can pick its own threshold; it cannot recover a magnitude that\n    was already discarded.\n    \"\"\"\n    home_trend = np.asarray(home_xppp_last_5, dtype=float) - np.asarray(home_xppp_prev_5, dtype=float)\n    away_trend = np.asarray(away_xppp_last_5, dtype=float) - np.asarray(away_xppp_prev_5, dtype=float)\n    return home_trend - away_trend\n\n\n# \u2500\u2500 Pace \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\ndef pace_shrink_weight(elapsed_possessions: Numeric) -> Numeric:\n    \"\"\"\n    Weight on the within-game pace mean, shrinking toward the pregame prior early\n    and plateauing at PACE_MAX_WEIGHT so the prior never drops out entirely.\n    \"\"\"\n    elapsed = np.maximum(np.asarray(elapsed_possessions, dtype=float), 0.0)\n    weight = elapsed / (elapsed + PACE_SHRINK_POSSESSIONS)\n    return np.minimum(weight, PACE_MAX_WEIGHT)\n\n\ndef pace_ref(\n    pace_game_to_date: Numeric,\n    expected_pace: Numeric,\n    elapsed_possessions: Numeric,\n) -> Numeric:\n    \"\"\"\n    Reference pace: an empirical-Bayes blend of this game's realized pace and the\n    pregame matchup prior.\n\n    Early in the game the in-game sample is tiny and the prior dominates; late it\n    plateaus at 0.85 so the prior keeps a floor of influence. `expected_pace` is the\n    existing pregame feature (mean of the two teams' trailing avg_secs_per_poss),\n    already computed as-of prior games only.\n    \"\"\"\n    w = pace_shrink_weight(elapsed_possessions)\n    return w * np.asarray(pace_game_to_date, dtype=float) + (1.0 - w) * np.asarray(\n        expected_pace, dtype=float\n    )\n\n\ndef pace_surprise(\n    pace_last_10: Numeric,\n    pace_game_to_date: Numeric,\n    expected_pace: Numeric,\n    elapsed_possessions: Numeric,\n) -> Numeric:\n    \"\"\"How much faster or slower the last 10 possessions ran than the reference.\"\"\"\n    reference = pace_ref(pace_game_to_date, expected_pace, elapsed_possessions)\n    return np.asarray(pace_last_10, dtype=float) - reference\n\n\n# \u2500\u2500 Timeouts \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\ndef timeout_possessions_bounded(possessions_since_last_timeout: Numeric) -> Numeric:\n    \"\"\"\n    Possessions since the last timeout, capped so the sentinel cannot dominate the\n    column's scale. Rows carrying the sentinel are clamped to the cap; the fact\n    that no timeout has occurred is carried separately by `no_timeout_yet`.\n    \"\"\"\n    raw = np.asarray(possessions_since_last_timeout, dtype=float)\n    return np.minimum(raw, TIMEOUT_POSSESSION_CAP)\n\n\ndef no_timeout_yet(possessions_since_last_timeout: Numeric) -> Numeric:\n    \"\"\"1.0 when no timeout has been called yet this game, else 0.0.\"\"\"\n    raw = np.asarray(possessions_since_last_timeout, dtype=float)\n    return (raw >= float(NO_TIMEOUT_SENTINEL)).astype(float)\n\n\n# \u2500\u2500 Home/away folds \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n# Each of these replaces a home column and an away column with one signed\n# quantity. `lineup_net_rating_delta` already followed this pattern; these apply\n# it consistently.\n\ndef edge(home_value: Numeric, away_value: Numeric) -> Numeric:\n    \"\"\"Generic signed home-minus-away fold.\"\"\"\n    return np.asarray(home_value, dtype=float) - np.asarray(away_value, dtype=float)\n\n\ndef lineup_confidence(\n    home_sample_size: Numeric, away_sample_size: Numeric\n) -> Numeric:\n    \"\"\"\n    Log-scaled confidence in the lineup ratings, driven by the weaker of the two\n    sample sizes. A rating pair is only as trustworthy as its thinner side.\n    \"\"\"\n    weakest = np.minimum(\n        np.asarray(home_sample_size, dtype=float),\n        np.asarray(away_sample_size, dtype=float),\n    )\n    return np.log1p(np.maximum(weakest, 0.0))\n\n\ndef any_flag(home_flag: Numeric, away_flag: Numeric) -> Numeric:\n    \"\"\"1.0 when either side's flag is set.\"\"\"\n    home = np.asarray(home_flag, dtype=float)\n    away = np.asarray(away_flag, dtype=float)\n    return np.maximum(np.minimum(home, 1.0), np.minimum(away, 1.0))\n\n\n# \u2500\u2500 Bonus / foul state \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\ndef fouls_until_bonus(team_fouls_this_quarter: Numeric) -> Numeric:\n    \"\"\"Fouls remaining before the opponent shoots bonus free throws.\"\"\"\n    fouls = np.asarray(team_fouls_this_quarter, dtype=float)\n    return np.clip(BONUS_FOUL_THRESHOLD - fouls, 0.0, float(BONUS_FOUL_THRESHOLD))\n\n\ndef full_timeouts_remaining(timeouts_used: Numeric) -> Numeric:\n    \"\"\"Full timeouts a team has left, clamped to the legal range.\"\"\"\n    used = np.asarray(timeouts_used, dtype=float)\n    return np.clip(FULL_TIMEOUTS_PER_GAME - used, 0.0, float(FULL_TIMEOUTS_PER_GAME))\n\n\ndef encode_run_team(run_team: str) -> float:\n    \"\"\"Map the run-team label to a sign. Scalar-only: this one takes a string.\"\"\"\n    return {\"home\": 1.0, \"away\": -1.0}.get(run_team, 0.0)\n";
+  const encoderSrc = "RAW_INPUT_DIM   = len(ALL_FEATURE_COLS)   # 58 = 33 physics + 11 pregame + 14 market\nMARKET_DIM      = len(MARKET_COLS)        # 14\nMARKET_EMBED_DIM = 4\n# What the experts actually see: everything except the market block, plus the\n# market block's learned embedding.\nINPUT_DIM    = RAW_INPUT_DIM - MARKET_DIM + MARKET_EMBED_DIM   # 48\nEXPERT_DIM   = 64\nN_EXPERTS    = 3\nN_TRAJ       = 10\nN_HAZARD     = 10\nHEAD_HIDDEN  = 32\n\n\nclass Expert(nn.Module):\n    \"\"\"Single expert: two-layer MLP with BN, ReLU, Dropout.\"\"\"\n\n    def __init__(self, input_dim: int, hidden_dim: int, dropout: float = 0.3) -> None:\n        super().__init__()\n        self.net = nn.Sequential(\n            nn.Linear(input_dim, hidden_dim),\n            nn.BatchNorm1d(hidden_dim),\n            nn.ReLU(),\n            nn.Dropout(dropout),\n            nn.Linear(hidden_dim, hidden_dim),\n            nn.BatchNorm1d(hidden_dim),\n            nn.ReLU(),\n            nn.Dropout(dropout),\n        )\n\n    def forward(self, x: Tensor) -> Tensor:\n        return self.net(x)\n\n\nclass Gate(nn.Module):\n    \"\"\"Per-task gating network: softmax over N_EXPERTS.\"\"\"\n\n    def __init__(self, input_dim: int, n_experts: int) -> None:\n        super().__init__()\n        self.fc = nn.Linear(input_dim, n_experts)\n\n    def forward(self, x: Tensor) -> Tensor:\n        return torch.softmax(self.fc(x), dim=-1)  # (B, n_experts)\n\n\nclass TaskHead(nn.Module):\n    \"\"\"Shared head structure: Linear(expert_dim \u2192 hidden) \u2192 ReLU \u2192 Dropout \u2192 Linear(hidden \u2192 out).\"\"\"\n\n    def __init__(\n        self,\n        expert_dim: int,\n        hidden_dim: int,\n        output_dim: int,\n        dropout: float = 0.2,\n        use_sigmoid: bool = False,\n    ) -> None:\n        super().__init__()\n        layers: list[nn.Module] = [\n            nn.Linear(expert_dim, hidden_dim),\n            nn.ReLU(),\n            nn.Dropout(dropout),\n            nn.Linear(hidden_dim, output_dim),\n        ]\n        if use_sigmoid:\n            layers.append(nn.Sigmoid())\n        self.net = nn.Sequential(*layers)\n\n    def forward(self, x: Tensor) -> Tensor:\n        return self.net(x)\n\n\nclass MMoEModel(nn.Module):\n    \"\"\"\n    Multi-gate Mixture-of-Experts model.\n\n    Forward returns (head_a, head_b, head_c):\n      head_a: (B, 1)  \u2014 P(run), sigmoid applied\n      head_b: (B, 10) \u2014 trajectory log-odds deltas, no activation\n      head_c: (B, 10) \u2014 hazard probs per horizon, sigmoid applied\n    \"\"\"\n\n    def __init__(\n        self,\n        input_dim:   int   = INPUT_DIM,\n        expert_dim:  int   = EXPERT_DIM,\n        n_experts:   int   = N_EXPERTS,\n        head_hidden: int   = HEAD_HIDDEN,\n        expert_dropout: float = 0.3,\n        head_dropout:   float = 0.2,\n        use_market_encoder: bool = True,\n    ) -> None:\n        super().__init__()\n\n        # The 33 physics features are consolidated by hand in transforms.py, where\n        # the domain priors are strong. The 14 market features are compressed by a\n        # learned projection instead: we have no comparable prior about how LOB\n        # microstructure should combine, so spend the parameters here rather than\n        # guessing a formula.\n        #\n        # use_market_encoder=False passes the market block through untouched. That\n        # is the attribution baseline: train once without it to isolate what the\n        # physics consolidation bought, then once with it to price the encoder.\n        self.use_market_encoder = use_market_encoder\n        self.market_encoder = (\n            nn.Linear(MARKET_DIM, MARKET_EMBED_DIM) if use_market_encoder else None\n        )\n        if not use_market_encoder and input_dim == INPUT_DIM:\n            input_dim = RAW_INPUT_DIM\n\n        self.experts = nn.ModuleList([\n            Expert(input_dim, expert_dim, dropout=expert_dropout)\n            for _ in range(n_experts)\n        ])\n\n        self.gate_a = Gate(input_dim, n_experts)\n        self.gate_b = Gate(input_dim, n_experts)\n        self.gate_c = Gate(input_dim, n_experts)\n\n        self.head_a = TaskHead(expert_dim, head_hidden, 1,        dropout=head_dropout, use_sigmoid=True)\n        self.head_b = TaskHead(expert_dim, head_hidden, N_TRAJ,   dropout=head_dropout, use_sigmoid=False)\n        self.head_c = TaskHead(expert_dim, head_hidden, N_HAZARD, dropout=head_dropout, use_sigmoid=True)\n\n    def encode_input(self, x: Tensor) -> Tensor:\n        \"\"\"\n        Map the raw (B, 58) feature vector to the (B, 48) expert input by replacing\n        the 14-column market block with its learned 4-dim embedding.\n\n        Callers always pass the raw vector in ALL_FEATURE_COLS order; every entry\n        point below routes through here so the encoder can never be bypassed.\n        \"\"\"\n        if x.size(-1) != RAW_INPUT_DIM:\n            raise ValueError(\n                f\"MMoEModel expects {RAW_INPUT_DIM} raw features in ALL_FEATURE_COLS \"\n                f\"order, got {x.size(-1)}. If this is a checkpoint trained on the \"\n                f\"pre-consolidation 83-column layout, it must be retrained.\"\n            )\n        if self.market_encoder is None:\n            return x\n        non_market = x[:, :MARKET_START]\n        market     = x[:, MARKET_START:MARKET_END]\n        return torch.cat([non_market, self.market_encoder(market)], dim=-1)\n\n    ";
+  new File(options).render({
+    containerWrapper: document.querySelector("#file-transforms"),
+    file: { name: "models/features/transforms.py", contents: transformsSrc },
+  });
+
+  new File(options).render({
+    containerWrapper: document.querySelector("#file-encoder"),
+    file: { name: "models/mmoe/model.py (encoder slice)", contents: encoderSrc },
+  });
+</script>

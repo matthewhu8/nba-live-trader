@@ -96,4 +96,5 @@ observability:
   log_level: "info"
 
 # Feature column order — must match models/mmoe/feature_config.py ALL_FEATURE_COLS
-feature_cols_checksum: "83_cols_v1"
+# Not read by any Go or Python code today (see docs/STATE_2026-08-03.md, issue 9).
+feature_cols_checksum: "58_cols_v1"

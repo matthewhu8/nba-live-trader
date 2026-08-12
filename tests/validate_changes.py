@@ -181,7 +181,7 @@ print("\n=== D: Market scaler fix (synthetic DataFrame) ===")
 N = 5000
 rng = np.random.default_rng(0)
 
-# Build synthetic feature matrix — 83 cols, all zeros by default
+# Build synthetic feature matrix — 58 cols, all zeros by default
 df_data: dict[str, np.ndarray] = {col: np.zeros(N) for col in ALL_FEATURE_COLS}
 
 # 6% rows are joint (has_market_data=1) — match live training distribution

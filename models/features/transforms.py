@@ -185,7 +185,8 @@ def run_signed_points(run_team_encoded: Numeric, run_points: Numeric) -> Numeric
 
     Previously the direction (`current_run_team_encoded`) and the magnitude
     (`current_run_points`) were separate columns, requiring the MLP to learn their
-    product from 24K rows.
+    product from the joint rows alone (15,383 in Head B's train split as of
+    2026-08-11; see docs/DATA_INVENTORY.md).
     """
     return np.asarray(run_team_encoded, dtype=float) * np.asarray(run_points, dtype=float)
 

@@ -75,8 +75,21 @@ divide by 100. A 100-contract position cannot swing more than $100 total.
 >
 > ⚠️ `min_abs_traj_entry: 0.12` in `trading.yaml` was tuned on inflated figures — no validated
 > basis in either direction. Re-derive before the next live session.
+>
+> 📏 **Data re-measured 2026-08-11 — `docs/DATA_INVENTORY.md` is now the only authority on
+> dataset sizes.** Regenerate with `python scripts/measure_data.py`; never quote a count from
+> a docstring. Joint (market) coverage is **37,180 rows / 232 games**, not the `24K / 148
+> games` that was written into six files — it grew 55% while the docs stood still.
+> Two defects this exposed:
+> **(a)** `HEADB_SPLIT_DATE = 2026-04-07` now splits Head B **41/59**, so it trains on the
+> minority of its own data and validates on the majority, with every postseason game in val.
+> Re-derive it before the next Head B retrain.
+> **(b)** The joint window (Mar 23+) sits entirely inside the basketball test period (Mar 6+),
+> so 232 test-window games are in Head B's training set. Heads A/C test cleanly on disjoint
+> games, but the post-Mar-5 period is not globally untouched.
 
-**Test set (2024-26 season):** Sacred. Never touch during dev.
+**Test set (2024-26 season):** Sacred for Heads A and C. Never touch during dev.
+Head B's data lies entirely inside this window by construction — see `docs/DATA_INVENTORY.md` §3.2.
 
 ---
 

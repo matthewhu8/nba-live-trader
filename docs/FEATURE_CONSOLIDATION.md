@@ -25,8 +25,9 @@ minute, and overtime.
 
 ## What was wrong with the old feature set
 
-1. **Direction and magnitude in separate columns** (5 places), forcing a 37K-param MLP to
-   learn products from 24K rows. `comeback_probability_proxy = score_diff² / m` made winning
+1. **Direction and magnitude in separate columns** (5 places), forcing a 30K-param MLP to
+   learn products from 15,383 Head B train rows (measured 2026-08-11, see
+   `docs/DATA_INVENTORY.md`). `comeback_probability_proxy = score_diff² / m` made winning
    by 20 and losing by 20 numerically identical — opposite trades, same input.
 2. **Seven columns were exact algebraic functions of others** — `lineup_net_rating_delta`'s
    own operands, `in_bonus == (fouls_until_bonus == 0)`, `was_foul` = OR of two present columns.

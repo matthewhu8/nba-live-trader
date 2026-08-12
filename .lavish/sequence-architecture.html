@@ -1,0 +1,954 @@
+<title>From MLP to Sequence — Rearchitecting MMoE for Live Tick Flow</title>
+<meta name="description" content="Why the 58-dim single-vector MMoE is structurally blind to the live data we already collect, a dual-stream recurrent replacement, and the full math for one training iteration.">
+<style>
+  :root{
+    --bg:#eef1f5; --surface:#ffffff; --ink:#141a24; --ink-dim:#57626f;
+    --rule:rgba(20,26,36,0.11); --accent:#b8490a; --accent-soft:#f2ddc8;
+    --good:#1f8f5f; --bad:#c23b3b; --warn:#a8760a;
+    --head-a:#b8490a; --head-a-soft:#f5e2d2;
+    --head-b:#2b608f; --head-b-soft:#dbe7f0;
+    --head-c:#6d4e9c; --head-c-soft:#e6dff2;
+    --zero-bg: rgba(87,98,111,0.06);
+    --shadow: 0 1px 2px rgba(20,26,36,0.06), 0 8px 24px rgba(20,26,36,0.05);
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#0c0f14; --surface:#131720; --ink:#e7ecf3; --ink-dim:#8b96a5;
+      --rule:rgba(255,255,255,0.09); --accent:#ff9d52; --accent-soft:rgba(255,157,82,0.14);
+      --good:#4ade9c; --bad:#ff6b6b; --warn:#e3b341;
+      --head-a:#ff9d52; --head-a-soft:rgba(255,157,82,0.14);
+      --head-b:#6faee0; --head-b-soft:rgba(111,174,224,0.14);
+      --head-c:#b79eef; --head-c-soft:rgba(183,158,239,0.14);
+      --zero-bg: rgba(255,255,255,0.03);
+      --shadow: 0 1px 2px rgba(0,0,0,0.4), 0 8px 28px rgba(0,0,0,0.35);
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0c0f14; --surface:#131720; --ink:#e7ecf3; --ink-dim:#8b96a5;
+    --rule:rgba(255,255,255,0.09); --accent:#ff9d52; --accent-soft:rgba(255,157,82,0.14);
+    --good:#4ade9c; --bad:#ff6b6b; --warn:#e3b341;
+    --head-a:#ff9d52; --head-a-soft:rgba(255,157,82,0.14);
+    --head-b:#6faee0; --head-b-soft:rgba(111,174,224,0.14);
+    --head-c:#b79eef; --head-c-soft:rgba(183,158,239,0.14);
+    --zero-bg: rgba(255,255,255,0.03);
+    --shadow: 0 1px 2px rgba(0,0,0,0.4), 0 8px 28px rgba(0,0,0,0.35);
+  }
+  :root[data-theme="light"]{
+    --bg:#eef1f5; --surface:#ffffff; --ink:#141a24; --ink-dim:#57626f;
+    --rule:rgba(20,26,36,0.11); --accent:#b8490a; --accent-soft:#f2ddc8;
+    --good:#1f8f5f; --bad:#c23b3b; --warn:#a8760a;
+    --head-a:#b8490a; --head-a-soft:#f5e2d2;
+    --head-b:#2b608f; --head-b-soft:#dbe7f0;
+    --head-c:#6d4e9c; --head-c-soft:#e6dff2;
+    --zero-bg: rgba(87,98,111,0.06);
+    --shadow: 0 1px 2px rgba(20,26,36,0.06), 0 8px 24px rgba(20,26,36,0.05);
+  }
+
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--bg); color:var(--ink);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    line-height:1.6; -webkit-font-smoothing:antialiased; overflow-x:hidden;
+  }
+  ::selection{ background:var(--accent-soft); }
+  .mono{ font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }
+  h1,h2,h3{ font-family: ui-serif, "Iowan Old Style", "Palatino Linotype", Georgia, serif; font-weight:600; text-wrap:balance; color:var(--ink); }
+  a{ color:var(--accent); }
+  .page{ max-width:900px; margin:0 auto; padding: 4rem 1.5rem 6rem; }
+
+  header.hero{ margin-bottom:2.6rem; padding-bottom:1.8rem; border-bottom:1px solid var(--rule); }
+  .eyebrow{ font-family: ui-monospace, monospace; font-size:0.78rem; letter-spacing:0.08em; text-transform:uppercase; color:var(--accent); margin:0 0 0.9rem; }
+  h1{ font-size:clamp(1.8rem, 4vw, 2.35rem); margin:0 0 0.6rem; letter-spacing:-0.01em; }
+  .subtitle{ color:var(--ink-dim); font-size:1.0rem; max-width:70ch; margin:0 0 1.2rem; }
+  .meta-row{ display:flex; flex-wrap:wrap; gap:0.5rem 1.4rem; font-size:0.83rem; color:var(--ink-dim); }
+  .meta-row strong{ color:var(--ink); font-weight:600; }
+
+  section{ margin-bottom:3rem; }
+  .section-label{ display:flex; align-items:baseline; gap:0.7rem; margin-bottom:1rem; }
+  .section-label .num{ font-family: ui-monospace, monospace; font-size:0.78rem; color:var(--ink-dim); }
+  .section-label h2{ font-size:1.35rem; margin:0; }
+  h3{ font-size:1.03rem; margin:1.8rem 0 0.5rem; }
+  p{ margin:0.85rem 0; max-width:78ch; }
+  .lead{ color:var(--ink-dim); }
+  ul,ol{ max-width:78ch; padding-left:1.2rem; }
+  li{ margin:0.4rem 0; }
+
+  code{ font-family: ui-monospace, monospace; font-size:0.85em; background:var(--accent-soft); padding:0.05em 0.35em; border-radius:4px; word-break:break-word; }
+
+  .card{ background:var(--surface); border:1px solid var(--rule); border-radius:10px; padding:1.2rem 1.3rem; box-shadow:var(--shadow); margin:1rem 0; min-width:0; }
+  .card .label{ font-family: ui-monospace, monospace; font-size:0.72rem; letter-spacing:0.05em; text-transform:uppercase; color:var(--ink-dim); margin-bottom:0.7rem; }
+  .card h3{ margin-top:0; }
+  .card.b-a{ border-left:3px solid var(--head-a); }
+  .card.b-b{ border-left:3px solid var(--head-b); }
+  .card.b-c{ border-left:3px solid var(--head-c); }
+  .card.b-bad{ border-left:3px solid var(--bad); }
+  .card.b-good{ border-left:3px solid var(--good); }
+
+  .grid2{ display:grid; grid-template-columns:repeat(auto-fit, minmax(min(100%,300px), 1fr)); gap:1rem; }
+  .grid3{ display:grid; grid-template-columns:repeat(auto-fit, minmax(min(100%,215px), 1fr)); gap:0.85rem; }
+  .grid2 > *, .grid3 > *{ min-width:0; }
+
+  .stat{ background:var(--surface); border:1px solid var(--rule); border-radius:10px; padding:0.95rem 1rem; box-shadow:var(--shadow); min-width:0; }
+  .stat .v{ font-family: ui-monospace, monospace; font-size:1.5rem; font-weight:600; letter-spacing:-0.02em; line-height:1.15; display:block; overflow-wrap:anywhere; }
+  .stat .k{ font-size:0.74rem; color:var(--ink-dim); margin-top:0.35rem; line-height:1.4; }
+  .stat.bad .v{ color:var(--bad); }
+  .stat.good .v{ color:var(--good); }
+  .stat.warn .v{ color:var(--warn); }
+  .stat.acc .v{ color:var(--accent); }
+
+  .table-wrap{ overflow-x:auto; border:1px solid var(--rule); border-radius:10px; background:var(--surface); box-shadow:var(--shadow); margin:1rem 0; }
+  table.data{ border-collapse:collapse; width:100%; font-size:0.82rem; min-width:520px; }
+  table.data th, table.data td{ padding:0.5rem 0.7rem; text-align:right; border-bottom:1px solid var(--rule); white-space:nowrap; vertical-align:top; }
+  table.data th:first-child, table.data td:first-child{ text-align:left; white-space:normal; }
+  table.data th{ font-family: ui-monospace, monospace; font-size:0.66rem; letter-spacing:0.04em; text-transform:uppercase; color:var(--ink-dim); font-weight:600; }
+  table.data td{ font-family: ui-monospace, monospace; }
+  table.data td.txt{ font-family: ui-sans-serif, system-ui, sans-serif; white-space:normal; text-align:left; }
+  table.data tr:last-child td{ border-bottom:none; }
+  table.data tr.tot td{ font-weight:700; border-top:2px solid var(--rule); }
+  .dim{ color:var(--ink-dim); }
+  .neg{ color:var(--bad); } .pos{ color:var(--good); }
+
+  .callout{ border-left:3px solid var(--accent); background:var(--accent-soft); border-radius:0 8px 8px 0; padding:1rem 1.2rem; font-size:0.92rem; margin:1.2rem 0; }
+  .callout strong{ color:var(--accent); }
+  .callout.bad{ border-left-color:var(--bad); background:color-mix(in srgb, var(--bad) 10%, transparent); }
+  .callout.bad strong{ color:var(--bad); }
+  .callout.good{ border-left-color:var(--good); background:color-mix(in srgb, var(--good) 10%, transparent); }
+  .callout.good strong{ color:var(--good); }
+
+  .math{ background:var(--bg); border:1px solid var(--rule); border-radius:8px; padding:0.9rem 1.1rem; margin:0.9rem 0;
+         font-family: ui-monospace, monospace; font-size:0.83rem; line-height:1.75; overflow-x:auto; white-space:pre; font-variant-numeric: tabular-nums; }
+  .math .cm{ color:var(--ink-dim); }
+  .math .hi{ color:var(--accent); font-weight:600; }
+  .math .gd{ color:var(--good); }
+  .math .bd{ color:var(--bad); }
+
+  .mermaid{ background:var(--surface); border:1px solid var(--rule); border-radius:10px; padding:1.1rem; box-shadow:var(--shadow); overflow-x:auto; margin:1rem 0; text-align:center; }
+  .mermaid svg{ max-width:100%; height:auto; }
+
+  .pill{ display:inline-block; font-family:ui-monospace,monospace; font-size:0.66rem; padding:0.12rem 0.45rem; border-radius:4px; font-weight:600; letter-spacing:0.03em; }
+  .pill.keep{ background:var(--head-c-soft); color:var(--head-c); }
+  .pill.new{ background:var(--head-b-soft); color:var(--head-b); }
+  .pill.kill{ background:color-mix(in srgb, var(--bad) 16%, transparent); color:var(--bad); }
+  .pill.p1{ background:var(--head-a-soft); color:var(--head-a); }
+
+  .src{ font-family:ui-monospace,monospace; font-size:0.72rem; color:var(--ink-dim); margin-top:0.6rem; }
+  .src b{ color:var(--ink); font-weight:600; }
+
+  .opt{ background:var(--surface); border:1px solid var(--rule); border-radius:10px; padding:1rem 1.15rem; box-shadow:var(--shadow); min-width:0; }
+  .opt.win{ border:1px solid var(--good); box-shadow:0 0 0 1px var(--good) inset, var(--shadow); }
+  .opt .hdr{ display:flex; align-items:baseline; justify-content:space-between; gap:0.6rem; flex-wrap:wrap; margin-bottom:0.55rem; }
+  .opt .hdr h3{ margin:0; font-size:0.98rem; }
+  .opt p{ font-size:0.86rem; margin:0.5rem 0; }
+  .cost{ font-size:0.78rem; color:var(--ink-dim); margin-top:0.6rem; padding-top:0.55rem; border-top:1px dashed var(--rule); }
+  .cost b{ color:var(--ink); }
+
+  form.q{ background:var(--surface); border:1px solid var(--rule); border-radius:10px; padding:1.1rem 1.25rem; box-shadow:var(--shadow); margin:1rem 0; }
+  form.q fieldset{ border:none; margin:0; padding:0; }
+  form.q legend{ font-weight:600; font-size:0.95rem; padding:0; margin-bottom:0.7rem; }
+  form.q label{ display:flex; gap:0.55rem; align-items:flex-start; padding:0.45rem 0; font-size:0.88rem; cursor:pointer; }
+  form.q input[type=radio], form.q input[type=checkbox]{ margin-top:0.3rem; flex-shrink:0; }
+  form.q .qsub{ margin-top:0.8rem; font-family:ui-sans-serif,system-ui,sans-serif; font-size:0.82rem; font-weight:600;
+                background:var(--accent); color:var(--bg); border:none; border-radius:6px; padding:0.5rem 0.95rem; cursor:pointer; }
+  form.q .qsub:hover{ opacity:0.88; }
+  form.q .hint{ font-size:0.78rem; color:var(--ink-dim); margin:0.5rem 0 0; }
+
+  footer{ margin-top:3.5rem; padding-top:1.6rem; border-top:1px solid var(--rule); font-size:0.82rem; color:var(--ink-dim); }
+</style>
+
+<div class="page">
+
+<header class="hero">
+  <p class="eyebrow">Architecture proposal · Phase 6 · not yet implemented</p>
+  <h1>The model sees a photograph. The market moves like a film.</h1>
+  <p class="subtitle">
+    Every live inference call collapses ~120 seconds of order-book flow and an ordered burst of
+    NBA events into a single 58-number vector. This document measures exactly what that costs,
+    proposes a dual-stream recurrent encoder to replace the collapse, and works through the full
+    math of one training iteration with verified numbers.
+  </p>
+  <div class="meta-row">
+    <span><strong>Current:</strong> <span class="mono">MMoEModel</span>, 58→48 dense, ~37K params</span>
+    <span><strong>Proposed:</strong> dual-stream Δt-GRU + MMoE tower, 67,081 params</span>
+    <span><strong>Evidence:</strong> 8 recorded live runs, 4,597 inference calls, 77,005 ticks</span>
+  </div>
+</header>
+
+<!-- ══════════════════════════ 1 ══════════════════════════ -->
+<section>
+  <div class="section-label"><span class="num">01</span><h2>How data actually arrives, measured</h2></div>
+
+  <p class="lead">
+    Everything below is counted from the recorded runs in
+    <code>live-trader/go/logs/runs/</code> and the tick parquets in
+    <code>data/raw/kalshi_ticks/</code>. No estimates.
+  </p>
+
+  <div class="grid3">
+    <div class="stat"><span class="v mono">1.02 s</span><div class="k">Median Kalshi inter-tick gap. ~37 ticks/min, continuous.</div></div>
+    <div class="stat"><span class="v mono">9 s</span><div class="k">Median gap between NBA events. p90 = 27s, max = 1,008s.</div></div>
+    <div class="stat bad"><span class="v mono">45.8%</span><div class="k">Of inference calls arrive in a burst &lt;0.5s after the previous one.</div></div>
+    <div class="stat"><span class="v mono">585</span><div class="k">Live events in one 165-min game (0042500403). 23% are substitutions.</div></div>
+    <div class="stat good"><span class="v mono">3 ms</span><div class="k">p95 server pipeline latency against a 9s median arrival gap.</div></div>
+    <div class="stat acc"><span class="v mono">14</span><div class="k">Floats that represent all market history at each call.</div></div>
+  </div>
+
+  <p>
+    The two feeds are on completely different clocks and the engine only wakes on one of them.
+    <code>game.go:229</code> blocks on <code>possessionCh</code>; when an NBA event lands it calls
+    <code>ringBuffer.Snapshot()</code>, which walks up to 120 seconds of buffered ticks and reduces
+    them to 14 numbers (<code>ring_buffer.go:72</code>). Between two events the Kalshi feed may have
+    delivered 9 ticks (median gap) or 27 (p90) or over a thousand (timeout, quarter break). All of
+    them collapse to the same 14 slots.
+  </p>
+
+  <div class="mermaid">
+flowchart TD
+  K["Kalshi WebSocket<br/><b>~1 tick/sec, continuous</b>"] --> RB["RingBuffer<br/>120s rolling window<br/><i>ring_buffer.go</i>"]
+  N["NBA CDN poller<br/><b>3s grid, ~15-20s behind play</b><br/><i>nba_feed.go</i>"] --> CH["possessionCh<br/>(events arrive in bursts)"]
+  CH -->|"wakes the loop"| LOOP["GameEngine main loop<br/><i>game.go:229</i>"]
+  RB -.->|"Snapshot() on demand"| LOOP
+  LOOP --> VEC["<b>Single 58-dim vector</b><br/>33 physics + 11 pregame + 14 market"]
+  VEC --> MMOE["MMoE<br/>3 experts / 3 gates / 3 heads"]
+  MMOE --> DEC["Head A run prob<br/>Head B 10x traj<br/>Head C 10x hazard"]
+
+  style VEC fill:#c23b3b,stroke:#c23b3b,color:#ffffff
+  style RB fill:#2b608f,stroke:#2b608f,color:#ffffff
+  style MMOE fill:#6d4e9c,stroke:#6d4e9c,color:#ffffff
+  </div>
+
+  <p class="src">
+    <b>Verified:</b> <code>live-trader/go/game.go:229-256</code> ·
+    <code>live-trader/go/ring_buffer.go:72-150</code> ·
+    <code>live-trader/go/nba_feed.go:58</code> ·
+    <code>models/mmoe/feature_config.py:122</code>
+  </p>
+</section>
+
+<!-- ══════════════════════════ 2 ══════════════════════════ -->
+<section>
+  <div class="section-label"><span class="num">02</span><h2>Four blind spots, each with a number attached</h2></div>
+
+  <p class="lead">
+    "Add a price velocity field" was the right instinct and it is already there — four of them,
+    in fact (<code>d_yes_bid</code>, <code>d_spread</code>, <code>bid_velocity_30s</code>,
+    <code>bid_acceleration_30s</code>). Here is why that is not enough.
+  </p>
+
+  <div class="card b-bad">
+    <div class="label">Blind spot 1 · measured on real ticks</div>
+    <h3>Path shape is destroyed. Total variation is 2.5&times;–3.9&times; the net move.</h3>
+    <p>
+      I bucketed a real game's tick stream into windows the size of our actual event gaps and
+      compared the net endpoint move against the full path length:
+    </p>
+    <div class="table-wrap">
+      <table class="data">
+        <thead><tr>
+          <th>Window</th><th>Mean net move</th><th>Range beyond net</th><th>Path length beyond net</th><th>Path / net</th>
+        </tr></thead>
+        <tbody>
+          <tr><td>9 s <span class="dim">(median gap)</span></td><td>0.91¢</td><td>0.46¢</td><td>1.41¢</td><td class="neg">2.55&times;</td></tr>
+          <tr><td>18 s</td><td>1.20¢</td><td>0.69¢</td><td>2.80¢</td><td class="neg">3.33&times;</td></tr>
+          <tr><td>27 s <span class="dim">(p90 gap)</span></td><td>1.42¢</td><td>0.85¢</td><td>4.05¢</td><td class="neg">3.86&times;</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      At the p90 gap, the book traverses <strong>4.05¢ of price path</strong> to produce a
+      <strong>1.42¢ net move</strong>. The model sees only the 1.42¢. A monotone 48→50 drift on
+      thin volume and a violent 48→53→46→50 round trip on heavy volume produce an
+      <em>identical</em> feature vector. Those are opposite trades: the first is a market that has
+      already repriced, the second is a market fighting itself and about to hand us a maker fill.
+    </p>
+    <p class="src"><b>Method:</b> <code>data/raw/kalshi_ticks/2026-03-23/KXNBASPREAD-26MAR23HOUCHI-CHI1.parquet</code>, 5,539 ticks, 150 min. Path length = Σ|Δbid| within each window.</p>
+  </div>
+
+  <div class="card b-bad">
+    <div class="label">Blind spot 2 · verified across all 8 runs</div>
+    <h3><code>d_yes_bid</code> is identically zero on 45.8% of live inference calls.</h3>
+    <p>
+      <code>ring_buffer.go:108</code> computes <code>d_yes_bid</code> as "bid now minus bid at the
+      previous <code>Snapshot()</code>". But the NBA CDN returns a batch of new events per 3-second
+      poll, and the engine fires one inference call per event, back to back, microseconds apart.
+      The second call's "previous snapshot" is the first call's snapshot — same tick, same price.
+    </p>
+    <div class="math"><span class="cm">// Across all 8 recorded runs, 4,583 consecutive call pairs:</span>
+burst pairs (Δt &lt; 0.5s):   2098   yes_bid unchanged: <span class="bd">2098  (100.0%)</span>
+spaced pairs (Δt ≥ 0.5s):   2485   yes_bid unchanged:  1262  ( 50.8%)
+
+<span class="cm">// Share of all live inference calls that are burst-adjacent:</span>  <span class="bd">45.8%</span></div>
+    <p>
+      100.0%, not 99%. It is structural, not statistical. <code>d_spread</code> and
+      <code>bid_acceleration_30s</code> degenerate the same way, since
+      <code>prevSnap</code> and <code>prevVelocity</code> both update on every call
+      (<code>ring_buffer.go:146-147</code>). <strong>Three of our four price-velocity features
+      carry no information on nearly half of all live decisions</strong> — and the model has no way
+      to know which half it is in, because Δt is not an input.
+    </p>
+  </div>
+
+  <div class="card b-bad">
+    <div class="label">Blind spot 3 · grep the feature list</div>
+    <h3>Elapsed wall-clock time is not a feature anywhere.</h3>
+    <p>
+      <code>ALL_FEATURE_COLS</code> has 58 entries. <code>time_leverage</code> is game clock.
+      <code>poss_since_timeout</code> is a possession count. <code>time_since_last_trade_ms</code>
+      is about the book, not about us. <strong>Nothing tells the model how long it has been since
+      the last time it was asked.</strong> Every difference feature is therefore a rate with an
+      unknown, wildly varying denominator ranging from 0 seconds to 1,008 seconds.
+    </p>
+  </div>
+
+  <div class="card b-bad">
+    <div class="label">Blind spot 4 · 137 of 585 events</div>
+    <h3>The event <em>sequence</em> is thrown away, and the thesis depends on it.</h3>
+    <p>
+      The core edge is "we notice lineup changes before the market does." Substitutions are 23% of
+      all live events (137 of 585 in the sampled game). The model receives <code>was_sub</code>,
+      <code>sub_count_edge</code> and <code>lineup_changed_edge</code> — flags and counters. It
+      never receives the <em>ordering</em>: <span class="mono">sub → sub → timeout → 3pt make →
+      3pt make</span> is a coach reacting and it working. The same five events shuffled mean
+      nothing. A bag of counters cannot represent that distinction; a sequence model represents it
+      natively.
+    </p>
+  </div>
+
+  <div class="callout">
+    <strong>The pattern.</strong> Every one of these is the same failure: we chose the summary
+    statistic in advance, at a window size we guessed, on a clock we did not measure. A recurrent
+    encoder does not fix any single feature — it removes the requirement that we guess correctly
+    and lets the loss pick the window.
+  </div>
+</section>
+
+<!-- ══════════════════════════ 3 ══════════════════════════ -->
+<section>
+  <div class="section-label"><span class="num">03</span><h2>Proposed architecture</h2></div>
+
+  <p class="lead">
+    Two encoders, one fusion point, and the existing MMoE tower kept intact above it. The heads,
+    the gates, the entropy regularizer, the masked loss, the exit simulator targets, and the whole
+    Go execution path all stay exactly as they are.
+  </p>
+
+  <div class="mermaid">
+flowchart TD
+  subgraph MKT["Market stream — regular 1 Hz grid"]
+    M0["Last 120s of ticks<br/>resampled to 1 Hz<br/><b>X_M : (120, 8)</b>"] --> MG["GRU_M<br/>hidden 32"]
+    MG --> MH["m = h_120<br/><b>(32,)</b>"]
+  end
+
+  subgraph EVT["Event stream — irregular Δt"]
+    E0["Last K=32 NBA events<br/>33 physics + Δt_wall + Δt_game<br/>+ 8-dim type embed<br/><b>X_E : (32, 43)</b>"] --> EG["Δt-GRU_E<br/>hidden 64<br/><i>memory decays with Δt</i>"]
+    EG --> EH["e = h_32<br/><b>(64,)</b>"]
+  end
+
+  subgraph STA["Static"]
+    S0["11 pregame features<br/><b>(11,)</b>"] --> SH["s"]
+  end
+
+  MH --> GATE{"has_market_data?"}
+  GATE -->|"1"| FUSE
+  GATE -->|"0"| NULL["learned m_null<br/><b>(32,)</b>"]
+  NULL --> FUSE
+  EH --> FUSE
+  SH --> FUSE
+  FUSE["z = concat(e, m*, s)<br/><b>(107,)</b>"] --> EXP["3 shared experts<br/>107 → 64 → 64<br/><i>unchanged structure</i>"]
+  EXP --> G["3 per-task gates<br/>softmax over experts"]
+  G --> HA["Head A<br/>P(run)"]
+  G --> HB["Head B<br/>10x trajectory"]
+  G --> HC["Head C<br/>10x hazard"]
+
+  style FUSE fill:#1f8f5f,stroke:#1f8f5f,color:#ffffff
+  style EG fill:#b8490a,stroke:#b8490a,color:#ffffff
+  style MG fill:#2b608f,stroke:#2b608f,color:#ffffff
+  style EXP fill:#6d4e9c,stroke:#6d4e9c,color:#ffffff
+  </div>
+
+  <div class="grid2">
+    <div class="card b-b">
+      <div class="label">Market stream</div>
+      <h3>1 Hz grid, 120 steps, 8 channels</h3>
+      <p>
+        Resample the ring buffer onto a regular one-second grid rather than feeding raw ticks. This
+        makes Δt constant so a plain GRU is correct, and it makes the tensor shape fixed so the Go
+        side can ship a dense array with no padding logic.
+      </p>
+      <p>
+        Channels: <span class="mono">yes_bid, yes_ask, spread, mid, yes_last, log1p(traded_size),
+        Δopen_interest, bid−last</span>. All prices as deviations from the bid at t=0 of the window,
+        so the encoder learns shape rather than level; the absolute level enters once, via the
+        static path.
+      </p>
+      <p class="cost"><b>Cost:</b> Go must maintain a 1 Hz resample. Payload grows from 14 floats to 960 (~4 KB). At a 9s median arrival gap this is free.</p>
+    </div>
+
+    <div class="card b-a">
+      <div class="label">Event stream</div>
+      <h3>Last 32 events, Δt-aware GRU</h3>
+      <p>
+        K = 32 events ≈ 5 minutes of game at the observed 9s median — which is exactly the
+        3–5 minute scoring-run window the whole thesis targets. Each step carries the 33
+        consolidated physics features, an 8-dim learned embedding of <code>action_type</code>,
+        and <strong>both</strong> elapsed times: Δt<sub>wall</sub> (seconds since previous event)
+        and Δt<sub>game</sub> (game-clock seconds).
+      </p>
+      <p>
+        The cell decays its own memory by elapsed wall time (§5). This is what makes the burst
+        problem disappear: on a 0-second gap the previous state passes through untouched, and on a
+        1,008-second timeout it is erased.
+      </p>
+      <p class="cost"><b>Cost:</b> 32 sequential GRU steps per inference. At hidden 64 this is ~200 μs on CPU, against a 3 ms current p95.</p>
+    </div>
+  </div>
+
+  <h3>Two decisions that matter more than the cell type</h3>
+
+  <div class="grid2">
+    <div class="opt win">
+      <div class="hdr"><h3>Windowed re-encode</h3><span class="pill keep">Recommended</span></div>
+      <p>
+        Every inference call re-runs the GRU over the last 32 events from a zero initial state.
+        The model is a pure function of its window.
+      </p>
+      <p>
+        <strong>Why this and not a persistent hidden state:</strong> the NBA feed replays a
+        backfill burst at startup (<code>nba_feed.go:161</code>) and <em>drops events when the
+        channel is full</em> (<code>nba_feed.go:148</code>). A stateful RNN would absorb both into
+        a hidden vector that is silently wrong for the rest of the game, with no way to detect it.
+        Re-encoding is idempotent, replay-safe, and makes the backtest bit-identical to live.
+      </p>
+      <p class="cost"><b>Cost:</b> 32&times; redundant compute per call. Absolute cost ~200 μs. <b>Buys:</b> the single property this system needs most.</p>
+    </div>
+
+    <div class="opt">
+      <div class="hdr"><h3>Persistent hidden state</h3><span class="pill kill">Rejected</span></div>
+      <p>
+        Carry <span class="mono">h</span> across the whole game, one GRU step per event. Unbounded
+        memory, 32&times; cheaper.
+      </p>
+      <p>
+        Rejected on robustness, not cost. It introduces a hidden, unobservable, unrecoverable
+        divergence between backtest and live the first time an event is dropped or replayed — the
+        exact class of bug that <code>CLAUDE.md</code> tells us to be paranoid about.
+      </p>
+      <p class="cost"><b>Reconsider if:</b> we ever move to a gap-free push feed (Sportradar WS) <em>and</em> add a state checksum.</p>
+    </div>
+  </div>
+
+  <div class="grid3" style="margin-top:1.1rem;">
+    <div class="opt win">
+      <div class="hdr"><h3>GRU</h3><span class="pill keep">Pick</span></div>
+      <p>3 gates, ~25% fewer params than LSTM at equal hidden size. At 24K joint rows, parameters are the binding constraint.</p>
+    </div>
+    <div class="opt">
+      <div class="hdr"><h3>LSTM</h3><span class="pill kill">No</span></div>
+      <p>4 gates and a separate cell state. No evidence it wins at sequence length 32–120; costs ~33% more parameters we cannot afford.</p>
+    </div>
+    <div class="opt">
+      <div class="hdr"><h3>Transformer</h3><span class="pill kill">Not yet</span></div>
+      <p>Wants 10–100&times; our joint data. Revisit after a full season of tick recording, when Head B has 200K+ rows.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════ 4 ══════════════════════════ -->
+<section>
+  <div class="section-label"><span class="num">04</span><h2>The math for one training iteration</h2></div>
+
+  <p class="lead">
+    Batch size B = 256. Every number in the numeric trace below was computed with PyTorch autograd
+    and is reproduced verbatim.
+  </p>
+
+  <h3>Shapes</h3>
+  <div class="math"><span class="hi">X_E</span> ∈ ℝ^(B × 32 × 43)   event stream    43 = 33 physics + 8 type-embed + Δt_wall + Δt_game
+<span class="hi">X_M</span> ∈ ℝ^(B × 120 × 8)   market stream   8 channels on a 1 Hz grid
+<span class="hi">X_S</span> ∈ ℝ^(B × 11)        static          pregame block, unchanged
+<span class="hi">Δ</span>   ∈ ℝ^(B × 32)        elapsed wall seconds per event step
+
+targets:  y_A ∈ ℝ^B (binary)   y_B ∈ ℝ^(B×10) (logit deltas)   y_C ∈ ℝ^(B×10) (binary)
+masks:    m_run ∈ {0,1}^B      m_mkt ∈ {0,1}^B</div>
+
+  <h3>Step 1 — the Δt-gated GRU cell</h3>
+  <p>
+    The standard GRU, with one addition. Before the cell reads the previous hidden state, that
+    state is decayed by the elapsed time since the previous event, at a rate learned
+    <em>per hidden unit</em>:
+  </p>
+
+  <div class="math"><span class="hi">λ    = softplus(τ)</span>                          <span class="cm">τ ∈ ℝ^64 learned, softplus keeps λ &gt; 0</span>
+<span class="hi">h'ₜ₋₁ = hₜ₋₁ ⊙ exp(−Δtₜ · λ)</span>                  <span class="cm">← the entire fix for blind spots 2 and 3</span>
+
+rₜ = σ(W_r xₜ + U_r h'ₜ₋₁ + b_r)                  <span class="cm">reset gate</span>
+zₜ = σ(W_z xₜ + U_z h'ₜ₋₁ + b_z)                  <span class="cm">update gate</span>
+nₜ = tanh(W_n xₜ + rₜ ⊙ (U_n h'ₜ₋₁) + b_n)        <span class="cm">candidate</span>
+hₜ = (1 − zₜ) ⊙ nₜ + zₜ ⊙ h'ₜ₋₁                   <span class="cm">note: h', not h</span></div>
+
+  <p>
+    Each hidden unit gets its own λ, so the network can hold one unit with λ ≈ 0 (season-long
+    context, survives a timeout) and another with λ ≈ 1 (this-possession context, erased by any
+    real gap). <strong>We no longer choose the window — the loss does, per unit.</strong>
+  </p>
+
+  <h3>Step 2 — forward, with real numbers</h3>
+  <p>
+    A 2-unit cell over 2 steps, so every quantity is inspectable. Inputs
+    <span class="mono">x₁=[1.0, 0.0]</span> at Δt=1s and <span class="mono">x₂=[2.0, 1.0]</span> at
+    Δt=4s. Initial <span class="mono">h₀ = [0, 0]</span>, τ = [0.20, 0.60] so
+    λ = softplus(τ) = [0.7981, 1.0375].
+  </p>
+
+  <div class="math"><span class="cm">─── t = 1 ───  Δt = 1s,  h₀ = [0, 0]</span>
+h'₀ = [0, 0] ⊙ exp(−1·λ)     = [0.000000,  0.000000]
+r₁  = σ(W_r x₁)              = [0.622459,  0.524979]
+z₁  = σ(W_z x₁)              = [0.425557,  0.549834]
+n₁  = tanh(W_n x₁)           = [0.664037, -0.379949]
+<span class="hi">h₁  = (1−z₁)⊙n₁ + z₁⊙h'₀     = [0.381451, -0.171040]</span>
+
+<span class="cm">─── t = 2 ───  Δt = 4s   ← a real gap, the market moved without us</span>
+<span class="bd">h'₁ = h₁ ⊙ exp(−4·λ)         = [0.015665, -0.002696]</span>
+      <span class="cm">exp(−4·0.7981)=0.04106  →  unit 0 retains  4.1% of its memory</span>
+      <span class="cm">exp(−4·1.0375)=0.01576  →  unit 1 retains  1.6% of its memory</span>
+r₂  = σ(W_r x₂ + U_r h'₁)    = [0.690979,  0.645174]
+z₂  = σ(W_z x₂ + U_z h'₁)    = [0.500257,  0.474819]
+n₂  = tanh(W_n x₂ + r₂⊙(U_n h'₁)) = [0.935702, -0.096838]
+<span class="hi">h₂  = (1−z₂)⊙n₂ + z₂⊙h'₁     = [0.475447, -0.052138]</span></div>
+
+  <div class="callout">
+    <strong>Read the highlighted line.</strong> A four-second gap erased 96% and 98% of the two
+    units' memory. The current architecture has no equivalent operation — it would have treated a
+    4-second gap and a 400-second gap as the same event boundary, because it was never told which
+    one happened.
+  </div>
+
+  <h3>Step 3 — the null-market gate</h3>
+  <p>
+    77K of our 101K training rows are basketball-only: real possessions from games recorded before
+    the Kalshi feed existed, with no ticks at all. They must still train Heads A and C. The market
+    encoder output is therefore switched, not zeroed:
+  </p>
+  <div class="math">m<span class="hi">*</span> = m_mkt ⊙ GRU_M(X_M)[−1]  +  (1 − m_mkt) ⊙ <span class="hi">m_null</span>        <span class="cm">m_null ∈ ℝ³² learned</span>
+
+z  = concat(<span class="hi">e</span>, <span class="hi">m*</span>, <span class="hi">s</span>)   ∈ ℝ¹⁰⁷        <span class="cm">64 + 32 + 11</span></div>
+  <p>
+    A learned constant rather than a zero vector, because zero is a real point in the market
+    embedding space that some genuine order-book states will map to. Gradient from basketball-only
+    rows flows into <code>m_null</code> and stops there — it never touches <code>GRU_M</code>,
+    so 77K rows of tickless data cannot teach the market encoder anything false.
+  </p>
+
+  <h3>Step 4 — experts, gates, heads (unchanged from today)</h3>
+  <div class="math">Eᵢ(z) = Dropout(ReLU(BN(W₂ᵢ · Dropout(ReLU(BN(W₁ᵢ z))))))    i = 1..3,  Eᵢ(z) ∈ ℝ⁶⁴
+g_h(z) = softmax(W_h z)  ∈ ℝ³                                h ∈ {A, B, C}
+u_h    = Σᵢ g_h(z)ᵢ · Eᵢ(z)  ∈ ℝ⁶⁴
+
+â = σ(HeadA(u_A)) ∈ ℝ¹      b̂ = HeadB(u_B) ∈ ℝ¹⁰      ĉ = σ(HeadC(u_C)) ∈ ℝ¹⁰</div>
+
+  <h3>Step 5 — the masked multi-task loss</h3>
+  <p>
+    Identical to <code>trainer.py::_compute_loss</code> today. Nothing about the sequence encoders
+    changes the objective:
+  </p>
+  <div class="math">s_traj = 𝟙[ mean|y_B| &gt; 0.02 ]                    <span class="cm">drop near-flat trajectories</span>
+M_B    = m_mkt ⊙ s_traj
+
+ℒ_A = BCE(â, y_A ; mask = m_run)
+ℒ_B = Huber_{β=1}(b̂, y_B ; mask = M_B)
+ℒ_C = BCE(ĉ, y_C ; mask = m_run)
+H   = Σ_h  −Σⱼ g_h(z)ⱼ log g_h(z)ⱼ               <span class="cm">gate entropy, prevents expert collapse</span>
+
+<span class="hi">ℒ = w_A ℒ_A + w_B ℒ_B + w_C ℒ_C − λ_H · H</span>       <span class="cm">w = (1.0, 1.0, 0.3), λ_H = 0.02</span></div>
+
+  <p>Concretely, for the trace above with a Head B target of +5¢ from 50¢:</p>
+  <div class="math">ŷ  = w_out · h₂ + b_out = (1.0)(0.475447) + (−1.0)(−0.052138) = <span class="hi">0.527585</span>
+y  = logit(0.55) − logit(0.50)                                  = 0.182300
+δ  = ŷ − y                                                      = 0.345285
+ℒ_B = ½δ²  (since |δ| ≤ β = 1)                                  = <span class="hi">0.059611</span></div>
+
+  <h3>Step 6 — backward: BPTT through the decay</h3>
+  <p>
+    The gradient reaches step t from two directions: the loss at the top, and every later timestep
+    through the recurrence. The Jacobian of the recurrence now carries the decay factor:
+  </p>
+  <div class="math">∂ℒ/∂hₜ = <span class="cm">[direct]</span> + (∂hₜ₊₁/∂hₜ)ᵀ · ∂ℒ/∂hₜ₊₁
+
+∂hₜ₊₁/∂hₜ = <span class="hi">diag(exp(−Δtₜ₊₁·λ))</span> · [ diag(zₜ₊₁)
+                                  + (1−zₜ₊₁) ⊙ ∂nₜ₊₁/∂h'ₜ
+                                  + (nₜ₊₁ − h'ₜ) ⊙ ∂zₜ₊₁/∂h'ₜ ]
+
+<span class="cm">// and τ picks up gradient from every timestep it gated:</span>
+∂ℒ/∂τ = Σₜ  σ'(τ) ⊙ (−Δtₜ) ⊙ hₜ₋₁ ⊙ exp(−Δtₜ·λ) ⊙ ∂ℒ/∂h'ₜ₋₁</div>
+
+  <p>
+    Note the shape of the τ gradient: it scales with <span class="mono">Δtₜ</span>. Long gaps
+    dominate the learning signal for the decay rates, which is the correct behavior — timeouts and
+    quarter breaks are precisely the events that should teach the model what to forget.
+  </p>
+
+  <p>Autograd on the trace above, verbatim:</p>
+  <div class="math">∂ℒ/∂W_z = [[<span class="bd">−0.159724</span>, −0.079419], [−0.016501, −0.008106]]
+∂ℒ/∂W_n = [[ 0.044707,  0.021476], [<span class="bd">−0.360460</span>, −0.179637]]
+∂ℒ/∂W_r = [[ 0.000031,  0.000016], [−0.000364, −0.000182]]   <span class="cm">← tiny: reset gate</span>
+                                                              <span class="cm">  barely matters when h'</span>
+∂ℒ/∂U_r = [[ 0.00000024, −0.00000004], [−0.0000029, 0.0000005]]  <span class="cm">is already decayed</span>
+<span class="hi">∂ℒ/∂τ   = [−0.004583, −0.001361]</span>                       <span class="cm">← negative ⇒ push λ down ⇒</span>
+∂ℒ/∂w_out = [ 0.164165, −0.018002]                            <span class="cm">  remember longer</span></div>
+
+  <div class="callout good">
+    <strong>The recurrent weights get almost no gradient here, and that is the lesson.</strong>
+    <span class="mono">∂ℒ/∂U_r</span> is ~10⁻⁷ while <span class="mono">∂ℒ/∂W_n</span> is ~10⁻¹ —
+    a factor of a million. The 4-second gap decayed <span class="mono">h'₁</span> to near zero, so
+    the recurrent path had almost nothing to propagate. With sparse, bursty NBA events this will be
+    the common case, and it is the concrete argument for keeping the event GRU <em>small</em>
+    (hidden 64, not 256): most of its recurrent capacity will sit idle across long gaps.
+  </div>
+
+  <h3>Step 7 — AdamW update</h3>
+  <div class="math">mₖ = β₁mₖ₋₁ + (1−β₁)g        vₖ = β₂vₖ₋₁ + (1−β₂)g²      β₁=0.9, β₂=0.999
+m̂ = mₖ/(1−β₁ᵏ)              v̂ = vₖ/(1−β₂ᵏ)
+θ ← θ − lr·( m̂/(√v̂ + ε) + <span class="hi">wd·θ</span> )                      lr = 1e-3, wd = 1e-4
+
+<span class="cm">// At k=1 the bias correction makes the step ≈ −lr·sign(g), independent of |g|:</span>
+Δw_out = [<span class="bd">−0.00100000</span>, <span class="gd">+0.00099999</span>]        <span class="cm">≈ −lr·sign(g) ✓</span>
+Δτ     = [<span class="gd">+0.00099999</span>, <span class="gd">+0.00099999</span>]        <span class="cm">both λ pushed up ⇒ forget faster</span>
+
+then: clip_grad_norm_(1.0)  →  optimizer.step()  →  ReduceLROnPlateau on val loss</div>
+
+  <h3>Gradient flow accounting — which rows train which parameters</h3>
+  <p>
+    This table is the thing to check before every training run. It is the reason the proposal is
+    affordable at all.
+  </p>
+  <div class="table-wrap">
+    <table class="data">
+      <thead><tr>
+        <th>Parameter block</th><th>Params</th><th>Trained by</th><th>Rows</th><th>Samples / param</th>
+      </tr></thead>
+      <tbody>
+        <tr><td class="txt">GRU_E + τ_E <span class="dim">(event encoder)</span></td><td>20,992</td><td class="txt">all rows, via A + C</td><td>101,122</td><td>4.8</td></tr>
+        <tr><td class="txt">GRU_M + τ_M <span class="dim">(market encoder)</span></td><td>4,064</td><td class="txt">joint rows only, via B</td><td>24,000</td><td>5.9</td></tr>
+        <tr><td class="txt"><code>action_type</code> embedding <span class="dim">(13 &times; 8)</span></td><td>104</td><td class="txt">all rows</td><td>101,122</td><td class="pos">972</td></tr>
+        <tr><td class="txt">m_null</td><td>32</td><td class="txt">basketball-only rows</td><td>77,122</td><td class="pos">2,410</td></tr>
+        <tr><td class="txt">Experts (3 &times; 107→64→64)</td><td>33,984</td><td class="txt">all rows</td><td>101,122</td><td class="neg">3.0</td></tr>
+        <tr><td class="txt">Gates (3 &times; 107→3)</td><td>972</td><td class="txt">all rows</td><td>101,122</td><td class="pos">104</td></tr>
+        <tr><td class="txt">Head A / Head C</td><td>4,523</td><td class="txt">all rows</td><td>101,122</td><td class="pos">22</td></tr>
+        <tr><td class="txt">Head B</td><td>2,410</td><td class="txt">joint rows, |traj| &gt; 0.02</td><td>~13,900</td><td class="neg">5.8</td></tr>
+        <tr class="tot"><td class="txt">Total proposed</td><td>67,081</td><td class="txt">—</td><td>101,122</td><td class="neg">1.5</td></tr>
+        <tr class="tot"><td class="txt"><span class="dim">Current model, for comparison</span></td><td class="dim">~37,000</td><td class="txt dim">—</td><td class="dim">101,122</td><td class="dim">2.7</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout bad">
+    <strong>Read the last two rows honestly.</strong> The proposal <em>halves</em> the overall
+    data-per-parameter ratio, from 2.7 to 1.5. That is a real cost and the table should not be read
+    as reassurance. What it does show is <em>where</em> the pressure sits: the experts (33,984
+    params at 3.0 samples/param) are the largest block and the least justified by new capability —
+    they are inherited, not added. If capacity has to be cut, cut the expert width from 64 to 48
+    before touching either GRU, which would return ~11K parameters and lift the overall ratio back
+    to ~1.8.
+  </div>
+
+  <p class="src">
+    <b>Verified:</b> parameter counts constructed in PyTorch (<code>nn.GRU</code>,
+    <code>nn.Linear</code>, <code>nn.BatchNorm1d</code>) rather than derived by hand.
+    <b>Row counts:</b> <code>models/mmoe/dataset.py:9</code> (~24K joint) and the feature store
+    (101,122 rows). Head B row count applies the <code>mean|traj| &gt; 0.02</code> mask described at
+    <code>trainer.py:108-113</code> (~42% of joint rows are near-zero).
+  </p>
+</section>
+
+<!-- ══════════════════════════ 5 ══════════════════════════ -->
+<section>
+  <div class="section-label"><span class="num">05</span><h2>The central risk, and the asset that offsets it</h2></div>
+
+  <div class="grid2">
+    <div class="card b-bad">
+      <div class="label">The risk</div>
+      <h3>1.8&times; the parameters on the same 24K joint rows</h3>
+      <p>
+        37,000 → 67,081 parameters, which halves data-per-parameter from 2.7 to 1.5.
+        Head B — the head that actually drives entry — sees roughly 13,900
+        usable rows from 148 games recorded over three weeks. That is 5.8 samples per parameter in
+        the market path. A sequence model with too little data will happily memorize the shape of
+        one March market regime and look excellent in validation.
+      </p>
+      <p>
+        The existing splits already discourage this: joint rows split chronologically at
+        <code>HEADB_SPLIT_DATE</code> (<code>dataset.py:821</code>), so validation is genuinely
+        future data. But three weeks is a short future.
+      </p>
+    </div>
+
+    <div class="card b-good">
+      <div class="label">The offset — this is the strongest reason to do it</div>
+      <h3>77,005 unlabeled ticks are already on disk</h3>
+      <p>
+        The market encoder does not need possession labels. It only needs tick sequences — and we
+        have <strong>77,005 of them across 52 recorded market files</strong> that were never usable
+        by the current architecture, because a dense vector has nothing to pretrain.
+      </p>
+      <p>
+        Pretrain <code>GRU_M</code> self-supervised on next-second prediction: given seconds
+        <span class="mono">t−119..t</span>, predict <span class="mono">Δbid</span> at
+        <span class="mono">t+1..t+5</span>. Then freeze or fine-tune it inside the full model.
+        This turns 24K labeled rows into 24K labeled rows <em>plus</em> 77K unlabeled steps of
+        representation learning.
+      </p>
+      <p class="cost"><b>This asset only exists in the sequence formulation.</b> The current model cannot consume an unlabeled tick stream at all.</p>
+    </div>
+  </div>
+
+  <div class="callout bad">
+    <strong>Non-negotiable gate before this replaces anything.</strong> The current model backtests
+    at 207 trades / 47.8% win / +$37,409 net. The sequence model ships only if it beats that on the
+    <em>same</em> backtest harness with the <em>same</em> entry gates, and only after
+    <code>/validate-features</code> passes on the new stream builders. The 2024-26 test set stays
+    untouched either way.
+  </div>
+</section>
+
+<!-- ══════════════════════════ 6 ══════════════════════════ -->
+<section>
+  <div class="section-label"><span class="num">06</span><h2>Migration, in the order that de-risks fastest</h2></div>
+
+  <p class="lead">
+    Each phase is independently shippable and independently reversible. Phase 1 is worth doing even
+    if the rest is abandoned.
+  </p>
+
+  <div class="table-wrap">
+    <table class="data">
+      <thead><tr><th>Phase</th><th>Change</th><th>Touches</th><th>Ship gate</th></tr></thead>
+      <tbody>
+        <tr>
+          <td class="txt"><span class="pill p1">1</span> <b>Fix Δt</b></td>
+          <td class="txt">Add <code>dt_wall_seconds</code> and <code>dt_game_seconds</code> to the feature vector. Make <code>d_yes_bid</code> a per-second rate against a real denominator instead of a per-call difference.</td>
+          <td class="txt"><code>ring_buffer.go</code>, <code>feature_config.py</code>, <code>transforms.py</code></td>
+          <td class="txt">Retrain current MLP. Any AUCPR / DirAcc gain is free evidence the blind spot was real.</td>
+        </tr>
+        <tr>
+          <td class="txt"><span class="pill new">2</span> <b>Market stream</b></td>
+          <td class="txt">1 Hz resample in Go; ship <code>(120, 8)</code>. Add <code>GRU_M</code> + <code>m_null</code>. Event path stays a dense vector.</td>
+          <td class="txt"><code>ring_buffer.go</code>, <code>inference_client.go</code>, new <code>encoders.py</code></td>
+          <td class="txt">Head B DirAcc beats 61.1% on the same chronological split.</td>
+        </tr>
+        <tr>
+          <td class="txt"><span class="pill new">3</span> <b>SSL pretrain</b></td>
+          <td class="txt">Next-second Δbid pretraining for <code>GRU_M</code> on all 77,005 recorded ticks, then fine-tune.</td>
+          <td class="txt">new <code>models/mmoe/pretrain_market.py</code></td>
+          <td class="txt">Beats Phase 2 from-scratch init. Cheap to test, cheap to discard.</td>
+        </tr>
+        <tr>
+          <td class="txt"><span class="pill new">4</span> <b>Event stream</b></td>
+          <td class="txt">Ship the last 32 raw events instead of one aggregated row. Add Δt-GRU_E. This is the largest change: the Go side must keep an event window and Python must build sequences.</td>
+          <td class="txt"><code>game.go</code>, <code>inference/features.py</code>, <code>dataset.py</code></td>
+          <td class="txt">Head A AUCPR ≥ 0.1593 <em>and</em> full backtest beats +$37,409.</td>
+        </tr>
+        <tr>
+          <td class="txt"><span class="pill keep">5</span> <b>Cross-attention</b></td>
+          <td class="txt">Replace <code>concat</code> fusion with event-queries-attend-to-market-keys, so a specific event can look up the book state around it.</td>
+          <td class="txt"><code>model.py</code> only</td>
+          <td class="txt">Optional. Only after Phase 4 has beaten the incumbent for a full paper-trading month.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout">
+    <strong>Phase 1 is the recommendation to act on today.</strong> It is a handful of lines, it
+    needs no new architecture, and it tests the core claim of this document directly: if telling
+    the model how much time elapsed does nothing for AUCPR or directional accuracy, then blind
+    spots 2 and 3 are not costing us money and Phases 2–5 need rethinking.
+  </div>
+</section>
+
+<!-- ══════════════════════════ 7 ══════════════════════════ -->
+<section>
+  <div class="section-label"><span class="num">07</span><h2>Failure modes I have not solved</h2></div>
+
+  <div class="grid2">
+    <div class="card">
+      <div class="label">Backtest / live divergence</div>
+      <p>
+        The market stream is built by <em>Go</em> live and by <em>pandas</em> in training. Today
+        that parity risk covers 14 numbers; it would cover 960. The resample rule (forward-fill?
+        last-tick-in-second? gap handling?) must be specified once and tested against both
+        implementations, or we reintroduce the exact bug class that the Phase 1 aggregator
+        post-mortem already caught once.
+      </p>
+    </div>
+    <div class="card">
+      <div class="label">Feed delay is baked into targets</div>
+      <p>
+        Training joins ticks at <code>wall_clock_ts + 20s</code> (<code>dataset.py:659</code>) to
+        simulate CDN lag. A 120-second market window that ends 20 seconds before the event we are
+        reacting to is <em>not</em> the window live sees. I believe the window should end at
+        join time, not event time, but this needs a deliberate decision.
+      </p>
+    </div>
+    <div class="card">
+      <div class="label">Cold start</div>
+      <p>
+        The first 32 events of a game have no full window, and the first 120 seconds have no full
+        tick history. Zero-padding plus a validity mask channel is the obvious answer, but early
+        Q1 is also when the market is thinnest and least efficient — possibly our best window.
+        Worth measuring rather than assuming.
+      </p>
+    </div>
+    <div class="card">
+      <div class="label">Market swaps mid-window</div>
+      <p>
+        The scanner swaps strike tickers (<code>market_scanner.go</code>) and the engine already
+        discards stale-ticker ticks (<code>game.go:180</code>). A 120-second window that straddles
+        a swap contains two different contracts' prices. The window needs to be invalidated or
+        re-based on swap, and neither is currently implemented.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════ 8 ══════════════════════════ -->
+<section>
+  <div class="section-label"><span class="num">08</span><h2>Decisions I need from you</h2></div>
+
+  <form class="q" data-lavish-question="scope" onsubmit="event.preventDefault(); const c=new FormData(event.currentTarget).get('scope'); if(c) window.lavish.queuePrompt('Proceed with scope: '+c, {tag:'decision', text:'Scope: '+c, element:event.currentTarget, data:{question:'scope', answer:c}});">
+    <fieldset>
+      <legend>How far do you want to commit before seeing evidence?</legend>
+      <label><input type="radio" name="scope" value="Phase 1 only — add dt_wall/dt_game to the existing MLP and retrain, then reassess"> <span><b>Phase 1 only.</b> Add Δt features to the current MLP, retrain, measure. Smallest change that tests the thesis. <em>My recommendation.</em></span></label>
+      <label><input type="radio" name="scope" value="Phases 1-3 — Δt fix plus the market GRU stream and SSL pretraining"> <span><b>Phases 1–3.</b> Δt fix, market GRU, SSL pretrain on the 77K ticks. Leaves the event path alone.</span></label>
+      <label><input type="radio" name="scope" value="Full rearchitecture, Phases 1-4, dual-stream with event GRU"> <span><b>Phases 1–4.</b> Full dual-stream rearchitecture including the event GRU.</span></label>
+      <label><input type="radio" name="scope" value="None of these — the analysis is wrong somewhere, discuss first"> <span><b>Stop.</b> Something in the analysis is wrong — let's discuss before any code.</span></label>
+    </fieldset>
+    <button type="submit" class="qsub">Queue this answer</button>
+    <p class="hint">Queues locally. Press <b>Send to Agent</b> in the Lavish toolbar to deliver it.</p>
+  </form>
+
+  <form class="q" data-lavish-question="open" onsubmit="event.preventDefault(); const v=new FormData(event.currentTarget).getAll('open'); if(v.length) window.lavish.queuePrompt('Resolve these open questions first: '+v.join(' | '), {tag:'open-questions', text:v.length+' open question(s) flagged', element:event.currentTarget, data:{question:'open', answer:v}});">
+    <fieldset>
+      <legend>Which open questions do you want resolved before any code is written?</legend>
+      <label><input type="checkbox" name="open" value="Where should the 120s market window end — at event time or at event time + 20s feed delay?"> <span>Should the market window end at event time, or at <span class="mono">event + 20s</span> feed delay (matching the training join)?</span></label>
+      <label><input type="checkbox" name="open" value="Should K=32 events or should the event window be time-based (e.g. last 5 minutes)?"> <span>Event window: fixed <span class="mono">K = 32</span> events, or time-based (last 5 game-minutes, variable length)?</span></label>
+      <label><input type="checkbox" name="open" value="How should the 1Hz resample handle seconds with no tick — forward-fill or explicit gap channel?"> <span>1 Hz resample: forward-fill empty seconds, or add an explicit "no tick" channel?</span></label>
+      <label><input type="checkbox" name="open" value="What happens to the market window when the scanner swaps strike tickers mid-window?"> <span>Market swap mid-window: invalidate, re-base, or carry both?</span></label>
+      <label><input type="checkbox" name="open" value="Should GRU_M be frozen after SSL pretraining or fine-tuned end-to-end?"> <span>After SSL pretraining, freeze <span class="mono">GRU_M</span> or fine-tune it end-to-end?</span></label>
+    </fieldset>
+    <button type="submit" class="qsub">Queue selected questions</button>
+    <p class="hint">Select any number. Annotate anything else on the page directly.</p>
+  </form>
+</section>
+
+<footer>
+  <p>
+    Every measurement in this document was computed from repository data during the session that
+    produced it: 8 run logs under <code>live-trader/go/logs/runs/</code> (4,597 non-backfill
+    inference calls), 52 tick parquets under <code>data/raw/kalshi_ticks/</code> (77,005 ticks),
+    and the current model definition in <code>models/mmoe/</code>. The numeric forward and backward
+    trace in §4 was produced with PyTorch autograd and is reproduced without rounding beyond six
+    decimal places.
+  </p>
+  <p>
+    <b>Nothing here is implemented.</b> This is a proposal for review.
+  </p>
+</footer>
+
+</div>
+
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.esm.min.mjs";
+
+  const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
+
+  const paint = document.createElement("canvas").getContext("2d");
+  function toRgba(color) {
+    paint.clearRect(0, 0, 1, 1);
+    paint.fillStyle = "#000";
+    paint.fillStyle = color;
+    paint.fillRect(0, 0, 1, 1);
+    return paint.getImageData(0, 0, 1, 1).data;
+  }
+
+  function compositeRgba(foreground, background) {
+    const foregroundAlpha = foreground[3] / 255;
+    const backgroundAlpha = background[3] / 255;
+    const alpha = foregroundAlpha + backgroundAlpha * (1 - foregroundAlpha);
+    if (alpha === 0) return [0, 0, 0, 0];
+    return [
+      (foreground[0] * foregroundAlpha + background[0] * backgroundAlpha * (1 - foregroundAlpha)) / alpha,
+      (foreground[1] * foregroundAlpha + background[1] * backgroundAlpha * (1 - foregroundAlpha)) / alpha,
+      (foreground[2] * foregroundAlpha + background[2] * backgroundAlpha * (1 - foregroundAlpha)) / alpha,
+      alpha * 255,
+    ];
+  }
+
+  function pageIsDark() {
+    const root = document.documentElement;
+    const rootBackground = toRgba(getComputedStyle(root).backgroundColor);
+    const bodyBackground = document.body ? toRgba(getComputedStyle(document.body).backgroundColor) : [0, 0, 0, 0];
+    const [r, g, b, a] = compositeRgba(bodyBackground, rootBackground);
+    if (a > 0) {
+      return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 < 0.5;
+    }
+    const colorScheme = getComputedStyle(root).colorScheme;
+    if (colorScheme.includes("dark") && !colorScheme.includes("light")) return true;
+    if (colorScheme.includes("light") && !colorScheme.includes("dark")) return false;
+    return darkQuery.matches;
+  }
+
+  const diagrams = [...document.querySelectorAll(".mermaid")].map((el) => ({ el, src: el.textContent }));
+  let applied;
+  let rendering = false;
+  let queued = false;
+  function queueRender() {
+    queued = true;
+    if (rendering) return;
+    void render();
+  }
+  async function render() {
+    rendering = true;
+    try {
+      while (queued) {
+        queued = false;
+        const theme = pageIsDark() ? "dark" : "default";
+        if (theme === applied) continue;
+        mermaid.initialize({ startOnLoad: false, theme, securityLevel: "strict" });
+        for (const { el, src } of diagrams) {
+          el.removeAttribute("data-processed");
+          el.textContent = src;
+        }
+        try {
+          await mermaid.run({ nodes: diagrams.map((d) => d.el) });
+        } catch (error) {
+          console.error("Mermaid diagram render failed:", error);
+          return;
+        }
+        applied = theme;
+      }
+    } finally {
+      rendering = false;
+      if (queued) queueRender();
+    }
+  }
+
+  if (document.readyState === "complete") queueRender();
+  else window.addEventListener("load", queueRender, { once: true });
+  const themeObserver = new MutationObserver(queueRender);
+  for (const el of [document.documentElement, document.body]) {
+    if (!el) continue;
+    themeObserver.observe(el, {
+      attributes: true,
+      attributeFilter: ["data-theme", "class", "style"],
+    });
+  }
+  document.addEventListener("change", queueRender, true);
+  document.addEventListener(
+    "transitionend",
+    ({ propertyName }) => {
+      if (propertyName === "background-color") queueRender();
+    },
+    true,
+  );
+  darkQuery.addEventListener("change", queueRender);
+</script>

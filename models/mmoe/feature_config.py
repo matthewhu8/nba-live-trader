@@ -5,7 +5,9 @@ Single source of truth for all feature lists used across dataset, model, and pre
 Total: 58 features = 33 physics + 11 pregame (10 table cols + 1 flag) + 14 market.
 
 The physics block was consolidated from 58 columns to 33. Three structural problems
-drove it, all of which cost the model capacity it does not have at 24K joint rows:
+drove it, all of which cost the model capacity it does not have at 37,180 joint rows
+(15,383 of them in Head B's train split; measured 2026-08-11, see
+docs/DATA_INVENTORY.md):
 
   1. Direction and magnitude were split across separate columns in five places
      (score_diff vs comeback_probability_proxy, current_run_team_encoded vs
@@ -76,7 +78,9 @@ PHYSICS_COLS: list[str] = [
 ]
 
 # --- X_pregame: 11 features (from features.pregame, joined by game_id) ---
-# Coverage: 2025-26 season only (1,065 games). 2024-25 rows filled with 0.
+# Coverage: 1,143 games in features.pregame (measured 2026-08-11). 2024-25 rows and
+# any uncovered 2025-26 game are filled with 0; in the current build 235,837 of
+# 449,274 possession rows (52.5%) have pregame data and 213,437 do not.
 # has_pregame_data=0 signals to the model that pregame features are absent.
 PREGAME_COLS: list[str] = [
     "team_net_rating_delta",     # home net rating minus away (std≈5.2)
@@ -93,7 +97,10 @@ PREGAME_COLS: list[str] = [
 ]
 
 # --- X_market: 14 features (computed from main.kalshi_ticks) ---
-# Coverage: 148 games (Mar 23 – Apr 12, 2026). All other rows filled with 0.
+# Coverage: 232 games (Mar 23 – Jun 13, 2026), 37,180 joint rows = 8.7% of the
+# usable total. Measured 2026-08-11; see docs/DATA_INVENTORY.md. The old note here
+# said "148 games (Mar 23 – Apr 12)" and was ~2 months out of date.
+# All other rows filled with 0.
 # has_market_data=0 signals to the model that market features are absent.
 # These stay unfolded and are compressed by a learned nn.Linear(14, 4) encoder in
 # MMoEModel rather than by hand: unlike the basketball physics, we have no strong

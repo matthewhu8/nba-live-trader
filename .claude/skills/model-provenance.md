@@ -2,8 +2,22 @@
 
 Read this before concluding that a signal "doesn't work." Several heads were trained on far
 less data than the documentation implies, so a null result may be a coverage problem rather
-than a signal problem. All figures measured 2026-08-03 from the saved scalers, checkpoints
-and the warehouse.
+than a signal problem. Unless marked otherwise, figures were measured 2026-08-03 from the
+saved scalers, checkpoints and the warehouse.
+
+🔄 **Re-measured 2026-08-11.** The warehouse grew substantially in eight days. Current
+counts are in `docs/DATA_INVENTORY.md` (`python scripts/measure_data.py` to regenerate).
+The scaler-derived figures below still describe **what the saved checkpoints learned from**
+and are correct as history. They are no longer the size of the available data:
+
+| | this doc (2026-08-03, from scalers) | available now (2026-08-11, measured) |
+|---|---|---|
+| joint games | 148 | **232** |
+| joint rows | 18,764 | **37,180** |
+| Head B train rows | ~19K before mask | **15,383** before mask, from 97 games |
+| tick window ends | 2026-04-12 | **2026-06-13** |
+
+A retrain today therefore has roughly twice the Head B data these numbers were measured on.
 
 ## Head B trained on ~19K rows, not 42K
 
@@ -19,9 +33,11 @@ The scaler is authoritative: **Head B's trading signal learned from under 19,000
 before masking. `trainer.py` masks Head B further to `has_market_data * (|traj| > 0.02)`,
 dropping ~42% more, so the effective sample is ~12K.
 
-Also: if the total joint set is 49,576, then splitting at `HEADB_SPLIT_DATE` (2026-04-07)
-gives **40% train / 60% val**, not the "~80/20" claimed at `dataset.py:50`. Reported Head B
-metrics were measured on a val set *larger* than the train set.
+Also: splitting at `HEADB_SPLIT_DATE` (2026-04-07) does not give the "~80/20" the code
+claimed. **Confirmed by direct measurement on 2026-08-11**: 15,383 train rows (97 games,
+41.4%) against 21,797 val rows (137 games, 58.6%). Reported Head B metrics were measured on
+a val set *larger* than the train set, and the gap has widened as tick recording continued
+through the postseason. The `dataset.py` comment has been corrected.
 
 ## The Core Thesis has never been trainable
 
@@ -67,6 +83,15 @@ reported Head B metric** — 55% of the val rows carried settled 1c/99c prices.
 `yes_bid` std is 35.25 (new) and 35.92 (old), while repaired in-band ticks give 11.63. A std
 of 35 requires heavy mass at both 1c and 99c — the settled-price signature. The new scaler is
 statistically indistinguishable from the old one on every market feature.
+
+⚠️ **The fingerprint argument does not survive re-measurement (2026-08-11) and should not be
+reused until re-derived.** Measured across all 2,281,531 game-mapped ticks, raw `yes_bid` has
+mean 47.4 and **std 28.0**, with only 2.4% of ticks at or below 2c and 1.1% at or above 98c.
+A std near 30 is simply what this market looks like; it does not require settled-price mass.
+The current build's refit gives std 31.1, close to the underlying distribution. The 11.63
+in-band reference appears to have come from a much narrower window than the data now spans.
+This does not clear the pre-repair checkpoints — the `wall_clock_ts` corruption is documented
+independently — but "std ≈ 35 means settled prices" is not a valid test on its own.
 
 ## Checkpoint inventory (origin/main, 2026-08-03)
 
@@ -125,6 +150,14 @@ Relevant to future architecture work: an MMoE over 58 tabular features can survi
 effective Head B rows. A recurrent or sequence model cannot — and with a 55%-corrupt val set
 you could not detect the overfitting. Joint coverage, not model capacity, is the binding
 constraint.
+
+**Amended 2026-08-11.** Head B's train split now holds 15,383 rows before the `|traj| > 0.02`
+mask, so the effective sample is nearer ~9K after masking — but those rows come from only
+**97 games**, and possessions inside a game are strongly autocorrelated. Game count, not row
+count, is the honest denominator for anything Head B learns. The claim that the current MMoE
+"can survive" this has never been tested: **no width or expert-count ablation has been run.**
+Before defending 64-wide experts or three experts, sweep `expert_dim ∈ {16, 32, 64}` against
+`n_experts ∈ {1, 3}` and see whether val metrics move at all.
 
 ## Head B metrics are not comparable across Level 2 (2026-08-10)
 

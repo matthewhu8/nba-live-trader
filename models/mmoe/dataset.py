@@ -1,18 +1,27 @@
 """
 MMoE Unified Dataset Builder.
 
-Loads and prepares the two training datasets:
-  Dataset A (basketball-only): ~390K rows — possession_flat train split
+Loads and prepares the two training datasets.
+
+Counts below were MEASURED by running this module on 2026-08-11, not estimated.
+Regenerate with `python scripts/measure_data.py` plus a `build_dataloaders()` run;
+do not hand-edit them.
+
+  Dataset A (basketball-only): 391,579 rows — possessions in games with no ticks
     Features: X_physics + X_pregame (0-filled for 2024-25). No X_market.
     Targets:  target_run (Head A), hazard_0..9 (Head C). No trajectory targets.
 
-  Dataset B (joint): ~24K rows — possessions with Kalshi tick data
+  Dataset B (joint): 37,180 rows across 232 games — possessions with Kalshi ticks
     Features: X_physics + X_pregame + X_market (58 features: 33 + 11 + 14)
     Targets:  target_run, hazard_0..9, traj_0..9 (all three heads)
 
+Joint rows are 8.7% of the total, so the market block is still the binding
+constraint — but the joint set has grown 55% (24K -> 37K) since the figures the
+architecture was sized against. See docs/DATA_INVENTORY.md.
+
 Train/val splits:
   Basketball: Train = 2024-25 full + 2025-26 Oct-Jan,  Val = 2025-26 Feb-Mar5
-  Head B:     Train = Mar 23 – Apr 6 2026 (~80%),       Val = Apr 7+ 2026 (~20%)
+  Head B:     Train = Mar 24 – Apr 6 2026 (97 games),  Val = Apr 7+ 2026 (137 games)
 
 Usage:
     from models.mmoe.dataset import build_dataloaders
@@ -47,8 +56,19 @@ BBALL_TRAIN_END  = pd.Timestamp("2026-01-31")
 BBALL_VAL_END    = pd.Timestamp("2026-03-05")
 # Test: Mar 6+ — sacred, untouched during training
 
-# Head B (joint market) splits: 80/20 within tick-data window
-HEADB_SPLIT_DATE = pd.Timestamp("2026-04-07")  # ~80/20 within 148-game window
+# Head B (joint market) split within the tick-data window.
+#
+# ⚠️ THIS DATE IS STALE AND THE SPLIT IS NOW INVERTED. It was chosen to give ~80/20
+# when ticks covered 148 games ending 2026-04-12. Tick recording now runs to
+# 2026-06-13, so measured on 2026-08-11 it gives:
+#     train  97 games (Mar 24 – Apr 6)
+#     val   137 games (Apr 7  – Jun 13)   = 41/59, val LARGER than train
+# Head B therefore trains on the minority of its own data, and every late-season
+# and postseason game sits in validation (46 of the val games are in May–June), so
+# the val set is a different regime from the train set on top of being oversized.
+# Re-derive before the next Head B retrain; do not read current Head B metrics as
+# comparable to older ones. See docs/DATA_INVENTORY.md.
+HEADB_SPLIT_DATE = pd.Timestamp("2026-04-07")
 
 # Feed delay: time from IRL game event to when we can act on it.
 # NBA CDN polling:  ~17s CDN delay + ~1.5s avg poll wait = 20s
