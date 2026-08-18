@@ -1,3 +1,8 @@
+---
+name: data-ingestion
+description: Operating the data ingestion pipeline: the live Kalshi tick recorder, nba_api play-by-play pulls, local DuckDB and MotherDuck sync, and the nightly Fly.io job. Use when recording or backfilling market or play-by-play data, syncing the warehouse, or debugging the nightly pipeline.
+---
+
 # Data Ingestion Operations
 
 ## Recorder (Live Price Recording)

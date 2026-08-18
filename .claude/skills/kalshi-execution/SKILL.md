@@ -1,3 +1,8 @@
+---
+name: kalshi-execution
+description: The live and paper trading execution layer: the two-process paper setup, Go trader flags, dashboard and logs, trading.yaml configuration, gate inputs, and credentials. Use when starting a paper or live session, changing order placement or the Kalshi WebSocket feed, or debugging the execution path.
+---
+
 # Live Trading Execution
 
 ## Paper Trading (Two-Process Setup)

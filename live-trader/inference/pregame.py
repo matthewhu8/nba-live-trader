@@ -1,17 +1,10 @@
 """
-PregameLoader — loads static game-level features from MotherDuck at game start.
+Loads static game-level features from MotherDuck once per game, before tip-off:
+the 11 PREGAME_COLS features, plus lineup net ratings, player APM, star tiers,
+back-to-back flags and the season pace baseline.
 
-Runs once per game, before tip-off. Returns a dict of the 11 PREGAME_COLS
-features. These are static for the entire game — never recomputed mid-game.
-
-Also loads:
-    - lineup_ratings: dict[lineup_id → net_rating]  (for all lineups in this game's teams)
-    - player_apm:     dict[player_id → APM]          (for all players on both rosters)
-    - star_players:   dict[player_id → tier]          (Tier 1/2/3, from context_features.py defs)
-    - home_b2b / away_b2b: bool
-    - pace_baseline:  float (season avg pace for this game's teams)
-
-All of this is pre-game knowledge — point-in-time safe, no lookahead.
+All of it is pre-game knowledge, so it is point-in-time safe and never recomputed
+mid-game.
 """
 
 import logging
@@ -45,12 +38,11 @@ async def load_pregame(
     fallback_away_team_id: int = 0,
 ) -> dict[str, Any]:
     """
-    Load all static game context needed by GameState at tip-off.
-    Returns a flat dict with pregame feature floats plus lineup_ratings,
-    player_apm, star_players, home/away team ids, b2b flags, and pace_baseline.
+    Load every piece of static game context GameState needs at tip-off, as one flat
+    dict.
 
-    Gracefully handles missing games (e.g. playoff games not yet in dim_games)
-    by returning zeroed pregame features with has_pregame_data=0.0.
+    A game missing from dim_games, such as a playoff game not yet loaded, returns
+    zeroed pregame features with has_pregame_data=0.0 rather than raising.
     """
     pregame_features: dict[str, float] = {}
     lineup_ratings: dict[str, float] = {}
@@ -72,18 +64,18 @@ async def load_pregame(
             b2b_data         = _load_b2b_and_team_ids(conn, game_id)
         except ValueError as exc:
             logging.warning(
-                "[PREGAME] game=%s not found in dim_games — using fallback defaults: %s",
+                "[PREGAME] game=%s not found in dim_games, using fallback defaults: %s",
                 game_id, exc,
             )
         finally:
             conn.close()
     except Exception as exc:
         logging.warning(
-            "[PREGAME] MotherDuck connection failed — running without pregame data: %s",
+            "[PREGAME] MotherDuck connection failed, running without pregame data: %s",
             exc,
         )
 
-    # Ensure pregame features have all expected keys (zeroed if missing)
+    # Zero-fill any key the query didn't return.
     _pregame_col_names = [
         "team_net_rating_delta", "home_off_rating", "away_off_rating",
         "home_def_rating", "away_def_rating", "roster_rapm_gap",

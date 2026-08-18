@@ -1,3 +1,8 @@
+---
+name: data-integrity
+description: Train/serve parity and whether the values reaching the model match what it trained on. Use when a live signal disagrees with backtest, when trusting any measurement off the scalers, caches or pregame path, or before concluding a feature works. Covers the scale_ vs sqrt(var_) rule, the three disagreeing environments, dead and silently failing features, and the exit-simulator feed delay.
+---
+
 # Data Integrity & Train/Serve Parity
 
 Companion to `feature-engineering.md`. That file covers *how* a feature is computed (one

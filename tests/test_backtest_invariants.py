@@ -7,12 +7,12 @@ covers defect 1 (exit-window lookahead) and defect 2 (take-profit over-crediting
 PR #54 staleness bound that the exit anchor now shares.
 
 These use synthetic ticks so they run in milliseconds. Note the deliberate limitation
-recorded in `.claude/skills/backtesting.md`: the exit-window guard only fires when an exit
+recorded in `.claude/skills/backtesting/SKILL.md`: the exit-window guard only fires when an exit
 actually resolves earlier than `wct + feed_delay_s`, which on any *individual* possession
 may legitimately not happen. A single synthetic row can therefore pass with the bug
 reintroduced. This file asserts the guard's logic directly instead; the real end-to-end
 negative test — the three-line defect reintroduced against game `0042500101`, with a control
-run to prove it is not vacuous — is recorded in `.claude/skills/backtesting.md`.
+run to prove it is not vacuous — is recorded in `.claude/skills/backtesting/SKILL.md`.
 """
 
 import sys
@@ -123,7 +123,7 @@ def test_guard_condition_fires_on_exit_before_anchor():
 def test_do_not_assert_hold_time_exceeds_feed_delay():
     """A 1s hold measured from a correct anchor is legitimate and must not be rejected.
 
-    Documented in skills/backtesting.md: asserting `hold_time_s >= feed_delay_s` would
+    Documented in skills/backtesting/SKILL.md: asserting `hold_time_s >= feed_delay_s` would
     reject valid trades once the anchor is right.
     """
     ticks = _ticks([(21, 46), (60, 50)])

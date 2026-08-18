@@ -1,3 +1,8 @@
+---
+name: feature-engineering
+description: Feature construction and data architecture: the no-lookahead constraint, the one formula/two callers rule in models/features/transforms.py, point-in-time ratings, the feature store schema, and live feature validation. Use when adding or changing a feature, editing the offline builder or live inference feature path, or checking offline/live parity.
+---
+
 # Feature Engineering & Data Architecture
 
 ## Core Constraint (MOST IMPORTANT)

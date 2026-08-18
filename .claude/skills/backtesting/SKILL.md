@@ -1,3 +1,8 @@
+---
+name: backtesting
+description: Backtesting and strategy evaluation for the MMoE trading system. Use when running, modifying, or interpreting a backtest, quoting a P&L or win-rate number, reasoning about maker/taker fees or break-even, or touching entry gates and the train/test split. Carries the current baseline command and results table, the four corrected lookahead/fee defects, and the rule that a result is only valid quoted with its config.
+---
+
 # Backtesting & Strategy Evaluation
 
 ## MMoE Backtest — current baseline

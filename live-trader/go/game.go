@@ -14,8 +14,8 @@ type GameEngine struct {
 	cfg         Config
 	ledger      *Ledger
 	killSwitch  *KillSwitch
-	run         *Run        // process-level run identity (Phase 1+); nil-safe
-	jsonLog     *JSONLogger // shared structured-log writer (Phase 1+); nil-safe
+	run         *Run        // process-level run identity; nil-safe
+	jsonLog     *JSONLogger // shared structured-log writer; nil-safe
 }
 
 func NewGameEngine(
@@ -88,7 +88,7 @@ func (g *GameEngine) Run(ctx context.Context) {
 		}
 	}
 	if startErr != nil {
-		log.Printf("[ERROR] StartGame failed after %d attempts — aborting game %s: %v", startRetries, g.gameID, startErr)
+		log.Printf("[ERROR] StartGame failed after %d attempts, aborting game %s: %v", startRetries, g.gameID, startErr)
 		g.jsonLog.Emit("error", g.gameID, map[string]interface{}{
 			"where":   "start_game",
 			"message": startErr.Error(),
@@ -116,19 +116,13 @@ func (g *GameEngine) Run(ctx context.Context) {
 
 	var initialTicker string
 
-	// activeMarketTicker tracks the currently-subscribed Kalshi market. Stamped
-	// onto every TradePayload so the dashboard can label trades with the team
-	// actually backed, race-free against in-flight scanner swaps. Declared at
-	// the outer scope so the main event loop (below) can read it; only the
-	// has-event-ticker branch actually populates it via the fanout goroutine.
+	// activeMarketTicker is the currently-subscribed Kalshi market. Stamped onto
+	// every TradePayload so trades are labeled with the team actually backed,
+	// race-free against an in-flight scanner swap.
 	var activeMarketTicker atomic.Value
 	activeMarketTicker.Store("")
 
-	// positionOpen lets the market scanner defer swaps while we hold a position.
-	// Exits price off the active market's order book, so swapping mid-position
-	// would compute the exit price from a different strike than the one we
-	// actually hold (2026-05-28 post-mortem latent hazard). The engine sets
-	// this on entry/exit; the scanner reads it before every swap.
+	// positionOpen tells the scanner to defer market swaps while we hold a position.
 	var positionOpen atomic.Bool
 
 	if g.eventTicker != "" {
@@ -143,11 +137,9 @@ func (g *GameEngine) Run(ctx context.Context) {
 
 		go scanner.Run(ctx, initialTicker, marketCh, &positionOpen)
 
-		// Fanout: the scanner emits ticker swaps on marketCh; kalshi_feed needs
-		// them to re-subscribe, and trade reporting needs them so it can tag
-		// each ENTRY/EXIT payload with the market actually subscribed at order
-		// time. A single broadcast goroutine forwards both, with a per-consumer
-		// non-blocking send so a slow reader can't stall the scanner.
+		// Fan the scanner's swaps out to two consumers: the feed re-subscribes,
+		// and activeMarketTicker tags orders with the market live at order time.
+		// Sends are non-blocking so a slow reader can't stall the scanner.
 		kalshiMarketCh := make(chan string, 10)
 		go func() {
 			for {
@@ -173,10 +165,8 @@ func (g *GameEngine) Run(ctx context.Context) {
 			for {
 				select {
 				case tick := <-tickCh:
-					// Only accept ticks from the currently-subscribed market.
-					// After a swap, Kalshi may deliver a few more ticks from
-					// the old market before the unsubscribe is acknowledged —
-					// those would corrupt the ring buffer with stale prices.
+					// After a swap Kalshi may still deliver ticks from the old
+					// market until the unsubscribe lands. Drop those.
 					cur, _ := activeMarketTicker.Load().(string)
 					if tick.MarketTicker == cur || cur == "" {
 						ringBuffer.Update(tick)
@@ -188,7 +178,7 @@ func (g *GameEngine) Run(ctx context.Context) {
 		}()
 		log.Printf("[FEED] Kalshi WebSocket started with initial market %s", initialTicker)
 	} else {
-		log.Printf("[FEED] No event ticker — running without Kalshi data")
+		log.Printf("[FEED] No event ticker, running without Kalshi data")
 	}
 	log.Printf("[FEED] NBA CDN poller started for game %s (3s interval)", g.gameID)
 
@@ -209,9 +199,7 @@ func (g *GameEngine) Run(ctx context.Context) {
 	log.Printf("  %s TRADING ENGINE STARTED FOR %s", mode, g.gameID)
 	log.Println("──────────────────────────────────────────────────────")
 
-	// game_start records the engine going live for this game. Captures the
-	// initial market context and team IDs (which may be 0 if the CDN fetch
-	// failed pre-tip). One record per game per Run.
+	// One game_start per game per Run. Team IDs are 0 if the CDN fetch failed pre-tip.
 	g.jsonLog.Emit("game_start", g.gameID, map[string]interface{}{
 		"event_ticker":          g.eventTicker,
 		"home_team_id":          homeID,
@@ -222,7 +210,7 @@ func (g *GameEngine) Run(ctx context.Context) {
 
 	for {
 		if g.killSwitch.IsSet() {
-			return // Panic shut down
+			return
 		}
 
 		select {
@@ -246,9 +234,8 @@ func (g *GameEngine) Run(ctx context.Context) {
 
 			totalPipelineMS += resp.PipelineMS
 
-			// Compute the aggregated traj once per possession — used for telemetry,
-			// the entry gate (via bandit.Decide), and Kelly sizing. Keeps every
-			// downstream consumer reading the same number for the same possession.
+			// Aggregate the trajectory once per possession so telemetry, the entry
+			// gate and Kelly sizing all read the same number.
 			trajAggregator := g.cfg.Agent.TrajAggregator
 			if trajAggregator == "" {
 				trajAggregator = "final"
@@ -258,10 +245,8 @@ func (g *GameEngine) Run(ctx context.Context) {
 			riskOK := !g.killSwitch.IsSet()
 			logger.EmitPossession(g.gameID, event, resp, riskOK, start)
 
-			// possessionFields is the structured per-possession record.
-			// action_chosen is filled in below — set to BACKFILL for replay
-			// events, otherwise to the bandit's decision once known. Built
-			// once so we emit exactly one possession record per possession.
+			// Built once so exactly one record is emitted per possession.
+			// action_chosen is filled in below.
 			possessionFields := map[string]interface{}{
 				"possession_id":      possCount,
 				"is_backfill":        event.IsBackfill,
@@ -275,8 +260,8 @@ func (g *GameEngine) Run(ctx context.Context) {
 				"yes_ask":            resp.YesAsk,
 				"run_prob":           resp.RunProb,
 				"trajectory":         resp.Trajectory,
-				"traj_final":         resp.Trajectory[9], // raw single horizon — legacy
-				"traj_used":          trajUsed,           // aggregated value driving decisions
+				"traj_final":         resp.Trajectory[9], // raw single horizon
+				"traj_used":          trajUsed,           // aggregated, drives decisions
 				"traj_aggregator":    trajAggregator,
 				"hazard":             resp.Hazard,
 				"hazard5":            resp.Hazard[4],
@@ -302,9 +287,8 @@ func (g *GameEngine) Run(ctx context.Context) {
 			if openPosition != nil {
 				shouldExit, reason, pnl := router.CheckExit(ctx, openPosition, resp, possCount, &g.cfg)
 
-				// For TP_EXIT, the resting maker order filled at RestingTPPrice;
-				// for everything else (SL/TIME/momentum), the close price is the
-				// direction-aware current price the crossing exit will reach.
+				// A TP closes at the resting order's limit price. Every other exit
+				// closes at the current direction-aware price the crossing order reaches.
 				currentPrice := resp.YesBid
 				if openPosition.Direction == "NO" {
 					currentPrice = 100 - resp.YesAsk
@@ -318,28 +302,25 @@ func (g *GameEngine) Run(ctx context.Context) {
 				}
 
 				if shouldExit {
-					// Resting TP fill: position is ALREADY closed on Kalshi — no
-					// further order needed. Just record the trade and free state.
+					// A filled resting TP means Kalshi already closed the position.
+					// Nothing left to send; just record the trade.
 					tpFilled := reason == "TAKE_PROFIT" && openPosition.RestingTPStatus == "executed"
 
 					ok := tpFilled
 					if !tpFilled {
-						// Non-TP exit (SL, TIME, momentum). If a resting TP is still
-						// open, cancel it FIRST so we don't double-close. The cancel
-						// response is authoritative — if Kalshi says the TP just
-						// executed, treat the position as TP-closed and skip the SL.
+						// Cancel any open resting TP before crossing out, so we don't
+						// double-close. The cancel response is authoritative.
 						if openPosition.RestingTPStatus == "open" {
 							status, err := router.CancelRestingTP(ctx, openPosition)
 							if err != nil {
 								zlog.Warn().Err(err).
 									Str("order_id", openPosition.RestingTPOrderID).
-									Msg("resting TP cancel failed — proceeding with crossing exit anyway")
+									Msg("resting TP cancel failed, crossing out anyway")
 							}
 							if status == "executed" {
-								// Cancel-vs-fill race: TP won. Re-route as TP exit.
+								// The TP won the cancel race, so this closed as a maker.
 								reason = "TAKE_PROFIT"
 								closePrice = openPosition.RestingTPPrice
-								// The resting TP filled, so this leg was a maker.
 								pnl = calcNetPnL(openPosition.Size, openPosition.EntryPrice, closePrice, makerFeeRate)
 								tpFilled = true
 								ok = true
@@ -347,10 +328,8 @@ func (g *GameEngine) Run(ctx context.Context) {
 						}
 
 						if !tpFilled {
-							// Crossing exit (taker) — same path as before.
-							// Each failed attempt widens the crossing budget by 1¢ so a
-							// thin/fast book can't trap us in a position — we cross a
-							// little deeper next possession until we're out.
+							// Each failed attempt widens the budget by 1¢, so a thin or
+							// fast book can't trap us: we cross deeper until we are out.
 							budget := g.cfg.Agent.ExitSlippageBudgetCents + openPosition.ExitAttempts
 							ok = router.PlaceExit(ctx, openPosition, currentPrice, budget)
 							if !ok {
@@ -372,21 +351,21 @@ func (g *GameEngine) Run(ctx context.Context) {
 						possHeld := possCount - openPosition.EntryPossID
 						logger.EmitExit(g.gameID, reason, openPosition, closePrice, pnl, possHeld)
 						g.jsonLog.Emit("exit", g.gameID, map[string]interface{}{
-							"possession_id":      possCount,
-							"reason":             reason,
-							"direction":          openPosition.Direction,
-							"entry_price":        openPosition.EntryPrice,
-							"exit_price":         closePrice,
-							"size":               openPosition.Size,
-							"net_pnl_dollars":    pnl,
-							"possessions_held":   possHeld,
-							"run_prob":           resp.RunProb,
-							"traj_final":         resp.Trajectory[9],
-							"traj_used":          trajUsed,
-							"hazard5":            resp.Hazard[4],
-							"resting_tp_order":   openPosition.RestingTPOrderID,
-							"resting_tp_status":  openPosition.RestingTPStatus,
-							"resting_tp_filled":  tpFilled,
+							"possession_id":     possCount,
+							"reason":            reason,
+							"direction":         openPosition.Direction,
+							"entry_price":       openPosition.EntryPrice,
+							"exit_price":        closePrice,
+							"size":              openPosition.Size,
+							"net_pnl_dollars":   pnl,
+							"possessions_held":  possHeld,
+							"run_prob":          resp.RunProb,
+							"traj_final":        resp.Trajectory[9],
+							"traj_used":         trajUsed,
+							"hazard5":           resp.Hazard[4],
+							"resting_tp_order":  openPosition.RestingTPOrderID,
+							"resting_tp_status": openPosition.RestingTPStatus,
+							"resting_tp_filled": tpFilled,
 						})
 						go inference.ReportTrade(g.gameID, TradePayload{
 							Action:       "EXIT",
@@ -404,7 +383,7 @@ func (g *GameEngine) Run(ctx context.Context) {
 							wins++
 						}
 						openPosition = nil
-						positionOpen.Store(false) // let the scanner resume swapping
+						positionOpen.Store(false)
 					}
 				} else {
 					possHeld := possCount - openPosition.EntryPossID
@@ -455,17 +434,16 @@ func (g *GameEngine) Run(ctx context.Context) {
 						pos.PeakPrice = pos.EntryPrice // trailing take-profit baseline
 						g.ledger.RecordFill(g.gameID, pos.Size, pos.EntryPrice)
 						openPosition = pos
-						positionOpen.Store(true) // freeze market swaps while we hold this position
+						positionOpen.Store(true) // freeze market swaps while we hold
 						signalCount++
 						positionsOpened++
 
-						// Immediately place the resting maker TP. Failure is non-fatal
-						// (CheckExit will retry next possession); errors are logged inside.
+						// Rest the maker TP right away. CheckExit retries on failure.
 						if err := router.PlaceRestingTP(ctx, pos, g.cfg.Agent.TakeProfitCents); err != nil {
 							zlog.Warn().Err(err).
 								Str("ticker", entryTicker).
 								Int("tp_price", pos.RestingTPPrice).
-								Msg("initial resting TP placement failed — CheckExit will retry")
+								Msg("initial resting TP placement failed, CheckExit will retry")
 						}
 
 						logger.EmitEntry(g.gameID, pos, resp)
@@ -514,19 +492,16 @@ func (g *GameEngine) Run(ctx context.Context) {
 			if openPosition != nil {
 				positionsClosed++
 				if !g.cfg.Trading.PaperMode {
-					// Best-effort emergency close — use a fresh context since engineCtx is cancelled.
+					// engineCtx is already cancelled, so the emergency close needs its own.
 					exitCtx, exitCancel := context.WithTimeout(context.Background(), 5*time.Second)
 
-					// Cancel the resting maker TP FIRST. Otherwise shutdown leaves an
-					// orphan sell on the book that can later fill into an unmanaged
-					// short with nothing watching it. If the cancel reports the TP
-					// already executed (race), the position is already flat at TP
-					// price — skip the crossing exit so we don't double-close.
+					// Cancel the resting TP first. Leaving it on the book past shutdown
+					// risks a later fill into an unmanaged short with nothing watching it.
 					tpStatus, tpErr := router.CancelRestingTP(exitCtx, openPosition)
 					if tpErr != nil {
 						zlog.Warn().Err(tpErr).
 							Str("order_id", openPosition.RestingTPOrderID).
-							Msg("emergency resting TP cancel failed — placing crossing exit anyway")
+							Msg("emergency resting TP cancel failed, crossing out anyway")
 					}
 
 					if tpStatus == "executed" {
@@ -539,7 +514,7 @@ func (g *GameEngine) Run(ctx context.Context) {
 							"reason":       "tp_filled_during_cancel",
 						})
 					} else {
-						// MarketSnapshot.Features[0]=YesBid, Features[1]=YesAsk (cents as float32).
+						// Features[0] is YesBid and Features[1] is YesAsk, in cents.
 						snap := ringBuffer.Snapshot()
 						yesBid := int(snap.Features[0])
 						yesAsk := int(snap.Features[1])
@@ -550,7 +525,7 @@ func (g *GameEngine) Run(ctx context.Context) {
 								emergencyPrice = 100 - yesBid
 							}
 						}
-						// Shutdown: cross more aggressively to guarantee we're flat.
+						// Cross more aggressively on shutdown to guarantee we end flat.
 						emergencyBudget := g.cfg.Agent.ExitSlippageBudgetCents + 3
 						ok := router.PlaceExit(exitCtx, openPosition, emergencyPrice, emergencyBudget)
 						exitCancel()

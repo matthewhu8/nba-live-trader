@@ -88,9 +88,8 @@ func TestDecideBacktestConfig(t *testing.T) {
 		{"garbage_and_blowout_attributes_to_garbage", resp(withGarbage(), withBlowout()), false, Wait, "is_garbage_time"},
 
 		// ── Overtime skip rule (added 2026-05-18) ────────────────────────
-		// period == 4 OK (regulation); period == 5 OT1, period == 6 OT2 = block.
-		// Model has zero training rows in the OT regime and the market scanner
-		// thrashes in OT — see notes in agent.go.
+		// Regulation is period 4; 5 and up are overtime and must block. The model has
+		// no training rows in the OT regime.
 		{"regulation_q4_not_overtime", resp(withPeriod(4), withRunProb(0.5), withTraj9(0.5), withRunLen(5)), false, BuyYes, ""},
 		{"ot1_blocks_entry", resp(withPeriod(5), withRunProb(0.5), withTraj9(0.5), withRunLen(5)), false, Wait, "is_overtime"},
 		{"ot2_blocks_entry", resp(withPeriod(6), withRunProb(0.5), withTraj9(0.5), withRunLen(5)), false, Wait, "is_overtime"},
@@ -104,7 +103,7 @@ func TestDecideBacktestConfig(t *testing.T) {
 		{"at_upper_band_eligible", resp(withBid(70), withRunProb(0.5), withTraj9(-0.5), withRunLen(5)), false, BuyNo, ""},
 		{"band_takes_precedence_over_strong_signal", resp(withBid(80), withRunProb(0.5), withTraj9(0.5), withRunLen(5)), false, Wait, "in_price_band"},
 
-		// ── Has-position branch — bandit always Waits; Router owns TP/SL/TIME_STOP ──
+		// ── Has-position branch: always Wait, the Router owns exits ──
 		{"position_high_hazard_waits", resp(withHaz4(0.99)), true, Wait, "holding_position"},
 		{"position_mid_hazard_waits", resp(withHaz4(0.851)), true, Wait, "holding_position"},
 		{"position_low_hazard_waits", resp(withHaz4(0.5)), true, Wait, "holding_position"},
@@ -154,8 +153,7 @@ func TestDecideBacktestConfig(t *testing.T) {
 			resp(withBid(43), withRunProb(0.086), withTraj9(-0.082), withHaz4(0.897), withRunLen(3)),
 			false, Wait, "run_prob_pass"},
 
-		// 🟢 The backtest WINNERS from SAS@MIN — all had run_prob ≥ 0.169.
-		// These should now fire correctly under restored config.
+		// Backtest winners from SAS@MIN, all with run_prob >= 0.169.
 		{"backtest_SAS_win_T1_now_fires", resp(withBid(37), withRunProb(0.179), withTraj9(-0.104), withRunLen(3)), false, BuyNo, ""},
 		{"backtest_SAS_win_T2_now_fires", resp(withBid(60), withRunProb(0.188), withTraj9(-0.095), withRunLen(4)), false, BuyNo, ""},
 		{"backtest_SAS_win_T3_now_fires", resp(withBid(39), withRunProb(0.169), withTraj9(-0.093), withRunLen(3)), false, BuyNo, ""},
@@ -180,8 +178,8 @@ func TestDecideBacktestConfig(t *testing.T) {
 	}
 }
 
-// TestGateResultInvariants covers structural properties of GateResult that
-// must hold across any input — independent of the specific trade decision.
+// TestGateResultInvariants covers the properties of GateResult that must hold for
+// any input, whatever the trade decision.
 func TestGateResultInvariants(t *testing.T) {
 	b := newBacktestBandit()
 

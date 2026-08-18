@@ -410,7 +410,7 @@ def _run_game(
         #
         # Filtering again on the stored `is_blowout` / `is_garbage_time` columns would be
         # STRICTER than training, not equivalent to it: those columns are computed with a
-        # 20-pt margin, and per skills/feature-engineering.md they discard 28,627 rows the
+        # 20-pt margin, and per skills/feature-engineering/SKILL.md they discard 28,627 rows the
         # system would really trade. Stacking both gates made the backtest refuse
         # possessions the live agent accepts, which understates the trade population.
 
@@ -521,7 +521,7 @@ def _run_game(
         # anchor IS `wct + feed_delay_s`, so the test reduced to `offset < 0`, duplicating
         # the clause beside it. Measured 2026-08-05: with the original three-line bug
         # restored the backtest ran to completion, 178 trades at 30.9% with a 0.03s minimum
-        # hold, and the guard never fired. `skills/backtesting.md` claimed it was "verified
+        # hold, and the guard never fired. `skills/backtesting/SKILL.md` claimed it was "verified
         # to fire when the bug is reintroduced"; it was not.
         exit_abs_ts = exit_search_start + pd.Timedelta(seconds=sim.exit_time_offset_s)
 

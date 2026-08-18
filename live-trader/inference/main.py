@@ -1,16 +1,16 @@
 """
-Inference service — FastAPI application.
+FastAPI inference service.
 
-Receives raw NBA CDN events from the Go ingestion engine, runs them through
-the possession parser + feature computer + MMoE model, and returns structured
-inference results. The Go agent makes the final BUY/SELL decision.
+Takes raw NBA CDN events from the Go engine, runs them through the possession
+parser, feature computer and MMoE model, and returns the results. The Go agent
+makes the final buy and sell decisions.
 
 Routes:
-    POST /game/{game_id}/start       — init GameState with pregame data
-    POST /game/{game_id}/possession  — process event → inference → response
-    POST /game/{game_id}/end         — cleanup + log game summary
-    GET  /game/{game_id}/state       — debug snapshot
-    GET  /health                     — liveness check
+    POST /game/{game_id}/start       init GameState with pregame data
+    POST /game/{game_id}/possession  event to inference to response
+    POST /game/{game_id}/end         cleanup and log the game summary
+    GET  /game/{game_id}/state       debug snapshot
+    GET  /health                     liveness check
 """
 
 import asyncio
@@ -41,29 +41,17 @@ logging.basicConfig(
 _predictor: Optional[MMoEPredictor] = None
 _games: dict[str, GameState] = {}
 
-# Service-level metadata captured at lifespan startup. Re-emitted as a
-# service_info record into each new run's inference.jsonl so every run's
-# log file is self-contained for post-mortems.
+# Re-emitted into each run's inference.jsonl so every log file is self-contained.
 _service_started_at: Optional[str] = None
 _service_info_emitted_for_runs: set[str] = set()
 
-# ── Phase 6: feature z-score stats ──────────────────────────────────────────
-#
-# A small subset of decision-relevant features get z-scores attached to every
-# possession JSONL record. Z-scores tell you at a glance whether a feature
-# value is unusual relative to the training distribution:
-#   |z| < 1   normal     |z| ≥ 2   unusual
-#   1 ≤ |z| < 2  notable  |z| ≥ 3   extreme
-#
-# Population: the StandardScaler from training already holds per-feature
-# mean+std. We just slice out the columns we care about at startup, no
-# separate stats file needed.
-
-# NBA regulation is 4 periods; anything beyond is overtime. The Go agent hard-skips
-# OT (scanner thrash and a 50c scanner-vs-WebSocket disagreement observed 2026-05-13),
-# and training now excludes OT rows entirely, so the model is never fit on the regime.
+# NBA regulation is 4 periods; anything beyond is overtime, which the Go agent
+# skips and training excludes.
 OVERTIME_FIRST_PERIOD = 5
 
+# These features get a z-score attached to every possession record, so a reader can
+# see at a glance whether a value is unusual against the training distribution. The
+# means and standard deviations come from the training StandardScaler.
 _ZSCORE_FEATURES: list[str] = [
     "score_diff",
     "lead_z",
@@ -77,21 +65,18 @@ _ZSCORE_FEATURES: list[str] = [
     "garbage_time_risk",
 ]
 
-# {feature_name: (mean, std)} — populated when the predictor loads.
-# Empty if the predictor failed to load.
+# {feature_name: (mean, std)}, populated when the predictor loads.
 _zscore_stats: dict[str, tuple[float, float]] = {}
 
-# Reload bookkeeping. The model path is config-driven (forwarded by Go from
-# trading.yaml on /game/start). We track which paths are currently loaded so a
-# /start only triggers a reload when they actually change, and serialise reloads
-# with a lock so concurrent game starts can't load the model twice at once.
+# Model paths come from trading.yaml via Go. Tracking what is currently loaded lets
+# /start reload only on a real change, and the lock keeps concurrent game starts
+# from loading the model twice.
 _loaded_model_path: Optional[str] = None
 _loaded_scaler_path: Optional[str] = None
 _predictor_lock = asyncio.Lock()
 
-# Dashboard gate thresholds, forwarded by Go on /game/start so the dashboard
-# green-light mirrors the live agent instead of stale hardcoded literals.
-# Defaults match the historical dashboard.py values until a /start updates them.
+# Gate thresholds forwarded by Go, so the dashboard mirrors the live agent rather
+# than hardcoded literals.
 _dashboard_gates: dict[str, float] = {
     "min_abs_traj":   0.08,
     "min_yes_bid":    30,
@@ -114,9 +99,9 @@ def compute_gate_flags(
     garbage_time_period: int,
     garbage_time_clock_secs: int,
 ) -> tuple[bool, bool]:
-    """Agent GATE flags from config thresholds. Returns (is_garbage_time, is_blowout).
+    """Return (is_garbage_time, is_blowout) from the config thresholds.
 
-    Deliberately independent of the frozen `garbage_time_risk` model feature so
+    Deliberately separate from the frozen `garbage_time_risk` model feature, so
     tuning the trade gate in trading.yaml never shifts a model input.
     """
     is_blowout = abs(score_diff) > blowout_margin_pts
@@ -142,29 +127,27 @@ def _needs_reload(model_path: Optional[str], scaler_path: Optional[str]) -> bool
 
 
 def _build_zscore_stats(predictor: MMoEPredictor) -> dict[str, tuple[float, float]]:
-    """Slice the ~10 decision-relevant features out of the scaler's per-feature
-    mean/std. Skips features missing from the scaler or with std≈0 (which would
-    divide by zero)."""
+    """Pull the tracked features out of the scaler's per-feature mean and std,
+    skipping any that are missing or have a near-zero std."""
     stats: dict[str, tuple[float, float]] = {}
     all_stats = predictor.get_feature_stats()
     for name in _ZSCORE_FEATURES:
         if name not in all_stats:
-            logging.warning("[MODEL] z-score feature %s not in scaler — skipped", name)
+            logging.warning("[MODEL] z-score feature %s not in scaler, skipped", name)
             continue
         mean, std = all_stats[name]
         if std < 1e-10:
-            logging.warning("[MODEL] z-score feature %s has std≈0 — skipped", name)
+            logging.warning("[MODEL] z-score feature %s has near-zero std, skipped", name)
             continue
         stats[name] = (mean, std)
     return stats
 
 
 def _load_predictor(model_path: Optional[str] = None, scaler_path: Optional[str] = None) -> bool:
-    """Load (or reload) the MMoE predictor and rebuild z-score stats.
+    """Load or reload the MMoE predictor and rebuild the z-score stats.
 
-    Paths default to the packaged model when None. Updates the module globals
-    on success and returns True; on a missing artifact, logs and returns False
-    (the service keeps running without inference, matching prior behavior).
+    Paths default to the packaged model. Returns False on a missing artifact; the
+    service then keeps running without inference.
     """
     global _predictor, _zscore_stats, _loaded_model_path, _loaded_scaler_path
     mp = _resolve_path(model_path) if model_path else MODEL_PATH
@@ -172,7 +155,7 @@ def _load_predictor(model_path: Optional[str] = None, scaler_path: Optional[str]
     try:
         predictor = MMoEPredictor.load(mp, sp)
     except FileNotFoundError as exc:
-        logging.warning("[MODEL] artifact not found — running without inference: %s", exc)
+        logging.warning("[MODEL] artifact not found, running without inference: %s", exc)
         return False
     _predictor = predictor
     _zscore_stats = _build_zscore_stats(predictor)
@@ -186,10 +169,9 @@ def _load_predictor(model_path: Optional[str] = None, scaler_path: Optional[str]
 async def lifespan(app: FastAPI):
     global _service_started_at
     _service_started_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-    _load_predictor()  # eager default load — Go can later swap via /game/start
+    _load_predictor()  # Go can swap this later via /game/start
     yield
-    # Shutdown: close any active JSONL logger so buffered writes flush.
-    jsonlog.shutdown()
+    jsonlog.shutdown()  # flush buffered JSONL writes
 
 
 app = FastAPI(lifespan=lifespan)
@@ -202,13 +184,11 @@ class GameStartRequest(BaseModel):
     market_ticker: str
     home_team_id:  int
     away_team_id:  int
-    # Optional during transition: a Go binary that doesn't yet send these
-    # still works — Python falls back to no JSONL logging on this run.
+    # Without run_id and log_dir this run simply gets no JSONL logging.
     run_id:        Optional[str] = None
     log_dir:       Optional[str] = None
-    # Config forwarded from trading.yaml. Model paths trigger a reload only on
-    # change; the gate thresholds feed the dashboard so it tracks the live agent.
-    # All optional — an older Go binary keeps the loaded model + default gates.
+    # Forwarded from trading.yaml. Omitting these keeps the loaded model and the
+    # default gates.
     model_path:    Optional[str] = None
     scaler_path:   Optional[str] = None
     min_abs_traj:   Optional[float] = None
@@ -221,17 +201,15 @@ class PossessionRequest(BaseModel):
     raw_event:       dict
     kalshi_snapshot: list[float]  # 14 floats in MARKET_COLS order
     wall_clock_ts:   str          # ISO-8601
-    # Garbage-time / blowout GATE thresholds forwarded from trading.yaml. These
-    # drive the is_garbage_time / is_blowout flags the agent uses to skip trading
-    # — DISTINCT from the frozen `garbage_time_risk` model feature. Defaults match
-    # the historical hardcoded values so an older Go binary is unaffected.
+    # Thresholds behind the is_garbage_time and is_blowout flags the agent skips on.
+    # Distinct from the frozen `garbage_time_risk` model feature.
     blowout_margin_pts:      int = 30
     garbage_time_period:     int = 4
     garbage_time_clock_secs: int = 360
 
 
 class PossessionResponse(BaseModel):
-    action:          str          # always "WAIT" — Go agent makes final BUY/SELL decision
+    action:          str          # always "WAIT"; the Go agent decides
     run_prob:        float
     trajectory:      list[float]  # 10 log-odds delta checkpoints from Head B
     hazard:          list[float]  # 10 survival hazard values from Head C
@@ -239,11 +217,11 @@ class PossessionResponse(BaseModel):
     yes_ask:         int          # from kalshi_snapshot[1] (cents)
     is_garbage_time: bool
     is_blowout:      bool
-    # Agent gate inputs. First-class fields, not entries in `features`, because the
-    # Go agent gates on them and must not be coupled to the model's feature set.
+    # Gate inputs are first-class fields rather than entries in `features`, so the
+    # agent never depends on the model's feature set.
     is_overtime:        bool  = False
     current_run_length: float = 0.0
-    # Model inputs — consumed by the Go side for logging only.
+    # Model inputs. Go uses these for logging only.
     features:        dict[str, float]
     pipeline_ms:     int
 
@@ -252,24 +230,20 @@ class PossessionResponse(BaseModel):
 
 @app.post("/game/{game_id}/start")
 async def game_start(game_id: str, request: GameStartRequest):
-    # Activate the run-scoped JSONLogger if Go provided run_id + log_dir.
-    # First /start for a given run_id also emits service_info so the run's
-    # inference.jsonl is self-describing.
+    # Activate the run-scoped logger when Go supplied a run to log into.
     if request.run_id and request.log_dir:
         jsonlog.set_run(request.run_id, request.log_dir)
         _maybe_emit_service_info(request.run_id)
 
-    # Config-driven model swap: reload only if Go forwarded paths that differ
-    # from what's loaded. Serialised so concurrent game starts can't double-load.
+    # Reload only when the forwarded paths differ from what is loaded.
     if (request.model_path or request.scaler_path) and _needs_reload(request.model_path, request.scaler_path):
         async with _predictor_lock:
-            # Re-check under the lock — another /start may have just loaded it.
+            # Re-check under the lock; another /start may have just loaded it.
             if _needs_reload(request.model_path, request.scaler_path):
                 want_model, want_scaler = _requested_paths(request.model_path, request.scaler_path)
                 logging.info("[MODEL] reload requested via /start: %s / %s", want_model, want_scaler)
                 _load_predictor(request.model_path, request.scaler_path)
 
-    # Cache dashboard gate thresholds so the SSE feed mirrors the live agent.
     if request.min_abs_traj is not None:
         _dashboard_gates["min_abs_traj"] = request.min_abs_traj
     if request.min_yes_bid is not None:
@@ -292,7 +266,7 @@ async def game_start(game_id: str, request: GameStartRequest):
         away_team_id  = pregame["away_team_id"],
     )
 
-    # 11 pregame feature floats — static for the entire game
+    # The 11 pregame floats, static for the whole game.
     pregame_float_keys = {
         "team_net_rating_delta", "home_off_rating", "away_off_rating",
         "home_def_rating", "away_def_rating", "roster_rapm_gap",
@@ -350,13 +324,12 @@ async def game_possession(game_id: str, request: PossessionRequest):
 
     row = PossessionBuilder.parse(request.raw_event, state)
 
+    # A None row means the event did not end a possession, e.g. an offensive
+    # rebound or a non-final free throw. Recording those lets us diff the live
+    # parser against the historical one for boundary divergences.
     if row is None:
         state.update_from_event(request.raw_event)
         pipeline_ms = int((time.time() - t0) * 1000)
-        # parser_skip records events the possession parser deemed mid-
-        # possession (e.g. offensive rebound, mid-possession foul, non-final
-        # free throw). Useful for diffing the live parser against the
-        # historical nba_api parser to spot boundary divergences.
         if jl is not None:
             jl.emit(
                 "parser_skip",
@@ -381,15 +354,12 @@ async def game_possession(game_id: str, request: PossessionRequest):
             pipeline_ms     = pipeline_ms,
         )
 
-    # Build features BEFORE advancing state — preserves shift(1) invariant
+    # Build features before advancing state, which preserves the shift(1) invariant.
     features = FeatureComputer.compute(row, state, request.kalshi_snapshot)
 
-    # Agent gate inputs, captured in the same pre-advance window as the features so
-    # the gate sees exactly the state the model saw. These are NOT model inputs and
-    # deliberately do not live in `features`: the Go agent used to read `period` and
-    # `current_run_length` out of that dict, so consolidating the feature set
-    # silently disabled the overtime skip and blocked every entry. Anything the
-    # agent gates on belongs here, where a feature change cannot reach it.
+    # Capture the gate inputs in the same pre-advance window, so the gate sees the
+    # state the model saw. They stay out of `features` on purpose: anything the agent
+    # gates on must be immune to a change in the model's feature set.
     gate_is_overtime = row.period >= OVERTIME_FIRST_PERIOD
     gate_run_length  = float(state.run_length)
 
@@ -399,7 +369,6 @@ async def game_possession(game_id: str, request: PossessionRequest):
         from models.mmoe.predictor import MMoEOutput
         output = MMoEOutput(run_prob=0.0, trajectory=[0.0] * 10, hazard=[0.0] * 10)
 
-    # Advance rolling state AFTER feature extraction
     state.advance(row)
 
     wall_clock = datetime.fromisoformat(request.wall_clock_ts)
@@ -418,9 +387,6 @@ async def game_possession(game_id: str, request: PossessionRequest):
         yes_ask       = yes_ask,
     ))
 
-    # Agent GATE flags — driven by the config thresholds Go forwarded, NOT by the
-    # frozen `garbage_time_risk` model feature (which stays at training values in
-    # features.py). Tuning trading.yaml moves this gate without touching the model input.
     is_garbage_time, is_blowout = compute_gate_flags(
         score_diff              = features.get("score_diff", 0.0),
         period                  = row.period,
@@ -459,12 +425,9 @@ async def game_possession(game_id: str, request: PossessionRequest):
     )
 
     if jl is not None:
-        # The "model" sub-block carries the deepest interpretability data:
-        # gated outputs, gating weights (which experts each head trusted),
-        # and per-expert opinions (what each head would predict if it
-        # trusted only one expert). Together these answer "what is the
-        # model thinking" — disagreement among experts means a borderline
-        # call; consensus means the model is confident.
+        # The model block records the gating weights (which experts each head
+        # trusted) and the per-expert opinions (what each head would say on one
+        # expert alone). Disagreement among experts marks a borderline call.
         model_block = {
             "gated": {
                 "run_prob":   output.run_prob,
@@ -503,7 +466,6 @@ async def game_possession(game_id: str, request: PossessionRequest):
             features_zscored = _compute_zscores(features),
         )
 
-    # Broadcast to live dashboard SSE subscribers
     broadcast_prediction(game_id, {
         "possession_id": row.possession_id,
         "run_prob":      output.run_prob,
@@ -519,7 +481,6 @@ async def game_possession(game_id: str, request: PossessionRequest):
         "period":        row.period,
         "features":      features,
         "market_ticker": state.market_ticker,
-        # Live agent gate thresholds so the dashboard green-light matches reality.
         "gates":         dict(_dashboard_gates),
     })
 
@@ -593,14 +554,9 @@ async def health():
 
 def _compute_zscores(features: dict[str, float]) -> dict[str, dict[str, float]]:
     """
-    Compute z-scores for the configured feature subset. Returns a dict of
-    {feature_name: {"value": v, "z": z}} for features that have stats. Each
-    entry is self-contained so a JSONL consumer doesn't have to cross-
-    reference the raw `features` block to interpret a z-score.
-
-    Features missing from the input default to 0.0 (matching the predictor's
-    own missing-feature behavior). Empty dict if z-score stats failed to
-    load (e.g. predictor unavailable).
+    Return {feature_name: {"value": v, "z": z}} for the tracked features. Each entry
+    carries its own value so a log reader never has to cross-reference the raw
+    feature block. Missing features default to 0.0, matching the predictor.
     """
     if not _zscore_stats:
         return {}
@@ -613,11 +569,7 @@ def _compute_zscores(features: dict[str, float]) -> dict[str, dict[str, float]]:
 
 
 def _maybe_emit_service_info(run_id: str) -> None:
-    """
-    Emit service_info exactly once per run_id, the first time we see that run.
-    Captures service-level metadata (startup time, model paths, Python version)
-    so each run's inference.jsonl is self-describing for post-mortems.
-    """
+    """Emit service_info once per run, so each run's inference.jsonl is self-describing."""
     if run_id in _service_info_emitted_for_runs:
         return
     _service_info_emitted_for_runs.add(run_id)

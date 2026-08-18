@@ -8,8 +8,8 @@ import (
 	"strings"
 )
 
-// LoadEnv simply reads a .env file and sets the variables in the current process.
-// We do this manually to avoid adding external dependencies like godotenv.
+// LoadEnv reads a .env file into the process environment. Done by hand to avoid a
+// dependency on godotenv.
 func LoadEnv(path string) error {
 	file, err := os.Open(path)
 	if err != nil {
@@ -20,12 +20,10 @@ func LoadEnv(path string) error {
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		// Skip comments and empty lines
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 
-		// Split on the first '='
 		parts := strings.SplitN(line, "=", 2)
 		if len(parts) != 2 {
 			continue
@@ -33,8 +31,6 @@ func LoadEnv(path string) error {
 
 		key := strings.TrimSpace(parts[0])
 		val := strings.TrimSpace(parts[1])
-
-		// Remove quotes if present
 		val = strings.Trim(val, `"'`)
 
 		if err := os.Setenv(key, val); err != nil {

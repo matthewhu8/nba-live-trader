@@ -125,7 +125,7 @@ Training continues past this ERROR rather than failing.
 
 ### 3.4 The "std 35 = settled prices" fingerprint needs re-deriving
 
-`skills/model-provenance.md` argues that a market-scaler `yes_bid` std near 35 is the signature of settled 1c/99c prices, citing 11.63 as the in-band reference.
+`skills/model-provenance/SKILL.md` argues that a market-scaler `yes_bid` std near 35 is the signature of settled 1c/99c prices, citing 11.63 as the in-band reference.
 Measured on the full current tick set, raw `yes_bid` has mean 47.4 and **std 28.0**, with only 2.4% of ticks at or below 2c and 1.1% at or above 98c.
 The current refit gives std 31.1, which is close to the underlying distribution rather than far above it.
 The 11.63 reference appears to have come from a much narrower window than the data now spans.

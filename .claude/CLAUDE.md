@@ -42,7 +42,7 @@ Implemented once per language: `mmoe_backtest.py::_fee_one_leg` and
 
 Entry is always maker. Exits pay maker only on `take_profit` (PR #50 rests the TP limit);
 `stop_loss`, `momentum_flip`, `garbage_time` and `time_gate` cross the book and pay taker.
-**Break-even at TP=5/SL=3 is 55.7%** (win +$4.12, loss −$5.19). See `skills/backtesting.md`.
+**Break-even at TP=5/SL=3 is 55.7%** (win +$4.12, loss −$5.19). See `skills/backtesting/SKILL.md`.
 
 All prices in cents (1–99), never floats. YES @ 60¢ = 60% implied probability.
 **P&L is reported in DOLLARS.** A price delta in cents × contracts is cents —
@@ -61,17 +61,17 @@ divide by 100. A 100-contract position cannot swing more than $100 total.
 > checkpoint. Head C was never affected (its hazards come from `kalshi_targets.py`, not the
 > exit simulator; the old "Head B/C" wording here was wrong). Head B's loss mask is a
 > threshold on the labels, so pre/post `loss_b` is **not comparable** — score the old
-> checkpoint on the new labels instead. See `skills/data-integrity.md`.
+> checkpoint on the new labels instead. See `skills/data-integrity/SKILL.md`.
 >
 > ⚠️ **Baseline: 181 trades / 25.4% / −$346.92** (2026-08-10, possession-event feed delay).
 > `+$37,409`, `+$16,100`, `−$136.42` and now **−$324.35** are all superseded — **do not quote
 > them.** −$324.35 was the same code minus the possession delay; the CI [−$2.40, −$1.17] was
 > computed on it and has not been recomputed.
 > **Always quote the config with the number**; a wrong command sat beside `−$136.42` for two
-> days. Command, provenance and the four defects: `skills/backtesting.md`.
+> days. Command, provenance and the four defects: `skills/backtesting/SKILL.md`.
 >
 > ⚠️ Head B's `62.5%` and every checkpoint predate the `wall_clock_ts` repair; 55% of Head B's
-> val rows carried settled prices. See `skills/model-provenance.md`.
+> val rows carried settled prices. See `skills/model-provenance/SKILL.md`.
 >
 > ⚠️ `min_abs_traj_entry: 0.12` in `trading.yaml` was tuned on inflated figures — no validated
 > basis in either direction. Re-derive before the next live session.

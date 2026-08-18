@@ -1,27 +1,18 @@
 """
-PossessionBuilder — converts raw NBA CDN events into PossessionRow structs.
+PossessionBuilder turns raw NBA CDN events into PossessionRow structs. It is the
+streaming counterpart of nba_api_client.parse_game_to_events() and must produce the
+same possession boundaries as the training pipeline.
 
-This is the streaming state machine equivalent of nba_api_client.parse_game_to_events().
-It MUST produce the same possession boundaries as the training data pipeline.
+A possession ends on a made field goal, a turnover, a defensive rebound, or the last
+free throw of a sequence. It continues through offensive rebounds, mid-possession
+fouls and non-final free throws.
 
-Possession boundaries (matching nba_api_client.py exactly):
-  Ends on:  made field goal, turnover, defensive rebound, last free throw in sequence
-  Continues: offensive rebound, mid-possession foul, non-final free throws
+The CDN action types differ from nba_api's: "2pt" and "3pt" carry a shotResult of
+"Made" or "Missed", "rebound" carries a subType of "offensive" or "defensive", and
+"violation" covers goaltending along with kicked balls and lane violations.
 
-CDN action types (different from nba_api):
-  "2pt" / "3pt"      — field goal attempt (shotResult: "Made" | "Missed")
-  "freethrow"        — free throw (shotResult: "Made" | "Missed")
-  "rebound"          — rebound (subType: "offensive" | "defensive")
-  "turnover"         — turnover
-  "substitution"     — substitution (subType: "in" | "out")
-  "foul"             — foul (subType: "personal", "shooting", "technical", etc.)
-  "timeout"          — timeout
-  "period"           — period start/end
-  "jumpball"         — jump ball (determines first possession)
-  "violation"        — goaltending or other violation
-
-Validation: replay historical games through this builder and diff output vs
-possession_flat in MotherDuck before going live.
+To validate a change here, replay historical games through the builder and diff the
+output against possession_flat in MotherDuck.
 """
 
 import hashlib
@@ -33,7 +24,7 @@ if TYPE_CHECKING:
     from inference.game_state import GameState
 
 
-# Expected PPP constants — must match momentum_features._XPPP exactly
+# Must match momentum_features._XPPP exactly.
 _XPPP_FREE_THROW = 0.75
 _XPPP_3PT        = 1.05
 _XPPP_PAINT      = 1.20   # shot_distance < 8 ft
@@ -42,10 +33,8 @@ _XPPP_MIDRANGE   = 0.80
 
 @dataclass
 class PossessionRow:
-    """
-    One completed possession — the unit of feature computation.
-    Field names match possession_flat schema from MotherDuck.
-    """
+    """One completed possession, the unit of feature computation. Field names match
+    the possession_flat schema in MotherDuck."""
     possession_id:     int
     period:            int
     game_clock_secs:   float
@@ -72,13 +61,12 @@ class PossessionBuilder:
     @staticmethod
     def parse(raw_event: dict, state: "GameState") -> Optional[PossessionRow]:
         """
-        Process a single raw NBA CDN event.
-        Mutates state's possession SM fields (possessing_team, missed_shot_team, ft_*).
-        Returns a completed PossessionRow when a possession boundary is crossed,
-        or None if the event does not end a possession.
+        Process one raw CDN event, mutating the possession machine fields on state.
+        Returns a PossessionRow when the event crosses a possession boundary, None
+        otherwise.
 
-        Feature-relevant state (run state, foul counts, scored buffers) is
-        updated by state.advance() AFTER this returns a non-None row.
+        Feature state is left alone here; state.advance() updates it after this
+        returns a row.
         """
         action_type = raw_event.get("actionType", "")
 
@@ -97,7 +85,7 @@ class PossessionBuilder:
         if action_type == "violation":
             return _handle_violation(raw_event, state)
 
-        # substitution, foul, timeout — handled by state.update_from_event()
+        # Substitutions, fouls and timeouts go through state.update_from_event().
         return None
 
 
@@ -113,7 +101,7 @@ def _handle_period(event: dict, state: "GameState") -> Optional[PossessionRow]:
     is_start = not is_end and ("start" in sub_type or "start" in desc)
 
     if is_end:
-        # Flush any pending missed shot (the period ended with a miss + no rebound)
+        # The period ended on a miss with no rebound, so flush the pending shot.
         if state.missed_shot_team:
             shot_dist = state.missed_shot_dist
             shot_area = state.missed_shot_area
@@ -172,7 +160,7 @@ def _handle_field_goal(event: dict, state: "GameState") -> Optional[PossessionRo
         state._reset_poss_flags()
         return row
     else:
-        # Missed — preserve shot geometry for when the rebound ends the possession
+        # Keep the shot geometry for whenever the rebound ends the possession.
         state.missed_shot_team = team_side
         state.missed_shot_dist = shot_dist
         state.missed_shot_area = shot_area
@@ -214,7 +202,7 @@ def _handle_free_throw(event: dict, state: "GameState") -> Optional[PossessionRo
     if ft_n < ft_m:
         return None
 
-    # Last FT — possession ends
+    # Last free throw of the sequence, so the possession ends here.
     state.ft_in_seq        = False
     state.missed_shot_team = ""
     _update_pending_score(event, state)
@@ -243,9 +231,7 @@ def _handle_rebound(event: dict, state: "GameState") -> Optional[PossessionRow]:
     clock     = _parse_clock(event.get("clock", ""))
     period    = event.get("period", state.current_period)
 
-    # Determine offensive vs defensive.
-    # CDN: subType = "offensive" or "defensive"
-    # Fallback: compare reb_side with missed_shot_team
+    # Prefer the CDN subType, falling back to comparing sides with missed_shot_team.
     if sub_type == "offensive":
         is_offensive = True
     elif sub_type == "defensive":
@@ -257,9 +243,8 @@ def _handle_rebound(event: dict, state: "GameState") -> Optional[PossessionRow]:
         state.missed_shot_team = ""
         return None
 
-    # Defensive rebound — end the missed team's possession as a stop.
-    # Carry the shot geometry (distance, area, value) so the model knows
-    # what kind of shot was attempted even though it didn't score.
+    # A defensive rebound ends the shooting team's possession as a stop. Carry the
+    # shot geometry so the model still sees what kind of shot was attempted.
     shot_dist = state.missed_shot_dist
     shot_area = state.missed_shot_area
     shot_val  = state.missed_shot_val
@@ -298,7 +283,7 @@ def _handle_violation(event: dict, state: "GameState") -> Optional[PossessionRow
     _update_pending_score(event, state)
 
     if "goaltending" in sub_type:
-        # Basket counts: the offensive team scores 2 points
+        # The basket counts, so the offensive team scores 2.
         offense_side = state.missed_shot_team or state.possessing_team
         state.missed_shot_team = ""
         row = _build_row(state, clock, period,
@@ -308,7 +293,7 @@ def _handle_violation(event: dict, state: "GameState") -> Optional[PossessionRow
         state._reset_poss_flags()
         return row
 
-    # Kicked ball, lane violation, etc. → treat as turnover
+    # Kicked ball, lane violation and the like count as turnovers.
     return _handle_turnover(event, state)
 
 
@@ -382,16 +367,13 @@ def _flip(team_side: str) -> str:
 
 
 def _lineup_id(player_ids: list[int]) -> str:
-    """
-    MD5 hash of sorted player IDs.
-    Uses comma separator to match nba_api_client._lineup_id exactly.
-    """
+    """MD5 of the sorted player IDs, comma-separated to match nba_api_client."""
     key = ",".join(str(p) for p in sorted(player_ids))
     return hashlib.md5(key.encode()).hexdigest()[:12]
 
 
 def _shot_xppp(shot_val: int, shot_dist: float) -> float:
-    """Expected PPP — matches momentum_features._shot_xppp exactly."""
+    """Expected PPP. Matches momentum_features._shot_xppp exactly."""
     if shot_val == 1:
         return _XPPP_FREE_THROW
     if shot_val == 3:

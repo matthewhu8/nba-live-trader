@@ -1,3 +1,8 @@
+---
+name: model-provenance
+description: What each MMoE head actually trained on, and which reported metrics are still valid. Read before concluding a signal does not work, before quoting a head metric or checkpoint number, and before acting on an older audit. Covers per-head data coverage, the checkpoint inventory, the invalidated June 2026 audit, statistical power limits, and why Head B numbers are not comparable across the 2026-08-10 label repair.
+---
+
 # Model Provenance — What Each Head Actually Learned From
 
 Read this before concluding that a signal "doesn't work." Several heads were trained on far
