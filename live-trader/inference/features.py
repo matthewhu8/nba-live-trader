@@ -1,23 +1,17 @@
 """
-FeatureComputer - assembles the full 58-feature X vector for MMoE inference.
+FeatureComputer assembles the 58-feature vector for MMoE inference from a completed
+PossessionRow, the current GameState and the Kalshi market snapshot. Keys align to
+models/mmoe/feature_config.ALL_FEATURE_COLS.
 
-This is where X vector computation happens in the live system.
-Takes a completed PossessionRow + current GameState + Kalshi market snapshot
-and returns a feature dict aligned to models/mmoe/feature_config.ALL_FEATURE_COLS.
+    33 physics  computed here from the possession and GameState's rolling caches
+    11 pregame  loaded once at game start into GameState.pregame
+    14 market   computed by Go's ring buffer and passed in as kalshi_snapshot
 
-Feature groups:
-    33 physics  - computed here from PossessionRow + GameState rolling caches, via transforms.py
-    11 pregame  — loaded once at game start, stored in GameState.pregame (static)
-    14 market   — pre-computed by Go's KalshiRingBuffer, passed in as kalshi_snapshot
+Every feature is read from GameState before advance() runs, matching the shift(1)
+pattern in training: possession N sees only state from before possession N.
 
-Critical invariant: all features are extracted from GameState BEFORE advance() is called.
-This matches the shift(1) pattern in training — possession N sees state before possession N.
-
-Streaming reimplementation of:
-    models/features/momentum_features.py  → _compute_momentum()
-    models/features/context_features.py   → _compute_context()
-    models/features/lineup_features.py    → _compute_lineup()
-    models/mmoe/dataset.py _add_derived_features() → _compute_derived()
+This is the streaming reimplementation of the offline builders in
+models/features/{momentum,context,lineup}_features.py.
 """
 
 from typing import TYPE_CHECKING
@@ -25,11 +19,9 @@ from typing import TYPE_CHECKING
 from models.features import transforms as T
 from models.mmoe.feature_config import ALL_FEATURE_COLS, MARKET_COLS
 
-# Every formula below comes from models/features/transforms.py, which the offline
-# builder also calls. Do NOT reintroduce a local constant or a local formula here:
-# four silent train/live divergences were caused by exactly that, including a
-# `garbage_time_risk` that this file computed as a hard binary while training used
-# a continuous sigmoid, and a `_TRAIN_BLOWOUT_MARGIN_PTS = 30` that trained at 15.
+# Every formula here comes from models/features/transforms.py, which the offline
+# builder also calls. Never reintroduce a local constant or formula: a live copy that
+# drifts from the trained one is a silent train/serve divergence, not an error.
 
 if TYPE_CHECKING:
     from inference.game_state import GameState
@@ -45,11 +37,10 @@ class FeatureComputer:
         kalshi_snapshot: list[float],  # 14 floats in MARKET_COLS order
     ) -> dict[str, float]:
         """
-        Assemble the full 58-feature dict.
-        Keys must exactly match models/mmoe/feature_config.ALL_FEATURE_COLS.
-        Missing keys default to 0.0 in MMoEPredictor.predict(), which is why the
-        assertion below is worth keeping: a silently zero-filled feature is an
-        accuracy loss with no error attached to it.
+        Assemble the 58-feature dict, whose keys must match ALL_FEATURE_COLS exactly.
+
+        The assertion below earns its keep because MMoEPredictor.predict() defaults a
+        missing key to 0.0: a zero-filled feature costs accuracy with no error raised.
         """
         features: dict[str, float] = {}
 
@@ -60,7 +51,6 @@ class FeatureComputer:
         features.update(state.pregame)  # 11 pregame features (static)
         features.update(dict(zip(MARKET_COLS, kalshi_snapshot)))  # 14 market features
 
-        # Validate alignment (only in debug — remove for prod)
         assert set(features.keys()) >= set(ALL_FEATURE_COLS), (
             f"Missing features: {set(ALL_FEATURE_COLS) - set(features.keys())}"
         )
@@ -71,46 +61,35 @@ class FeatureComputer:
 
     @staticmethod
     def _compute_momentum(possession: "PossessionRow", state: "GameState") -> dict[str, float]:
-        """
-        Streaming equivalent of momentum_features.add_momentum_features().
-        All values read from state BEFORE this possession is processed.
-        """
-        # Last 5 / last 10 points per team — read from recent_possessions deque
+        """Streaming equivalent of momentum_features.add_momentum_features()."""
         home_last_5  = _sum_points(state.recent_possessions, "home", n=5)
         away_last_5  = _sum_points(state.recent_possessions, "away", n=5)
         home_last_10 = _sum_points(state.recent_possessions, "home", n=10)
         away_last_10 = _sum_points(state.recent_possessions, "away", n=10)
 
-        # Run state — read before update (shift(1) invariant)
-        # 3pt_pct: fraction of run POINTS from threes (not fraction of shots).
-        # Matches training at momentum_features.py:101: (3 * 3pt_count) / points.
+        # These percentages are fractions of run POINTS, not of shots, matching training.
         run_3pt_pct  = (3 * state.run_3pt_count / state.run_points) if state.run_points > 0 else 0.0
         run_paint_pct = (state.run_paint_pts / state.run_points) if state.run_points > 0 else 0.0
 
-        # Pace — mean of the last-10 possession_durations deque.
-        # The empty-deque fallback must be PACE_FALLBACK_SECS, matching offline's
-        # `.fillna(15.0)`. It previously fell back to state.pace_baseline (the
-        # pregame constant), which diverged from training on every possession
-        # before the first measurable possession duration.
+        # The empty-deque fallback must be PACE_FALLBACK_SECS to match the offline
+        # fillna, not state.pace_baseline, which is the pregame constant.
         pace_last_10 = (
             sum(state.possession_durations) / len(state.possession_durations)
             if state.possession_durations else T.PACE_FALLBACK_SECS
         )
 
-        # Shot quality — last 5 scored possessions per team
+        # Shot quality over the last 5 scored possessions per team.
         home_xppp        = _mean_xppp(state.home_scored_poss)
         away_xppp        = _mean_xppp(state.away_scored_poss)
         home_actual_ppp  = _mean_actual_ppp(state.home_scored_poss)
         away_actual_ppp  = _mean_actual_ppp(state.away_scored_poss)
 
-        # Shot quality trend as a RAW xPPP difference, not np.sign(). The signed
-        # form collapsed a shot-quality collapse and an imperceptible drift onto the
-        # same input; the model can pick its own threshold from the magnitude.
+        # A raw xPPP difference rather than its sign, so the model can pick its own
+        # threshold from the magnitude.
         home_traj = (home_xppp - state.home_prev_xppp) if state.home_prev_xppp > 0.0 else 0.0
         away_traj = (away_xppp - state.away_prev_xppp) if state.away_prev_xppp > 0.0 else 0.0
 
-        # Expanding within-game pace mean. NOT state.pace_baseline, which is the
-        # pregame constant — conflating the two was parity bug #4.
+        # Expanding within-game mean, distinct from the pregame pace_baseline.
         pace_game_to_date = (
             state.pace_duration_sum / state.pace_duration_count
             if state.pace_duration_count > 0
@@ -151,10 +130,7 @@ class FeatureComputer:
 
     @staticmethod
     def _compute_context(possession: "PossessionRow", state: "GameState") -> dict[str, float]:
-        """
-        Streaming equivalent of context_features.add_context_features().
-        Foul counts, timeout counts, score context — all from accumulators in GameState.
-        """
+        """Streaming equivalent of context_features.add_context_features()."""
         score_diff = possession.home_score - possession.away_score
         period     = possession.period
         clock_secs = possession.game_clock_secs
@@ -201,10 +177,7 @@ class FeatureComputer:
 
     @staticmethod
     def _compute_lineup(possession: "PossessionRow", state: "GameState") -> dict[str, float]:
-        """
-        Streaming equivalent of lineup_features.add_lineup_features().
-        All values from dict lookups into pre-loaded lineup_ratings and player_apm.
-        """
+        """Streaming equivalent of lineup_features.add_lineup_features()."""
         home_net = state.lineup_ratings.get(possession.home_lineup_id, 0.0)
         away_net = state.lineup_ratings.get(possession.away_lineup_id, 0.0)
 
@@ -223,13 +196,7 @@ class FeatureComputer:
 
     @staticmethod
     def _compute_derived(possession: "PossessionRow", state: "GameState") -> dict[str, float]:
-        """
-        Features that belong to no other group.
-
-        `home/away_back_to_back` are no longer model inputs — they were dropped from
-        PHYSICS_COLS in the consolidation — but they remain in GameState and are
-        still logged, so this hook stays for future additions.
-        """
+        """Hook for features belonging to no other group. Currently empty."""
         return {}
 
 
@@ -248,14 +215,11 @@ def _mean_xppp(scored_poss: "deque") -> float:
 
 
 def _mean_actual_ppp(scored_poss: "deque") -> float:
-    """Mean points-per-scoring-possession over the last 5 scored possessions.
+    """Mean points per scoring possession over the last 5 scored possessions.
 
-    Matches offline momentum_features.add_momentum_features() — there, actual_vs_expected_PPP
-    is `pd.Series(home_pts).where(home_scored_mask).shift(1).rolling(5).mean() - home_xppp_last5`
-    where the masked + rolled value is the mean points-per-scoring-possession over the last 5
-    home-scored possessions. The deque (maxlen=5, only scoring possessions ever appended) gives
-    us the same window. Returns 0.0 to match the offline NaN→fillna(1.0) at game start, since
-    pairing 1.0 here with xppp=0.0 would emit actual_vs_expected = 1.0 spuriously.
+    The deque holds only scoring possessions, so it gives the same window as the
+    masked rolling mean offline. Returns 0.0 rather than the offline fill of 1.0 at
+    game start, because pairing 1.0 with an xppp of 0.0 emits a spurious edge.
     """
     if not scored_poss:
         return 0.0
@@ -285,7 +249,7 @@ def _possessions_since_last_timeout(state: "GameState") -> int:
 
 
 def _timeout_in_last_3(state: "GameState", possession_id: int) -> tuple[bool, bool]:
-    recent = state.timeouts[-10:]   # only scan last 10 timeouts
+    recent = state.timeouts[-10:]
     home_to = any(
         t["team"] == "home" and (possession_id - t["possession_id"]) <= 3
         for t in recent

@@ -1,30 +1,11 @@
-// OrderRouter is the single point of contact with the Kalshi REST API.
-// All order placement in the system goes through here — no other file
-// calls the Kalshi API directly.
+// Router is the only place in the system that calls the Kalshi order API.
 //
-// Order policy at this layer:
-//   - Maker ENTRIES: entry orders are limit orders with post_only=true. This is
-//     where the edge lives — cheap maker fills ahead of slow retail repricing.
-//   - Maker TAKE-PROFITS: when an entry fills, a resting opposite-side SELL is
-//     placed immediately at `entry + TP` (post_only=true). The model says price
-//     will move favorably; we let the limit sit until the book reaches it.
-//     PollOrderStatus is consulted each possession to detect the fill. This
-//     captures the maker discount on winners — 0.0175 × price/contract vs.
-//     the 0.07 taker fee we used to pay on crossing TPs (~4× cheaper).
-//   - Crossing STOP-LOSSES: stop-loss exits are marketable LIMIT orders
-//     (post_only=false) priced a bounded number of cents through the best bid.
-//     A post-only stop cannot fill when the market is running away from a losing
-//     position (2026-05-28 OKC@SAS post-mortem: 175 rejected "post only cross"
-//     exits, a 3¢ stop realized as -12¢). Stops are still LIMIT orders (never
-//     market); slippage bounded by ExitSlippageBudgetCents. Stops pay taker.
-//   - When an SL fires while a resting TP is open, the SL path FIRST cancels
-//     the TP via DELETE, then places the crossing exit. The cancel response is
-//     authoritative: if Kalshi says the TP was already filled, the position is
-//     already closed at TP and no SL is needed.
-//   - paper_mode flag: when true, logs the order but does not send to Kalshi.
-//     Paper mode is the default. Single flag in config/trading.yaml to go live.
-//   - Fee accounting: calcNetPnL is NET of both legs. Entry is always maker;
-//     TP exits are maker (resting), SL/TRAIL/TIME exits are taker (crossing).
+// Order policy:
+//   - Entries are post_only limit buys. Maker fills are where the edge lives.
+//   - Take-profits rest as post_only sells at entry+TP and are polled for fills.
+//   - Stop-losses cross the book. A post-only stop cannot fill when price is
+//     running away from a losing position.
+//   - paper_mode logs the order without sending it.
 package main
 
 import (
@@ -51,39 +32,34 @@ func NewRouter(apiKey string, paperMode bool) *Router {
 
 // PaperPosition records an open trade entry (paper or live).
 type PaperPosition struct {
-	GameID      string
-	EntryTicker string    // Kalshi market ticker at entry — used for exits (active market may swap mid-game)
-	Direction   string    // "YES" or "NO"
-	EntryPrice  int       // cents
-	Size        int       // contracts
-	EntryPossID int
-	EntryTime   time.Time
-	OrderID     string    // Kalshi order_id (empty in paper mode)
-	PeakPrice    int      // highest marketable price seen since entry — drives the trailing take-profit
-	ExitAttempts int      // consecutive failed exit attempts — each one widens the crossing budget so we still get out
+	GameID       string
+	EntryTicker  string // market at entry; exits use this, not the active market
+	Direction    string // "YES" or "NO"
+	EntryPrice   int    // cents
+	Size         int    // contracts
+	EntryPossID  int
+	EntryTime    time.Time
+	OrderID      string // Kalshi order_id (empty in paper mode)
+	PeakPrice    int    // highest marketable price since entry, drives the trailing take-profit
+	ExitAttempts int    // failed exit attempts; each one widens the crossing budget
 
-	// Resting maker take-profit. Placed immediately after a successful entry as
-	// an opposite-side post_only=true sell at `EntryPrice + TakeProfitCents`.
-	// Polled via PollRestingTPStatus each possession; when filled, the position
-	// is closed at RestingTPPrice. When an SL fires, the resting TP must be
-	// canceled first; if Kalshi reports it already executed, the SL is skipped
-	// and the position is treated as TP-closed.
-	RestingTPOrderID string // empty when no resting TP exists (paper mode, placement failed, or already cleared)
-	RestingTPPrice   int    // target sell price in cents (entry + TP, clamped to [1,99])
-	RestingTPStatus  string // "" (none) | "open" | "executed" | "canceled" | "rejected"
+	// Resting maker take-profit, placed right after the entry fills.
+	RestingTPOrderID string // empty when no resting TP exists
+	RestingTPPrice   int    // entry + TP, clamped to [1,99]
+	RestingTPStatus  string // "" | "open" | "executed" | "canceled" | "rejected"
 }
 
 // kalshiOrderRequest is the JSON body for POST /portfolio/orders.
 type kalshiOrderRequest struct {
 	Ticker        string `json:"ticker"`
-	Action        string `json:"action"`                   // "buy" or "sell"
-	Side          string `json:"side"`                     // "yes" or "no"
-	Type          string `json:"type"`                     // always "limit"
+	Action        string `json:"action"` // "buy" or "sell"
+	Side          string `json:"side"`   // "yes" or "no"
+	Type          string `json:"type"`   // always "limit"
 	Count         int    `json:"count"`
 	YesPrice      int    `json:"yes_price,omitempty"`
 	NoPrice       int    `json:"no_price,omitempty"`
 	ClientOrderID string `json:"client_order_id"`
-	PostOnly      bool   `json:"post_only"`                // enforces maker-only
+	PostOnly      bool   `json:"post_only"` // maker-only
 }
 
 type kalshiOrderResponse struct {
@@ -97,7 +73,6 @@ type kalshiOrderResponse struct {
 }
 
 // placeKalshiOrder sends a single limit order to the Kalshi REST API.
-// Reuses the same HTTP + auth pattern as market_scanner.go:scanWithCurrent.
 func placeKalshiOrder(ctx context.Context, req kalshiOrderRequest) (*kalshiOrderResponse, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -144,8 +119,8 @@ func newUUID() string {
 	return hex.EncodeToString(b)
 }
 
-// Place records a paper trade or sends a live limit order to Kalshi.
-// Returns nil only on live-mode API failure (logged); callers treat nil as a missed signal.
+// Place records a paper trade or sends a live limit buy to Kalshi.
+// Returns nil on live-mode API failure; callers treat nil as a missed signal.
 func (r *Router) Place(
 	ctx context.Context,
 	ticker string,
@@ -176,7 +151,6 @@ func (r *Router) Place(
 		}
 	}
 
-	// Live path: POST limit buy to Kalshi with post_only to enforce maker-only.
 	req := kalshiOrderRequest{
 		Ticker:        ticker,
 		Action:        "buy",
@@ -214,13 +188,9 @@ func (r *Router) Place(
 	}
 }
 
-// exitLimitPrice returns the limit price for a crossing exit sell: the current
-// best price for our side minus a slippage budget, clamped to Kalshi's [1,99]
-// range. A sell limit at-or-below the best bid is marketable and fills at the
-// best available price; the budget bounds the worst-case fill when the book is
-// thin or moving. Note: a tighter limit (smaller budget) does NOT mean a worse
-// fill — limit orders fill at the best available price, so the budget only sets
-// how far we are willing to chase, not where we actually trade.
+// exitLimitPrice returns the limit for a crossing exit sell: the best price for
+// our side minus a slippage budget, clamped to Kalshi's [1,99] range. The budget
+// sets how far we are willing to chase, not where we actually fill.
 func exitLimitPrice(marketablePrice, slippageBudget int) int {
 	limit := marketablePrice - slippageBudget
 	if limit < 1 {
@@ -232,13 +202,9 @@ func exitLimitPrice(marketablePrice, slippageBudget int) int {
 	return limit
 }
 
-// PlaceExit sends a live limit sell order to close an open position. The order
-// CROSSES the book (post_only=false) so it actually fills when the market is
-// moving against us — a post-only exit cannot. marketablePrice is the current
-// best price for our side; slippageBudget caps how far through the bid we cross.
-// Always uses pos.EntryTicker — the market where the position was opened — not
-// the current active market, which may have swapped since entry.
-// Returns true if the order was sent (paper always returns true).
+// PlaceExit sends a limit sell that crosses the book to close an open position.
+// It always sells on pos.EntryTicker, not the active market, which may have
+// swapped since entry. Returns true if the order was sent; paper always returns true.
 func (r *Router) PlaceExit(ctx context.Context, pos *PaperPosition, marketablePrice, slippageBudget int) bool {
 	if r.paperMode {
 		return true
@@ -257,7 +223,7 @@ func (r *Router) PlaceExit(ctx context.Context, pos *PaperPosition, marketablePr
 		Type:          "limit",
 		Count:         pos.Size,
 		ClientOrderID: newUUID(),
-		PostOnly:      false, // exits cross the book; a maker stop-loss is un-fillable when price runs away
+		PostOnly:      false, // a maker stop-loss is un-fillable when price runs away
 	}
 	if side == "yes" {
 		req.YesPrice = limit
@@ -281,26 +247,18 @@ func (r *Router) PlaceExit(ctx context.Context, pos *PaperPosition, marketablePr
 // CheckExit evaluates whether an open position should be closed.
 // Returns (shouldExit, reason, netPnLDollars).
 //
-// TP handling is asymmetric vs. SL by design:
-//   - TP is owned by a resting maker order placed at entry. CheckExit consults
-//     its Kalshi status each possession; if executed, the position is closed at
-//     RestingTPPrice and the caller cancels nothing (the order self-cleared).
-//     If the resting TP failed to place earlier, CheckExit retries placement
-//     idempotently before checking status.
-//   - SL is still a local price-trigger that returns "STOP_LOSS"; the caller
-//     in game.go must cancel the resting TP before placing the crossing SL.
-//   - Trailing TP and time stop are unchanged and still go through the
-//     crossing PlaceExit path; converting those to maker is a future change.
+// TP is owned by the resting maker order, so this only reads its Kalshi status.
+// SL, trail and time stop are local price triggers whose exits cross the book;
+// the caller must cancel the resting TP before placing any of those.
 func (r *Router) CheckExit(ctx context.Context, pos *PaperPosition, resp *PossessionResponse, possID int, cfg *Config) (bool, string, float64) {
-	// Resting maker TP: place if missing, poll if open. Errors are logged
-	// inside the helpers and never block the SL path below.
+	// Place the resting TP if missing, poll it if open. Errors never block the SL path.
 	if pos.RestingTPStatus == "" || pos.RestingTPStatus == "rejected" {
 		_ = r.PlaceRestingTP(ctx, pos, cfg.Agent.TakeProfitCents)
 	} else if pos.RestingTPStatus == "open" {
 		if _, err := r.PollRestingTPStatus(ctx, pos); err != nil {
 			zlog.Warn().Err(err).
 				Str("order_id", pos.RestingTPOrderID).
-				Msg("resting TP status poll failed — will retry next possession")
+				Msg("resting TP status poll failed, retrying next possession")
 		}
 	}
 	if pos.RestingTPStatus == "executed" {
@@ -321,12 +279,8 @@ func (r *Router) CheckExit(ctx context.Context, pos *PaperPosition, resp *Posses
 
 	priceDelta := currentPrice - pos.EntryPrice
 
-	// Paper-mode resting-TP simulator. Paper never reaches Kalshi, so
-	// PollRestingTPStatus can't observe the fill. When the marketable price
-	// crosses the TP target, fake the fill at the target price (not at
-	// currentPrice — the resting order would have filled at the limit price,
-	// not at the through price). Disabled when trailing is on so trailing logic
-	// can take over for a strong run. No-op in live mode.
+	// Paper never reaches Kalshi, so simulate the resting TP fill here. The fill is
+	// at the target price, not the through price, because the order was a limit.
 	if r.paperMode && cfg.Agent.TrailGivebackCents <= 0 && priceDelta >= cfg.Agent.TakeProfitCents {
 		pos.RestingTPStatus = "executed"
 		if pos.RestingTPPrice == 0 {
@@ -335,15 +289,13 @@ func (r *Router) CheckExit(ctx context.Context, pos *PaperPosition, resp *Posses
 		return true, "TAKE_PROFIT", calcNetPnL(pos.Size, pos.EntryPrice, pos.RestingTPPrice, makerFeeRate)
 	}
 
-	// Hard stop-loss — taker by design; loss-cutting cannot wait for maker fills.
+	// Stop-loss is taker by design. Cutting a loss cannot wait for a maker fill.
 	if -priceDelta >= cfg.Agent.StopLossCents {
 		return true, "STOP_LOSS", calcNetPnL(pos.Size, pos.EntryPrice, currentPrice, takerFeeRate)
 	}
 
-	// Trailing take-profit: once the position has been at least TrailActivateCents
-	// in profit, exit when it retraces TrailGivebackCents from its peak. Lets a
-	// strong move run (e.g. the +15¢ excursion on 2026-05-28 that the broken
-	// maker exit gave back to +3¢) while still locking in most of the gain.
+	// Trailing take-profit: once up TrailActivateCents, exit on a TrailGivebackCents
+	// retrace from the peak. Lets a strong move run past the flat TP.
 	if cfg.Agent.TrailGivebackCents > 0 {
 		peakDelta := pos.PeakPrice - pos.EntryPrice
 		if peakDelta >= cfg.Agent.TrailActivateCents && (pos.PeakPrice-currentPrice) >= cfg.Agent.TrailGivebackCents {
@@ -357,65 +309,42 @@ func (r *Router) CheckExit(ctx context.Context, pos *PaperPosition, resp *Posses
 	return false, "", 0
 }
 
-// Kalshi trading fee rates. Maker is a quarter of taker, which is the whole
-// reason the strategy is maker-first.
+// Kalshi fee rates. Maker is a quarter of taker, which is why the strategy is maker-first.
 const (
 	makerFeeRate = 0.0175
 	takerFeeRate = 0.07
 )
 
-// kalshiFee returns the fee in DOLLARS for one leg of a trade.
+// kalshiFee returns the fee in DOLLARS for one leg of a trade:
 //
 //	fee = ceil(rate * contracts * P * (1-P) * 100) / 100      where P = price/100
 //
-// The P*(1-P) term is not optional: fees peak at 50c and fall toward both ends
-// of the book. 100 contracts at 50c maker = $0.44, taker = $1.76.
+// The P*(1-P) term is required. Fees peak at 50c and fall toward both ends of the book.
 func kalshiFee(contracts, priceCents int, rate float64) float64 {
 	p := float64(priceCents) / 100.0
 	return math.Ceil(rate*float64(contracts)*p*(1.0-p)*100.0) / 100.0
 }
 
-// calcNetPnL returns P&L in dollars NET of both legs' fees.
-//
-// Entry is always a maker order (post_only). exitRate distinguishes a resting
-// take-profit that fills as a maker from a stop/trail/time exit that crosses the
-// book as a taker at 4x the rate. Passing the wrong rate understates the cost of
-// exactly the exits that lose money.
-//
-// This previously returned gross P&L, so every logged and ledgered result
-// overstated performance by the full round-trip fee.
+// calcNetPnL returns P&L in dollars net of both legs' fees. The entry leg is always
+// maker; exitRate is maker for a resting TP and taker for any crossing exit.
 func calcNetPnL(size, entryPrice, exitPrice int, exitRate float64) float64 {
 	gross := float64(exitPrice-entryPrice) * float64(size) / 100.0
 	fees := kalshiFee(size, entryPrice, makerFeeRate) + kalshiFee(size, exitPrice, exitRate)
 	return gross - fees
 }
 
-// calcGrossPnL returns P&L in dollars before fees, for telemetry that wants to
-// separate market move from cost.
+// calcGrossPnL returns P&L in dollars before fees, for telemetry that separates
+// the market move from its cost.
 func calcGrossPnL(size, entryPrice, exitPrice int) float64 {
 	return float64(exitPrice-entryPrice) * float64(size) / 100.0
 }
 
-// kellyContracts scales position size linearly with conviction above the anchor.
+// kellyContracts scales position size linearly with conviction above the anchor:
 //
-//	contracts = clamp(KellyMinContracts, (|traj_used| - anchor) × slope, maxContracts)
+//	contracts = clamp(minContracts, (|traj_used| - anchor) * slope, maxContracts)
 //
-// The anchor MUST be set to the entry threshold (or just below it) so a trade
-// that barely clears the gate gets KellyMinContracts, not an inflated count.
-//
-// Phase 1 winner (aggregator=mean, threshold=0.08) doubled config (2026-06-03):
-//
-//	anchor=0.08, slope=200, KellyMinContracts=10, maxContracts=80
-//	|traj_used|=0.08 → 10  (floor)
-//	|traj_used|=0.12 → 10  (floor, since (0.12-0.08)*200 = 8 < 10)
-//	|traj_used|=0.15 → 14
-//	|traj_used|=0.20 → 24
-//	|traj_used|=0.30 → 44
-//	|traj_used|=0.48 → 80  (capped)
-//
-// Old single-sized config used anchor=0.10, slope=100, min=5 — slope doubled to
-// double per-conviction sizing; anchor moved to entry threshold to match the
-// aggregator's empirical floor.
+// Set anchor at (or just below) the entry threshold so a trade that barely clears
+// the gate sizes at the floor rather than an inflated count.
 func kellyContracts(trajUsed float32, maxContracts int, anchor, slope float32, minContracts int) int {
 	abs := trajUsed
 	if abs < 0 {
@@ -432,24 +361,21 @@ func kellyContracts(trajUsed float32, maxContracts int, anchor, slope float32, m
 }
 
 // ─── Resting maker take-profit ─────────────────────────────────────────────
-//
+
 // kalshiGetOrderResponse is the shape returned by GET /portfolio/orders/{id}.
-// Only fields we consult are decoded; the rest are ignored.
 type kalshiGetOrderResponse struct {
 	Order struct {
-		OrderID         string `json:"order_id"`
-		Status          string `json:"status"`           // "resting" | "executed" | "canceled" (Kalshi spec)
-		FilledCount     int    `json:"filled_count"`
-		RemainingCount  int    `json:"remaining_count"`
-		YesPrice        int    `json:"yes_price"`
-		NoPrice         int    `json:"no_price"`
+		OrderID        string `json:"order_id"`
+		Status         string `json:"status"` // "resting" | "executed" | "canceled"
+		FilledCount    int    `json:"filled_count"`
+		RemainingCount int    `json:"remaining_count"`
+		YesPrice       int    `json:"yes_price"`
+		NoPrice        int    `json:"no_price"`
 	} `json:"order"`
 }
 
-// restingTPPrice returns the take-profit limit price for a given entry. Both
-// directions sell back AT the position-side bid; "favorable" is always
-// EntryPrice + TP regardless of side. Clamped to Kalshi's [1, 99] range so a
-// theoretical TP at 100+ stays representable.
+// restingTPPrice returns the take-profit limit for an entry. Both directions sell
+// back at the position-side bid, so the target is EntryPrice + TP either way.
 func restingTPPrice(entryPrice, tpCents int) int {
 	target := entryPrice + tpCents
 	if target < 1 {
@@ -461,12 +387,9 @@ func restingTPPrice(entryPrice, tpCents int) int {
 	return target
 }
 
-// PlaceRestingTP submits a post-only opposite-side limit at entry+TP. Idempotent
-// on PaperPosition: returns immediately if a resting TP is already on the books
-// for this position. Paper mode just records the target price.
-//
-// Returns nil on success. Non-fatal: any error is logged and pos.RestingTPStatus
-// is set to "rejected" so callers can fall back to the crossing-exit path.
+// PlaceRestingTP submits a post-only opposite-side limit at entry+TP. Idempotent:
+// returns immediately if this position already has one on the book. On failure it
+// sets RestingTPStatus to "rejected" so callers fall back to a crossing exit.
 func (r *Router) PlaceRestingTP(ctx context.Context, pos *PaperPosition, tpCents int) error {
 	if pos.RestingTPOrderID != "" {
 		return nil // already placed
@@ -491,7 +414,7 @@ func (r *Router) PlaceRestingTP(ctx context.Context, pos *PaperPosition, tpCents
 		Type:          "limit",
 		Count:         pos.Size,
 		ClientOrderID: newUUID(),
-		PostOnly:      true, // maker — this is the whole point
+		PostOnly:      true,
 	}
 	if side == "yes" {
 		req.YesPrice = target
@@ -505,7 +428,7 @@ func (r *Router) PlaceRestingTP(ctx context.Context, pos *PaperPosition, tpCents
 			Str("ticker", pos.EntryTicker).
 			Str("entry_order_id", pos.OrderID).
 			Int("tp_price", target).
-			Msg("resting TP placement failed — will fall back to crossing exit on TP trigger")
+			Msg("resting TP placement failed, falling back to a crossing exit")
 		pos.RestingTPStatus = "rejected"
 		return err
 	}
@@ -514,12 +437,9 @@ func (r *Router) PlaceRestingTP(ctx context.Context, pos *PaperPosition, tpCents
 	return nil
 }
 
-// PollRestingTPStatus updates pos.RestingTPStatus from Kalshi. Cheap to call
-// every possession — single GET, no body. Returns the latest status string;
-// any non-"open" terminal status indicates the position is closed.
-//
-// Paper mode is a no-op (status stays "open" forever); the simulator never
-// fills resting TPs locally.
+// PollRestingTPStatus refreshes pos.RestingTPStatus from Kalshi with a single GET.
+// Any terminal status other than "open" means the position is closed. Paper mode
+// is a no-op; CheckExit simulates the fill instead.
 func (r *Router) PollRestingTPStatus(ctx context.Context, pos *PaperPosition) (string, error) {
 	if pos.RestingTPOrderID == "" || pos.RestingTPStatus != "open" {
 		return pos.RestingTPStatus, nil
@@ -562,23 +482,19 @@ func (r *Router) PollRestingTPStatus(ctx context.Context, pos *PaperPosition) (s
 	case "canceled", "cancelled":
 		pos.RestingTPStatus = "canceled"
 	case "resting", "pending", "open":
-		// still on the book — leave status as "open"
+		// still on the book, leave status as "open"
 	default:
-		// Unknown status — log so we learn the API's full vocabulary, but don't change state.
 		zlog.Warn().
 			Str("status", out.Order.Status).
 			Str("order_id", pos.RestingTPOrderID).
-			Msg("unknown Kalshi order status — treating as still open")
+			Msg("unknown Kalshi order status, treating as still open")
 	}
 	return pos.RestingTPStatus, nil
 }
 
-// CancelRestingTP cancels the resting TP order via DELETE. Returns the
-// post-cancel status. If Kalshi reports the order already executed, the
-// position is already closed at TP and the caller should NOT place an SL —
-// check the returned status before placing any follow-up exit.
-//
-// Paper mode just flips the local state to "canceled".
+// CancelRestingTP cancels the resting TP and returns its post-cancel status.
+// A returned "executed" means the order filled first and the position is already
+// closed at TP, so the caller must not place a follow-up exit.
 func (r *Router) CancelRestingTP(ctx context.Context, pos *PaperPosition) (string, error) {
 	if pos.RestingTPOrderID == "" || pos.RestingTPStatus != "open" {
 		return pos.RestingTPStatus, nil
@@ -607,11 +523,9 @@ func (r *Router) CancelRestingTP(ctx context.Context, pos *PaperPosition) (strin
 	}
 	defer httpResp.Body.Close()
 
-	// Kalshi returns the order body on cancel; the status tells us whether the
-	// cancel succeeded or the order had already filled (race).
 	if httpResp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(httpResp.Body)
-		// 404 → order doesn't exist (already canceled or gone). Treat as canceled.
+		// 404 means the order is already gone. Treat it as canceled.
 		if httpResp.StatusCode == http.StatusNotFound {
 			pos.RestingTPStatus = "canceled"
 			return pos.RestingTPStatus, nil
@@ -620,14 +534,13 @@ func (r *Router) CancelRestingTP(ctx context.Context, pos *PaperPosition) (strin
 	}
 	var out kalshiGetOrderResponse
 	if err := json.NewDecoder(httpResp.Body).Decode(&out); err != nil {
-		// We got 200 but couldn't decode — assume cancel worked.
+		// 200 but undecodable. Assume the cancel worked.
 		pos.RestingTPStatus = "canceled"
 		return pos.RestingTPStatus, nil
 	}
 	switch out.Order.Status {
 	case "executed", "filled":
-		// Race: order filled between our local exit decision and our cancel.
-		// Position is closed at TP price; caller must NOT place a follow-up SL.
+		// The TP filled between our exit decision and this cancel.
 		pos.RestingTPStatus = "executed"
 	default:
 		pos.RestingTPStatus = "canceled"

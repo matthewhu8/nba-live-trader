@@ -5,10 +5,10 @@ import (
 	"testing"
 )
 
-// TestAggregateTrajParity exercises the four aggregator modes against the same
-// fixed inputs used in the Python sweep harness. If this test passes, the Go
-// helper is in lockstep with backtesting/mmoe_backtest.py:aggregate_traj — the
-// invariant that lets us trust live decisions to match backtest results.
+// TestAggregateTrajParity runs the four aggregator modes over the same fixed inputs
+// as the Python sweep harness. Passing means the Go helper matches
+// backtesting/mmoe_backtest.py:aggregate_traj, which is what lets live decisions
+// match backtest results.
 func TestAggregateTrajParity(t *testing.T) {
 	// Same vector as in the Python helper smoke test (rising then falling).
 	traj := [10]float32{0.02, 0.05, 0.08, 0.10, 0.12, 0.14, 0.15, 0.13, 0.10, 0.07}
@@ -21,7 +21,7 @@ func TestAggregateTrajParity(t *testing.T) {
 		{"mean", 0.0960},
 		{"mean_3_to_9", 0.1157143},
 		{"max_abs", 0.15},
-		// Unknown mode falls back to "final" — defensive but documented.
+		// An unknown mode falls back to "final".
 		{"banana", 0.07},
 	}
 
@@ -59,10 +59,10 @@ func TestKellyContracts(t *testing.T) {
 		{0.15, 14}, // (0.15-0.08)*200 = 14
 		{0.20, 24},
 		{0.30, 44},
-		// 0.48 sits at the boundary — float32 (0.48-0.08)*200 rounds slightly under
-		// 80, so int() yields 79. The cap kicks in at 0.49.
-		{0.50, 80}, // (0.50-0.08)*200 = 84, capped to 80
-		{0.60, 80}, // capped
+		// 0.48 sits on the boundary: in float32 (0.48-0.08)*200 rounds just under 80,
+		// so int() yields 79. The cap starts biting at 0.49.
+		{0.50, 80},  // (0.50-0.08)*200 = 84, capped to 80
+		{0.60, 80},  // capped
 		{-0.20, 24}, // negative input → absolute value used
 	}
 	for _, tc := range cases {

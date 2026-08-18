@@ -10,13 +10,13 @@ func TestRestingTPPriceClamping(t *testing.T) {
 	cases := []struct {
 		entry, tp, want int
 	}{
-		{30, 5, 35},   // typical entry
-		{70, 5, 75},   // upper band
-		{1, 5, 6},     // floor — nothing special
-		{96, 5, 99},   // clamp ceiling
-		{99, 5, 99},   // already at ceiling
-		{0, 1, 1},     // would yield 1, clamped at 1
-		{-3, 1, 1},    // pathological — still clamped
+		{30, 5, 35}, // typical entry
+		{70, 5, 75}, // upper band
+		{1, 5, 6},   // floor
+		{96, 5, 99}, // clamp ceiling
+		{99, 5, 99}, // already at ceiling
+		{0, 1, 1},   // would yield 1, clamped at 1
+		{-3, 1, 1},  // pathological, still clamped
 	}
 	for _, tc := range cases {
 		if got := restingTPPrice(tc.entry, tc.tp); got != tc.want {
@@ -57,8 +57,8 @@ func TestPlaceRestingTPPaperMode(t *testing.T) {
 	}
 }
 
-// TestCancelRestingTPPaperMode verifies the paper-mode cancel just flips the
-// state — no network round trip, no race condition to worry about.
+// TestCancelRestingTPPaperMode verifies the paper-mode cancel only flips local
+// state, with no network round trip.
 func TestCancelRestingTPPaperMode(t *testing.T) {
 	r := NewRouter("", true)
 	pos := &PaperPosition{
@@ -87,9 +87,8 @@ func TestCancelRestingTPPaperMode(t *testing.T) {
 	}
 }
 
-// TestCheckExitWithRestingTPExecuted: when the resting TP has filled (paper or
-// live equivalent), CheckExit returns TAKE_PROFIT at RestingTPPrice — NOT at
-// currentPrice. This is the whole point: maker fills at the limit, not through.
+// TestCheckExitWithRestingTPExecuted: once the resting TP fills, CheckExit returns
+// TAKE_PROFIT at RestingTPPrice, not at currentPrice. A maker fills at its limit.
 func TestCheckExitWithRestingTPExecuted(t *testing.T) {
 	r := NewRouter("", true)
 	cfg := exitCfg(5, 3, 20, 5, 0)
@@ -118,10 +117,9 @@ func TestCheckExitWithRestingTPExecuted(t *testing.T) {
 	}
 }
 
-// TestPaperModeTPSimulatesRestingFill: in paper mode (where Kalshi can't fill
-// the resting order for us), when price reaches the TP target, CheckExit
-// simulates the fill — same return as if Kalshi had filled it, and it sets
-// RestingTPStatus="executed" so subsequent calls don't double-fire.
+// TestPaperModeTPSimulatesRestingFill: paper mode has no Kalshi to fill the resting
+// order, so CheckExit simulates the fill when price reaches the target and marks it
+// executed so later calls don't double-fire.
 func TestPaperModeTPSimulatesRestingFill(t *testing.T) {
 	r := NewRouter("", true)
 	cfg := exitCfg(5, 3, 20, 5, 0)
@@ -152,6 +150,6 @@ func TestPaperModeTPSimulatesRestingFill(t *testing.T) {
 			pnl, wantGross-wantFees, wantGross, wantFees)
 	}
 	if wantFees == 0 {
-		t.Error("fees are zero — calcNetPnL has regressed to gross P&L")
+		t.Error("fees are zero, calcNetPnL has regressed to gross P&L")
 	}
 }

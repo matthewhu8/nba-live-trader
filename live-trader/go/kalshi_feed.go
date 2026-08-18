@@ -1,10 +1,7 @@
-// KalshiFeed maintains a live WebSocket connection to the Kalshi market feed
-// for a single game's market ticker.
-//
-// Emits KalshiTick structs to the provided channel on every orderbook update.
-// Reconnects automatically on disconnect (exponential backoff, max 30s).
-// If feed is silent for >30s during a live game: emits a StaleTick sentinel
-// so the ring buffer can zero out has_market_data.
+// KalshiFeed holds a WebSocket connection to one game's market and emits a
+// KalshiTick on every orderbook update. It reconnects with exponential backoff,
+// and after 30s of silence emits a stale sentinel so the ring buffer can zero
+// out has_market_data.
 package main
 
 import (
@@ -24,13 +21,12 @@ type KalshiTick struct {
 	MarketTicker string
 	YesBid       int  // cents
 	YesAsk       int  // cents
-	YesLast      int  // cents — last traded price
-	Volume       int  // contracts traded this update
+	YesLast      int  // cents, last traded price
+	Volume       int  // cumulative lifetime contracts traded
 	OpenInterest int  // total open contracts
-	IsStale      bool // true if emitted as a timeout sentinel (no real data)
+	IsStale      bool // emitted as a timeout sentinel, carries no real data
 }
 
-// KalshiFeed subscribes to a Kalshi market and streams ticks.
 type KalshiFeed struct {
 	currentTicker string
 }
@@ -58,7 +54,7 @@ func (f *KalshiFeed) Run(ctx context.Context, marketCh <-chan string, out chan<-
 			zlog.Error().Err(err).
 				Str("market_ticker", f.currentTicker).
 				Dur("retry_in", backoff).
-				Msg("kalshi feed disconnected — reconnecting")
+				Msg("kalshi feed disconnected, reconnecting")
 		}
 
 		select {
@@ -74,8 +70,8 @@ func (f *KalshiFeed) Run(ctx context.Context, marketCh <-chan string, out chan<-
 	}
 }
 
-// runSession runs one WebSocket connection lifetime.
-// Returns (connected, err): connected=true if at least one valid tick was received.
+// runSession runs one connection lifetime. connected is true if at least one
+// valid tick arrived, which resets the caller's backoff.
 func (f *KalshiFeed) runSession(ctx context.Context, marketCh <-chan string, out chan<- KalshiTick) (connected bool, err error) {
 	headers, err := GetKalshiAuthHeaders("GET", kalshiWebSocketSignPath)
 	if err != nil {
@@ -135,7 +131,7 @@ func (f *KalshiFeed) runSession(ctx context.Context, marketCh <-chan string, out
 
 		case newTicker := <-marketCh:
 			if newTicker != f.currentTicker {
-				// Swap subscriptions dynamically without dropping conn
+				// Swap subscriptions without dropping the connection.
 				unsubMsg, _ := json.Marshal(map[string]any{
 					"id":  2,
 					"cmd": "update_subscription",
@@ -178,19 +174,19 @@ func (f *KalshiFeed) runSession(ctx context.Context, marketCh <-chan string, out
 			select {
 			case out <- res.tick:
 			default:
-				// Channel full — drop rather than block.
+				// Channel full; drop rather than block the reader.
 			}
 		}
 	}
 }
 
-// tickerMsg is the outer envelope for Kalshi WebSocket messages.
+// tickerMsg is the envelope on every Kalshi WebSocket message.
 type tickerMsg struct {
 	Type string          `json:"type"`
 	Msg  json.RawMessage `json:"msg"`
 }
 
-// tickerInner is the inner payload for type="ticker" messages.
+// tickerInner is the payload of a type="ticker" message.
 type tickerInner struct {
 	MarketTicker   string `json:"market_ticker"`
 	YesBidDollars  string `json:"yes_bid_dollars"`
@@ -200,8 +196,8 @@ type tickerInner struct {
 	OpenInterestFP string `json:"open_interest_fp"`
 }
 
-// parseTickerMessage decodes a raw WebSocket frame into a KalshiTick.
-// Returns (tick, true) on success; (zero, false) if the message should be skipped.
+// parseTickerMessage decodes a raw frame into a KalshiTick, returning false for
+// any message that should be skipped.
 func parseTickerMessage(data []byte) (KalshiTick, bool) {
 	var outer tickerMsg
 	if err := json.Unmarshal(data, &outer); err != nil {
@@ -218,7 +214,7 @@ func parseTickerMessage(data []byte) (KalshiTick, bool) {
 
 	yesBid := dollarsStrToCents(inner.YesBidDollars)
 	if yesBid == 0 {
-		// Pre/post-game — market not actively quoted.
+		// Pre-game or post-game: the market is not actively quoted.
 		return KalshiTick{}, false
 	}
 

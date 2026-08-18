@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-// GetKalshiAuthHeaders generates the three RSA-PSS signed request headers.
+// GetKalshiAuthHeaders builds the three RSA-PSS signed headers Kalshi requires.
 func GetKalshiAuthHeaders(method, path string) (http.Header, error) {
 	keyID := os.Getenv("KALSHI_KEY_ID")
 	pemPath := os.Getenv("KALSHI_PEM_PATH")
@@ -61,7 +61,7 @@ func GetKalshiAuthHeaders(method, path string) (http.Header, error) {
 	return h, nil
 }
 
-// parseRSAKey tries PKCS8 first, then PKCS1.
+// parseRSAKey tries PKCS8, then PKCS1.
 func parseRSAKey(derBytes []byte) (*rsa.PrivateKey, error) {
 	key, err := x509.ParsePKCS8PrivateKey(derBytes)
 	if err == nil {

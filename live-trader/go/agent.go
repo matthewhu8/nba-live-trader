@@ -1,14 +1,14 @@
-// Bandit — sits on top of the MMoE outputs and decides BUY_YES / BUY_NO / EXIT / WAIT.
+// Bandit reads the MMoE outputs and decides BUY_YES / BUY_NO / WAIT.
 //
-// Entry gates (matched to backtest, in order of evaluation):
-//  1. is_garbage_time / is_blowout  → Wait
-//  2. in_price_band  [30..70]       → Wait if outside
-//  3. run_prob ≥ min_run_prob_entry → Wait if below
-//  4. |traj_used| ≥ min_abs_traj    → Wait if below   (traj_used = aggregateTraj(Trajectory))
-//  5. current_run_length ≥ min     → Wait if below
-//  6. sign(traj_used)              → BuyYes (>0) or BuyNo (<0)
+// Entry gates, in evaluation order and matched to the backtest:
+//  1. is_overtime / is_garbage_time / is_blowout
+//  2. yes_bid inside [min_yes_bid, max_yes_bid]
+//  3. run_prob >= min_run_prob_entry
+//  4. |traj_used| >= min_abs_traj_entry
+//  5. current_run_length >= min_run_length_entry
+//  6. sign(traj_used) picks BuyYes or BuyNo
 //
-// Has-position branch: always returns Wait — Router.CheckExit owns TP / SL / TIME_STOP.
+// While a position is open this always returns Wait. Router.CheckExit owns exits.
 package main
 
 type Action string
@@ -17,7 +17,7 @@ const (
 	Wait   Action = "WAIT"
 	BuyYes Action = "BUY_YES"
 	BuyNo  Action = "BUY_NO"
-	Exit   Action = "EXIT" // retained for future use; bandit no longer returns this
+	Exit   Action = "EXIT" // unused; the bandit never returns this
 )
 
 type ContextKey struct {
@@ -34,17 +34,17 @@ type BetaParams struct {
 type Bandit struct {
 	minYesBid         int
 	maxYesBid         int
-	minRunProbEntry   float32                      // Head A gate (threshold=0.0 in live config = effectively off)
-	minAbsTrajEntry   float32                      // Head B confidence — applied to traj_used (aggregator output)
-	minRunLengthEntry float32                      // momentum filter (backtest: 2)
-	trajAggregator    string                       // "final" / "mean" / "mean_3_to_9" / "max_abs" — Phase 1 winner: "mean"
-	params            map[ContextKey][4]BetaParams // reserved for future bandit
+	minRunProbEntry   float32                      // Head A gate; 0.0 in the live config turns it off
+	minAbsTrajEntry   float32                      // Head B confidence, applied to traj_used
+	minRunLengthEntry float32                      // momentum filter
+	trajAggregator    string                       // "final" | "mean" | "mean_3_to_9" | "max_abs"
+	params            map[ContextKey][4]BetaParams // reserved for the future bandit
 }
 
 func NewBandit(cfg *Config) *Bandit {
 	agg := cfg.Agent.TrajAggregator
 	if agg == "" {
-		agg = "final" // default preserves legacy behavior for unset configs
+		agg = "final"
 	}
 	return &Bandit{
 		minYesBid:         cfg.Agent.MinYesBid,
@@ -57,17 +57,15 @@ func NewBandit(cfg *Config) *Bandit {
 	}
 }
 
-// aggregateTraj reduces the 10-element Head B trajectory to a single signed scalar
-// for entry gating + sizing. MUST match backtesting/mmoe_backtest.py `aggregate_traj`.
+// aggregateTraj reduces the 10-element Head B trajectory to one signed scalar for
+// entry gating and sizing. Must match `aggregate_traj` in backtesting/mmoe_backtest.py.
 //
-// Modes:
-//   - "final"        : trajectory[9]                       (legacy, single horizon)
-//   - "mean"         : mean of all 10 horizons             (Phase 1 winner — lowest variance)
-//   - "mean_3_to_9"  : mean of horizons 3-9                (skips noisy short horizons)
-//   - "max_abs"      : element with largest |·|            (peak conviction; sign preserved)
+//   - "final"       trajectory[9], a single horizon
+//   - "mean"        mean of all 10 horizons, the lowest-variance option
+//   - "mean_3_to_9" mean of horizons 3-9, skipping the noisy short ones
+//   - "max_abs"     the largest element by magnitude, sign preserved
 //
-// For max_abs the source element's sign is preserved so downstream direction
-// inference (sign of return value) stays valid.
+// The sign of the result picks the trade direction, so every mode must preserve it.
 func aggregateTraj(traj [10]float32, mode string) float32 {
 	switch mode {
 	case "final":
@@ -95,18 +93,15 @@ func aggregateTraj(traj [10]float32, mode string) float32 {
 		}
 		return traj[maxIdx]
 	default:
-		// Unknown mode — fall back to legacy behavior rather than crash.
 		return traj[9]
 	}
 }
 
-// GateResult records the outcome of every gate evaluated during Decide.
-// Emitted alongside each possession JSONL record so post-mortems can answer
-// "which gate blocked entry on possession N?" without re-running anything.
+// GateResult records the outcome of every gate Decide evaluated. It rides along
+// with each possession record so a post-mortem can tell which gate blocked entry.
 //
-// Conditional gates use *bool so JSON null distinguishes "not reached" from
-// "reached and false". RunProbPass / TrajMagnitudePass / RunLengthPass are
-// only set in the no-position branch.
+// Conditional gates are *bool so JSON null distinguishes "not reached" from
+// "reached and false". Those are only set on the no-position path.
 type GateResult struct {
 	IsOvertime        bool    `json:"is_overtime"`
 	IsGarbageTime     bool    `json:"is_garbage_time"`
@@ -116,16 +111,13 @@ type GateResult struct {
 	HasPosition       bool    `json:"has_position"`
 	RunProb           float32 `json:"run_prob"`
 	RunProbPass       *bool   `json:"run_prob_pass"`
-	// TrajFinal is the raw Trajectory[9] — kept for backward-compatible log analysis.
-	// TrajUsed is the aggregated value that actually drives the entry decision.
-	// Aggregator identifies which aggregation mode produced TrajUsed.
-	TrajFinal         float32 `json:"traj_final"`
-	TrajUsed          float32 `json:"traj_used"`
-	Aggregator        string  `json:"traj_aggregator"`
+	TrajFinal         float32 `json:"traj_final"`      // raw Trajectory[9]
+	TrajUsed          float32 `json:"traj_used"`       // aggregated, drives the decision
+	Aggregator        string  `json:"traj_aggregator"` // which mode produced TrajUsed
 	TrajMagnitudePass *bool   `json:"traj_magnitude_pass"`
 	CurrentRunLength  float32 `json:"current_run_length"`
 	RunLengthPass     *bool   `json:"run_length_pass"`
-	TrajectorySign    string  `json:"trajectory_sign"` // "pos" | "neg" | "zero" — sign of TrajUsed
+	TrajectorySign    string  `json:"trajectory_sign"` // sign of TrajUsed: "pos" | "neg" | "zero"
 	FirstBlocking     string  `json:"first_blocking,omitempty"`
 }
 
@@ -139,18 +131,14 @@ func (b *Bandit) Decide(resp *PossessionResponse, hasPosition bool) (Action, Gat
 		trajSign = "neg"
 	}
 
-	// Both of these are named response fields, NOT Features lookups. They were
-	// read out of the feature dict until the physics consolidation removed
-	// `period` and `current_run_length` from it, which silently turned the
-	// overtime skip off and drove currentRunLength to 0 so no entry could clear
-	// minRunLengthEntry. Keep gate inputs off the feature map.
+	// Gate inputs are named response fields, never Features lookups. Go returns
+	// zero for a missing map key with no error, so reading a gate out of the
+	// feature map lets a feature rename silently disable it.
 	currentRunLength := resp.CurrentRunLength
 	inBand := resp.YesBid >= b.minYesBid && resp.YesBid <= b.maxYesBid
 
-	// Overtime (period >= 5) is a hard skip: training excludes OT rows entirely,
-	// and on 2026-05-13 OT triggered scanner thrash (6 market swaps in 6 minutes)
-	// and a 50¢ scanner-vs-WebSocket price disagreement. Same effect as garbage
-	// time, distinct telemetry label so post-game inspection can attribute it.
+	// Overtime is a hard skip: training excludes OT rows, so the model was never
+	// fit on the regime. Same effect as garbage time, separate telemetry label.
 	isOvertime := resp.IsOvertime
 
 	g := GateResult{
@@ -168,7 +156,7 @@ func (b *Bandit) Decide(resp *PossessionResponse, hasPosition bool) (Action, Gat
 		TrajectorySign:   trajSign,
 	}
 
-	// Highest-precedence gates apply equally to entry and to held positions.
+	// These gates apply equally to entries and to held positions.
 	if isOvertime {
 		g.FirstBlocking = "is_overtime"
 		return Wait, g
@@ -186,16 +174,12 @@ func (b *Bandit) Decide(resp *PossessionResponse, hasPosition bool) (Action, Gat
 		return Wait, g
 	}
 
-	// Has-position branch: Router.CheckExit owns TP / SL / TIME_STOP.
-	// Bandit always returns Wait here.
+	// Router.CheckExit owns TP, SL and the time stop, so holding always waits here.
 	if hasPosition {
-		g.FirstBlocking = "holding_position"
 		g.FirstBlocking = "holding_position"
 		return Wait, g
 	}
 
-	// Entry path — backtest-aligned gate order:
-	//   run_prob → |traj| → run_length → sign
 	runProbPass := resp.RunProb >= b.minRunProbEntry
 	g.RunProbPass = &runProbPass
 	if !runProbPass {
@@ -217,9 +201,8 @@ func (b *Bandit) Decide(resp *PossessionResponse, hasPosition bool) (Action, Gat
 		return Wait, g
 	}
 
-	// Magnitude ≥ min_abs_traj_entry guarantees non-zero, so sign always picks a direction.
-	// This matches the backtest's `use_traj_for_side=True` mode — Head B's sign drives
-	// BUY YES vs BUY NO, independent of basketball run-team direction.
+	// Clearing the magnitude gate guarantees a non-zero value, so the sign always
+	// picks a side. Head B's sign drives it, independent of which team is on a run.
 	if trajUsed > 0 {
 		return BuyYes, g
 	}
@@ -233,6 +216,5 @@ func absF32(x float32) float32 {
 	return x
 }
 
-// Update is a no-op stub for the future Thompson Sampling bandit. Kept so
-// existing call sites compile; remove when the RL agent ships.
+// Update is a stub for the future Thompson Sampling bandit.
 func (b *Bandit) Update(ctx ContextKey, armIdx int, reward float64) {}

@@ -1,15 +1,13 @@
-// A Run identifies a single Go process invocation. The Coordinator may manage
-// many games inside one Run, but they all share the same RunID.
+// A Run identifies one process invocation. The Coordinator may manage many games
+// inside a Run, but they all share its ID and its directory under
+// logs/runs/{date}/{run_id}/, which holds:
 //
-// Each Run gets a dedicated directory under logs/runs/{date}/{run_id}/ which
-// will hold (across phases):
-//   - manifest.json     config snapshot, git SHA, paper/live, started/ended
-//   - live-trader.jsonl one JSON object per event (Phase 2+)
-//   - stderr.log        captured zerolog warnings/errors (Phase 7)
+//   - manifest.json      config snapshot, git SHA, paper/live, start and end
+//   - live-trader.jsonl  one JSON object per event
+//   - stderr.log         captured zerolog warnings and errors
 //
-// Run is constructed once in main.go and threaded through Coordinator and
-// every GameEngine. It is intentionally lightweight — no I/O happens during
-// Phase 1 inside the trading loop, only at startup and shutdown.
+// Run is built once in main.go and threaded through every GameEngine. It does no
+// I/O inside the trading loop, only at startup and shutdown.
 package main
 
 import (
@@ -40,11 +38,10 @@ type Run struct {
 	manifestPath string
 }
 
-// NewRun creates the run directory and returns a Run handle. LogDir is
-// stored as an absolute path so the Python inference service (which runs
-// from a different working directory) can find the same directory when we
-// pass log_dir on /game/start. Does not yet write the manifest — call
-// WriteManifest after the full Config is in hand.
+// NewRun creates the run directory and returns a handle. LogDir is absolute so the
+// Python service, which runs from a different working directory, resolves the same
+// path when we send log_dir on /game/start. Call WriteManifest once the Config is
+// in hand.
 func NewRun(paperMode bool) (*Run, error) {
 	id := generateRunID()
 	startedAt := time.Now().UTC()
@@ -57,8 +54,7 @@ func NewRun(paperMode bool) (*Run, error) {
 
 	absLogDir, err := filepath.Abs(logDir)
 	if err != nil {
-		// Fallback to relative — manifest still works, only Python plumbing
-		// might fail to resolve (in which case Python falls back to no JSONL).
+		// The manifest still works relative; only Python's JSONL may not resolve.
 		absLogDir = logDir
 	}
 
@@ -71,21 +67,19 @@ func NewRun(paperMode bool) (*Run, error) {
 	}, nil
 }
 
-// generateRunID returns "20260509-034211-9a7b3c" — sortable, unique enough
-// across overlapping process starts (3 random bytes = 16M space per second).
+// generateRunID returns a sortable id like "20260509-034211-9a7b3c". The three
+// random bytes give 16M values per second, enough for overlapping process starts.
 func generateRunID() string {
 	ts := time.Now().UTC().Format("20060102-150405")
 	b := make([]byte, 3)
 	if _, err := rand.Read(b); err != nil {
-		// Crypto rand failure is exotic; fall back to something deterministic-ish.
 		return ts + "-000000"
 	}
 	return fmt.Sprintf("%s-%s", ts, hex.EncodeToString(b))
 }
 
-// WriteManifest writes the initial manifest.json. Best-effort: failures log
-// a warning but do not propagate, so a missing/unwritable log dir cannot
-// crash the engine.
+// WriteManifest writes the initial manifest.json. Best-effort, so an unwritable
+// log directory cannot crash the engine.
 func (r *Run) WriteManifest(cfg Config) {
 	if r == nil {
 		return
@@ -103,14 +97,13 @@ func (r *Run) WriteManifest(cfg Config) {
 		"env_present":    detectEnvPresent(),
 	}
 	if err := writeJSONFile(r.manifestPath, manifest); err != nil {
-		zlog.Warn().Err(err).Str("path", r.manifestPath).Msg("manifest write failed — continuing")
+		zlog.Warn().Err(err).Str("path", r.manifestPath).Msg("manifest write failed, continuing")
 	}
 }
 
-// FinalizeManifest reopens the manifest, sets ended_at + end_reason +
-// summary stats, and rewrites it. Best-effort. Safe to call multiple times
-// (last call wins). Summary is computed from live-trader.jsonl so callers
-// don't need to thread shared counters across game engines.
+// FinalizeManifest rewrites the manifest with ended_at, end_reason and summary
+// stats. Safe to call more than once; the last call wins. The summary comes from
+// live-trader.jsonl, so no counters need threading across game engines.
 func (r *Run) FinalizeManifest(endReason string) {
 	if r == nil {
 		return
@@ -137,10 +130,9 @@ func (r *Run) FinalizeManifest(endReason string) {
 	}
 }
 
-// CaptureStderr redirects zerolog warnings/errors to stderr.log in the run
-// directory while still printing them to the terminal (io.MultiWriter).
-// Returns the file handle so main can defer-close it. Best-effort: any
-// failure returns nil and leaves zlog targeting stderr only.
+// CaptureStderr tees zerolog output into stderr.log while still printing it to the
+// terminal, and returns the file handle so main can defer its close. On failure it
+// returns nil and leaves zlog on stderr alone.
 func (r *Run) CaptureStderr() *os.File {
 	if r == nil {
 		return nil
@@ -148,19 +140,15 @@ func (r *Run) CaptureStderr() *os.File {
 	path := filepath.Join(r.LogDir, "stderr.log")
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
-		log.Printf("[WARN] could not open stderr.log: %v — zerolog stays on stderr only", err)
+		log.Printf("[WARN] could not open stderr.log: %v, zerolog stays on stderr only", err)
 		return nil
 	}
-	// Replace the package-level zlog writer. All future zlog calls land
-	// in both terminal and file. Existing call sites are unchanged.
 	zlog = zerolog.New(io.MultiWriter(os.Stderr, f)).With().Timestamp().Logger()
 	return f
 }
 
-// computeSummary scans live-trader.jsonl and aggregates per-event counters.
-// Lives here (not in jsonlog.go) because it's a manifest concern: nothing
-// in the trading loop needs this data. Returns empty stats if the JSONL
-// file is missing or unreadable — the manifest still gets ended_at.
+// computeSummary aggregates per-event counters out of live-trader.jsonl. If that
+// file is missing the manifest still gets ended_at, just with empty stats.
 func (r *Run) computeSummary(endedAt time.Time) map[string]interface{} {
 	durationSecs := int(endedAt.Sub(r.StartedAt).Seconds())
 
@@ -189,11 +177,11 @@ func (r *Run) computeSummary(endedAt time.Time) map[string]interface{} {
 	)
 
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 1<<20), 1<<24) // up to 16MB lines (defensive)
+	scanner.Buffer(make([]byte, 1<<20), 1<<24) // tolerate lines up to 16MB
 	for scanner.Scan() {
 		var rec map[string]interface{}
 		if err := json.Unmarshal(scanner.Bytes(), &rec); err != nil {
-			continue // best-effort: skip malformed lines
+			continue // skip malformed lines
 		}
 		event, _ := rec["event"].(string)
 		switch event {
@@ -247,8 +235,7 @@ func (r *Run) computeSummary(endedAt time.Time) map[string]interface{} {
 	}
 }
 
-// readGitSHA shells out to `git rev-parse HEAD`. Returns "unknown" on any
-// failure (e.g. running outside a repo, git not installed).
+// readGitSHA returns "unknown" outside a repo or when git is missing.
 func readGitSHA() string {
 	out, err := exec.Command("git", "rev-parse", "HEAD").Output()
 	if err != nil {
@@ -257,9 +244,8 @@ func readGitSHA() string {
 	return strings.TrimSpace(string(out))
 }
 
-// detectEnvPresent reports which relevant env vars are set, by name only.
-// Values are NEVER recorded — this is for repro audits, not credential
-// inventory.
+// detectEnvPresent reports which env vars are set, by name only. Values are never
+// recorded: this is for reproducing a run, not for inventorying credentials.
 func detectEnvPresent() map[string]bool {
 	keys := []string{
 		"KALSHI_KEY_ID",

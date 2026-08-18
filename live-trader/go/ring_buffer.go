@@ -1,25 +1,22 @@
-// KalshiRingBuffer maintains a rolling window of Kalshi ticks (last 120s)
-// and computes the 14 MARKET_COLS features on demand at Snapshot() time.
+// RingBuffer keeps the last 120s of Kalshi ticks and computes the 14 MARKET_COLS
+// features on demand. Python never sees raw ticks, only these snapshots.
 //
-// This is the Go side of the X vector computation. It produces the market
-// feature slice that Go passes to the Python inference service alongside
-// each raw NBA event. Python never sees raw ticks — only this snapshot.
+// Feature order must match MARKET_COLS in models/mmoe/feature_config.py:
 //
-// Feature definitions (must match models/mmoe/feature_config.py MARKET_COLS order):
-//   [0]  yes_bid                  — current best bid (cents)
-//   [1]  yes_ask                  — current best ask (cents)
-//   [2]  spread                   — yes_ask - yes_bid
-//   [3]  yes_last                 — last traded price (cents)
-//   [4]  open_interest            — total open contracts
-//   [5]  trade_volume_60s         — sum of volume in last 60s
-//   [6]  time_since_last_trade_ms — ms since last volume > 0 tick
-//   [7]  open_interest_change_60s — open_interest now - open_interest 60s ago
-//   [8]  d_yes_bid                — yes_bid now - yes_bid at last possession snapshot
-//   [9]  d_spread                 — spread now - spread at last possession snapshot
-//   [10] bid_velocity_30s         — (bid_now - bid_30s_ago) / 30
-//   [11] bid_acceleration_30s     — velocity_now - velocity_30s_ago
-//   [12] bid_vs_last_divergence   — yes_bid - yes_last
-//   [13] has_market_data          — 1.0 if feed active, 0.0 if stale
+//	[0]  yes_bid                   current best bid (cents)
+//	[1]  yes_ask                   current best ask (cents)
+//	[2]  spread                    yes_ask - yes_bid
+//	[3]  yes_last                  last traded price (cents)
+//	[4]  open_interest             total open contracts
+//	[5]  trade_volume_60s          volume traded in the last 60s
+//	[6]  time_since_last_trade_ms  ms since a tick carried a trade
+//	[7]  open_interest_change_60s  open interest now minus 60s ago
+//	[8]  d_yes_bid                 yes_bid change since the last possession
+//	[9]  d_spread                  spread change since the last possession
+//	[10] bid_velocity_30s          (bid_now - bid_30s_ago) / 30
+//	[11] bid_acceleration_30s      velocity now minus velocity last possession
+//	[12] bid_vs_last_divergence    yes_bid - yes_last
+//	[13] has_market_data           1.0 if the feed is active, 0.0 if stale
 package main
 
 import (
@@ -39,23 +36,22 @@ type MarketSnapshot struct {
 
 type RingBuffer struct {
 	mu           sync.RWMutex
-	ticks        []KalshiTick  // rolling window, newest last
-	prevSnap     MarketSnapshot // snapshot taken at last possession (for d_yes_bid, d_spread)
-	prevVelocity float32        // velocity at last possession snapshot (for acceleration)
+	ticks        []KalshiTick   // rolling window, newest last
+	prevSnap     MarketSnapshot // last possession's snapshot, for d_yes_bid and d_spread
+	prevVelocity float32        // last possession's velocity, for acceleration
 }
 
 func NewRingBuffer() *RingBuffer {
 	return &RingBuffer{}
 }
 
-// Update adds a new tick to the buffer. Called from the Kalshi feed goroutine.
+// Update adds a tick to the buffer. Called from the Kalshi feed goroutine.
 func (rb *RingBuffer) Update(tick KalshiTick) {
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
 
 	rb.ticks = append(rb.ticks, tick)
 
-	// Evict ticks older than ringWindowSecs from the front.
 	cutoff := tick.TS.Add(-ringWindowSecs * time.Second)
 	evict := 0
 	for evict < len(rb.ticks) && rb.ticks[evict].TS.Before(cutoff) {
@@ -66,9 +62,8 @@ func (rb *RingBuffer) Update(tick KalshiTick) {
 	}
 }
 
-// Snapshot computes all 14 market features from current buffer state.
-// Called from the game engine main loop on each possession event.
-// Updates prevSnap so the next call can compute d_yes_bid / d_spread.
+// Snapshot computes all 14 market features from the current buffer. The game loop
+// calls it once per possession; it updates prevSnap so the next call can diff.
 func (rb *RingBuffer) Snapshot() MarketSnapshot {
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
@@ -89,9 +84,8 @@ func (rb *RingBuffer) Snapshot() MarketSnapshot {
 	// [5] volume in last 60s
 	vol60 := rb.volumeWindow(60)
 
-	// [6] ms since a tick actually carried a trade.
-	// The predicate is the DELTA in the cumulative counter, not the counter
-	// itself — `Volume > 0` is true on 99.96% of ticks and made this ~0 always.
+	// [6] ms since a tick actually carried a trade. The test is the delta in the
+	// cumulative counter, not the counter itself, which is non-zero on nearly every tick.
 	timeSinceLastTrade := float32(999999)
 	for i := len(rb.ticks) - 1; i >= 1; i-- {
 		if rb.tradedAt(i) > 0 {
@@ -149,13 +143,9 @@ func (rb *RingBuffer) Snapshot() MarketSnapshot {
 	return snap
 }
 
-// volumeWindow sums the volume actually TRADED in the last nSecs seconds.
-//
-// Kalshi's `volume` field is a cumulative lifetime counter, not per-tick size, so
-// this sums first differences between consecutive ticks rather than the raw field.
-// Summing the raw field yielded roughly (ticks in window) x (lifetime volume) —
-// a number with no relationship to recent trading activity. Mirrors
-// models/mmoe/dataset.py::_compute_market_features_for_game.
+// volumeWindow sums the volume actually traded in the last nSecs seconds. Kalshi's
+// `volume` is a cumulative lifetime counter, so this sums first differences between
+// consecutive ticks. Mirrors dataset.py::_compute_market_features_for_game.
 func (rb *RingBuffer) volumeWindow(nSecs int) int {
 	cutoff := time.Now().Add(-time.Duration(nSecs) * time.Second)
 	total := 0
@@ -170,9 +160,8 @@ func (rb *RingBuffer) volumeWindow(nSecs int) int {
 	return total
 }
 
-// tradedAt reports the volume traded at tick i, i.e. the increase in the
-// cumulative counter since the previous tick. The oldest retained tick has no
-// predecessor and is reported as no trade rather than as its whole lifetime total.
+// tradedAt reports the volume traded at tick i: the rise in the cumulative counter
+// since the previous tick. The oldest tick has no predecessor and reports no trade.
 func (rb *RingBuffer) tradedAt(i int) int {
 	if i <= 0 {
 		return 0
@@ -183,8 +172,7 @@ func (rb *RingBuffer) tradedAt(i int) int {
 	return 0
 }
 
-// bidAtOffset returns the YesBid of the tick nearest to now - nSecs*time.Second.
-// Falls back to current bid if no tick is found.
+// bidAtOffset returns the YesBid of the tick nearest to nSecs ago.
 func (rb *RingBuffer) bidAtOffset(nSecs int) int {
 	if len(rb.ticks) == 0 {
 		return 0
@@ -198,8 +186,8 @@ func (rb *RingBuffer) bidAtOffset(nSecs int) int {
 			bestDiff = d
 			best = rb.ticks[i]
 		}
-		// Ticks are sorted oldest-first; once we pass the target going backwards,
-		// further ticks are only getting farther away.
+		// Ticks are oldest-first, so once we pass the target walking backwards the
+		// rest are only getting farther away.
 		if rb.ticks[i].TS.Before(target) {
 			break
 		}
@@ -207,7 +195,7 @@ func (rb *RingBuffer) bidAtOffset(nSecs int) int {
 	return best.YesBid
 }
 
-// openInterestAtOffset returns the OpenInterest of the tick nearest to now - nSecs*time.Second.
+// openInterestAtOffset returns the OpenInterest of the tick nearest to nSecs ago.
 func (rb *RingBuffer) openInterestAtOffset(nSecs int) int {
 	if len(rb.ticks) == 0 {
 		return 0

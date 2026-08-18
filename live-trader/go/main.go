@@ -15,14 +15,12 @@ func main() {
 	configPath := flag.String("config", "", "Path to trading.yaml (default: auto-detect)")
 	flag.Parse()
 
-	// ── Load .env ────────────────────────────────────────────────────────
 	if loadedEnv, err := LoadEnvCandidates(".env", "../.env", "../../.env"); err != nil {
 		log.Printf("[WARN] could not load .env from project root: %v", err)
 	} else {
 		log.Printf("[ENV] loaded %s", loadedEnv)
 	}
 
-	// ── Load config ──────────────────────────────────────────────────────
 	cfgFile := *configPath
 	if cfgFile == "" {
 		candidates := []string{
@@ -41,7 +39,7 @@ func main() {
 	if cfgFile != "" {
 		loaded, err := LoadConfig(cfgFile)
 		if err != nil {
-			log.Printf("[WARN] could not load config %s: %v — using defaults", cfgFile, err)
+			log.Printf("[WARN] could not load config %s: %v, using defaults", cfgFile, err)
 			cfg = defaultConfig()
 		} else {
 			cfg = *loaded
@@ -49,24 +47,18 @@ func main() {
 		}
 	} else {
 		cfg = defaultConfig()
-		log.Printf("[CONFIG] no config file found — using defaults (paper_mode=true)")
+		log.Printf("[CONFIG] no config file found, using defaults (paper_mode=true)")
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	// ── Run identity ─────────────────────────────────────────────────────
-	// Every process invocation gets a Run with its own logs/runs/{date}/{id}/
-	// directory. Manifest is written immediately; live-trader.jsonl will
-	// receive run_start / run_end here in Phase 1, and richer events in
-	// later phases. All failures here are non-fatal — the trading engine
-	// runs even if structured logging cannot start.
+	// Every invocation gets a Run with its own log directory. Failures here are
+	// non-fatal: the engine trades even when structured logging cannot start.
 	run, runErr := NewRun(cfg.Trading.PaperMode)
 	if runErr != nil {
-		log.Printf("[WARN] could not create run dir: %v — continuing without structured logging", runErr)
+		log.Printf("[WARN] could not create run dir: %v, continuing without structured logging", runErr)
 	} else {
-		// Capture zerolog warnings/errors into stderr.log in the run dir.
-		// MultiWriter keeps terminal output unchanged. Best-effort.
 		if stderrFile := run.CaptureStderr(); stderrFile != nil {
 			defer stderrFile.Close()
 		}
@@ -79,12 +71,12 @@ func main() {
 		var jlErr error
 		jsonLog, jlErr = NewJSONLogger(run)
 		if jlErr != nil {
-			log.Printf("[WARN] could not open jsonl: %v — continuing without structured logging", jlErr)
+			log.Printf("[WARN] could not open jsonl: %v, continuing without structured logging", jlErr)
 		}
 	}
 
-	// Defers run LIFO. Order matters: emit run_end + finalize manifest
-	// FIRST (registered last so it runs first), then close the JSONL file.
+	// Defers run LIFO, so registering Close first makes it run last: run_end and
+	// the manifest are written before the file closes.
 	defer jsonLog.Close()
 	defer func() {
 		const endReason = "ctx_cancel"
@@ -98,13 +90,12 @@ func main() {
 		"pid":        os.Getpid(),
 	})
 
-	// In live mode, fail fast if credentials are missing or malformed
-	// rather than silently placing no orders.
+	// Fail fast on bad credentials rather than silently placing no orders.
 	if !cfg.Trading.PaperMode {
 		if _, err := GetKalshiAuthHeaders("GET", "/portfolio/balance"); err != nil {
 			log.Fatalf("[LIVE] credential check failed: %v\n  Set KALSHI_KEY_ID and KALSHI_PEM_PATH in .env", err)
 		}
-		log.Println("[LIVE] credentials verified ✓ — REAL MONEY MODE")
+		log.Println("[LIVE] credentials verified, REAL MONEY MODE")
 	}
 
 	ks := NewKillSwitch()
@@ -116,12 +107,10 @@ func main() {
 	}, ks)
 
 	if *gameID != "" && *eventTicker != "" {
-		// Single game mode
 		log.Printf("[MAIN] Starting in Single-Game mode for %s (%s)", *gameID, *eventTicker)
 		engine := NewGameEngine(*gameID, *eventTicker, cfg, ledger, ks, run, jsonLog)
 		engine.Run(ctx)
 	} else {
-		// Coordinator mode
 		log.Printf("[MAIN] Starting Coordinator mode. Will auto-detect and manage today's games.")
 		coordinator := NewCoordinator(cfg, ledger, ks, run, jsonLog)
 		if err := coordinator.Run(ctx); err != nil {
@@ -170,10 +159,10 @@ func defaultConfig() Config {
 		}{
 			MinYesBid: 30, MaxYesBid: 70, MinRunProbEntry: 0.0,
 			MinAbsTrajEntry: 0.08, MinRunLengthEntry: 2,
-			TrajAggregator: "mean",
+			TrajAggregator:  "mean",
 			TakeProfitCents: 5, StopLossCents: 3, MaxHoldPossessions: 14,
 			PositionSizeContracts: 10,
-			KellyAnchorTraj: 0.08, KellySlope: 200, KellyMinContracts: 10,
+			KellyAnchorTraj:       0.08, KellySlope: 200, KellyMinContracts: 10,
 			MarketDriftLowBid: 20, MarketDriftHighBid: 80,
 			ExitSlippageBudgetCents: 2, TrailActivateCents: 5, TrailGivebackCents: 0,
 			BlowoutMarginPts: 30, GarbageTimePeriod: 4, GarbageTimeClockSecs: 360,

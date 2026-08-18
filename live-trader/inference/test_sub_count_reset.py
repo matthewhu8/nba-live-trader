@@ -16,7 +16,7 @@ Run from project root:
 import sys
 from pathlib import Path
 
-# Make `inference` importable when run from project root
+# Make `inference` importable when running from the project root.
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from inference.game_state import GameState
@@ -36,7 +36,7 @@ def _sub_event(team_id: int, player_id: int, sub_type: str) -> dict:
 
 
 class _FakePossession:
-    """Minimal stand-in for PossessionRow — advance() only reads a few fields."""
+    """Minimal stand-in for PossessionRow; advance() reads only a few fields."""
     points = 0
     team_scored = ""
     shot_value = 0
@@ -76,7 +76,7 @@ def test_sub_count_stays_bounded_over_simulated_game() -> None:
     max_observed_home = 0
     max_observed_away = 0
 
-    # 60 possessions, with 0–3 subs sprinkled in per possession
+    # 60 possessions with a few subs sprinkled through each.
     sub_pattern = [0, 1, 0, 2, 0, 0, 3, 0, 1, 0]  # cycles through
 
     for poss_idx in range(60):
@@ -89,20 +89,19 @@ def test_sub_count_stays_bounded_over_simulated_game() -> None:
         max_observed_away = max(max_observed_away, state.away_sub_count)
         state.advance(_FakePossession())
 
-    # Sanity check that the test actually generated subs
-    assert max_observed_home + max_observed_away > 0, "test produced no subs — broken setup"
+    assert max_observed_home + max_observed_away > 0, "test produced no subs, broken setup"
 
-    # The hard invariant: never exceed training-distribution maximum
+    # The invariant: never exceed the training distribution's maximum.
     HARD_MAX = 5  # training data max observed was ~3; 5 leaves headroom
     assert max_observed_home <= HARD_MAX, (
-        f"home_sub_count climbed to {max_observed_home} during simulated game — "
+        f"home_sub_count climbed to {max_observed_home} during simulated game, "
         f"reset is not firing. Training max is ~3."
     )
     assert max_observed_away <= HARD_MAX, (
         f"away_sub_count climbed to {max_observed_away} during simulated game"
     )
 
-    # Final state must also be zero (last possession's advance cleared them)
+    # The last advance() must have cleared them too.
     assert state.home_sub_count == 0
     assert state.away_sub_count == 0
 

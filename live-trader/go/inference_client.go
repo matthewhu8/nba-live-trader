@@ -1,10 +1,9 @@
-// InferenceClient is the Go side of the Go↔Python boundary.
-// Sends (raw NBA event + Kalshi market snapshot) to the Python inference service.
-// Receives back the agent action, MMoE outputs, and assembled feature dict.
+// InferenceClient is the Go side of the Go/Python boundary. It posts each raw NBA
+// event plus the Kalshi market snapshot to the inference service and gets back the
+// MMoE outputs and the assembled feature dict.
 //
-// HTTP POST to localhost:8001/game/{gameID}/possession
-// Keep-alive connection reused across calls (<1ms overhead on localhost).
-// Timeout: 500ms. On timeout/error: log and return error (caller skips possession).
+// Connections are kept alive across calls. On timeout or error the caller skips
+// the possession.
 package main
 
 import (
@@ -20,12 +19,9 @@ const startGameTimeout = 30 * time.Second
 
 const inferenceTimeout = 500 * time.Millisecond
 
-// PossessionRequest is sent to the Python inference service.
-//
-// The garbage/blowout threshold fields are forwarded from trading.yaml so the
-// agent GATE flags (is_garbage_time / is_blowout) are config-driven rather than
-// hardcoded in Python. omitempty keeps the wire backwards-compatible: an older
-// Go binary that doesn't send them lets Python fall back to its 30/4/360 defaults.
+// PossessionRequest is sent to the Python inference service. The garbage and
+// blowout thresholds come from trading.yaml so the gate flags stay config-driven;
+// omitempty lets an older Go binary fall back to Python's defaults.
 type PossessionRequest struct {
 	RawEvent       NBAEvent    `json:"raw_event"`
 	KalshiSnapshot [14]float32 `json:"kalshi_snapshot"` // pre-computed by RingBuffer
@@ -36,54 +32,49 @@ type PossessionRequest struct {
 	GarbageTimeClockSecs int `json:"garbage_time_clock_secs,omitempty"`
 }
 
-// InferenceConfig holds the trading.yaml-derived values the Go engine forwards
-// to the Python inference service. Per-possession thresholds ride on
-// PossessionRequest; the once-per-game values ride on the /game/start body.
+// InferenceConfig holds the trading.yaml values the Go engine forwards to Python.
 type InferenceConfig struct {
-	// Garbage/blowout GATE (per-possession).
+	// Garbage and blowout gate, sent on every possession.
 	BlowoutMarginPts     int
 	GarbageTimePeriod    int
 	GarbageTimeClockSecs int
-	// Model artifact paths (once per game, on /game/start).
+	// Model artifacts, sent once on /game/start.
 	ModelPath  string
 	ScalerPath string
-	// Dashboard gate thresholds (once per game) — let the dashboard green-light
-	// mirror the real agent thresholds instead of stale hardcoded literals.
+	// Gate thresholds, sent once so the dashboard mirrors the live agent.
 	MinAbsTraj   float32
 	MinYesBid    int
 	MaxYesBid    int
 	MinRunLength int
 }
 
-// PossessionResponse is returned by the Python inference service.
-// Python has already assembled the full 58-feature vector and run the model.
+// PossessionResponse is returned by the Python inference service, which has already
+// assembled the 58-feature vector and run the model.
 //
-// Gate inputs vs model inputs: every value the agent gates on is a named field
-// here. Features is for LOGGING ONLY — never read a gate input out of it. Go
-// returns the zero value for a missing map key, so a feature rename or removal
-// turns a gate off silently. That is exactly how the physics consolidation
-// disabled the overtime skip and blocked every entry.
+// Every value the agent gates on is a named field here. Features is for logging
+// only: Go returns zero for a missing map key, so reading a gate out of that map
+// lets a feature rename turn the gate off silently.
 type PossessionResponse struct {
-	Action      string    `json:"action"`       // "BUY_YES" | "BUY_NO" | "EXIT" | "WAIT"
-	RunProb     float32   `json:"run_prob"`
-	Trajectory  [10]float32 `json:"trajectory"` // log-odds delta checkpoints
-	Hazard      [10]float32 `json:"hazard"`     // survival hazard per horizon
-	YesBid      int       `json:"yes_bid"`
-	YesAsk      int       `json:"yes_ask"`
-	IsGarbageTime bool    `json:"is_garbage_time"`
-	IsBlowout   bool      `json:"is_blowout"`
+	Action        string      `json:"action"` // "BUY_YES" | "BUY_NO" | "EXIT" | "WAIT"
+	RunProb       float32     `json:"run_prob"`
+	Trajectory    [10]float32 `json:"trajectory"` // log-odds delta checkpoints
+	Hazard        [10]float32 `json:"hazard"`     // survival hazard per horizon
+	YesBid        int         `json:"yes_bid"`
+	YesAsk        int         `json:"yes_ask"`
+	IsGarbageTime bool        `json:"is_garbage_time"`
+	IsBlowout     bool        `json:"is_blowout"`
 	// Gate inputs, captured pre-advance so they match the state the model saw.
-	IsOvertime       bool    `json:"is_overtime"`
-	CurrentRunLength float32 `json:"current_run_length"`
-	Features    map[string]float32 `json:"features"` // 58-feature dict, logging only
-	PipelineMS  int64     `json:"pipeline_ms"`
+	IsOvertime       bool               `json:"is_overtime"`
+	CurrentRunLength float32            `json:"current_run_length"`
+	Features         map[string]float32 `json:"features"` // 58-feature dict, logging only
+	PipelineMS       int64              `json:"pipeline_ms"`
 }
 
 type InferenceClient struct {
-	baseURL       string
-	cfg           InferenceConfig
-	httpClient    *http.Client // 500ms timeout — used for ProcessPossession
-	slowClient    *http.Client // no client-level timeout — used for StartGame (ctx controls deadline)
+	baseURL    string
+	cfg        InferenceConfig
+	httpClient *http.Client // 500ms timeout, for ProcessPossession
+	slowClient *http.Client // no client timeout; the context sets the deadline
 }
 
 func NewInferenceClient(baseURL string, cfg InferenceConfig) *InferenceClient {
@@ -104,14 +95,10 @@ func NewInferenceClient(baseURL string, cfg InferenceConfig) *InferenceClient {
 	}
 }
 
-// StartGame initializes a game on the Python inference service.
-// Must be called before any ProcessPossession calls for this game.
-// Uses a 30s timeout — Python loads pregame context from MotherDuck on this call.
-//
-// runID and logDir activate Python-side JSONL logging for this run. Both
-// are optional during the rolling upgrade: a Go binary that doesn't yet
-// send them works against an old Python service, and a new Python service
-// that doesn't receive them simply skips structured logging for that run.
+// StartGame initializes a game on the Python inference service and must be called
+// before any possession for that game. The timeout is generous because Python loads
+// pregame context from MotherDuck here. runID and logDir turn on Python-side JSONL
+// logging; both are optional.
 func (c *InferenceClient) StartGame(ctx context.Context, gameID, ticker string, homeID, awayID int64, runID, logDir string) error {
 	body, err := json.Marshal(struct {
 		MarketTicker string `json:"market_ticker"`
@@ -119,8 +106,7 @@ func (c *InferenceClient) StartGame(ctx context.Context, gameID, ticker string, 
 		AwayTeamID   int64  `json:"away_team_id"`
 		RunID        string `json:"run_id,omitempty"`
 		LogDir       string `json:"log_dir,omitempty"`
-		// Forwarded config — model paths (Python reloads only on change) and the
-		// dashboard gate thresholds (so the dashboard tracks the live agent).
+		// Python reloads the model only when these paths change.
 		ModelPath    string  `json:"model_path,omitempty"`
 		ScalerPath   string  `json:"scaler_path,omitempty"`
 		MinAbsTraj   float32 `json:"min_abs_traj,omitempty"`
@@ -166,8 +152,7 @@ func (c *InferenceClient) StartGame(ctx context.Context, gameID, ticker string, 
 	return nil
 }
 
-// EndGame cleans up game state on the Python inference service.
-// Best-effort — errors are logged by the caller but not fatal.
+// EndGame cleans up game state on the Python inference service. Best-effort.
 func (c *InferenceClient) EndGame(ctx context.Context, gameID string) error {
 	body := []byte("{}")
 
@@ -230,12 +215,10 @@ func (c *InferenceClient) ProcessPossession(
 	return &resp, nil
 }
 
-// TradePayload is sent back to Python when the Go engine executes a paper trade.
-// MarketTicker records the Kalshi market actually subscribed at order time —
-// the dashboard parses it to label trades with the real team being backed
-// (e.g., "BUY SAS" instead of "BUY YES"). Set this from a snapshot taken at
-// the moment of order placement, never from a possession message, so a
-// late-arriving market swap can't relabel a trade in flight.
+// TradePayload is sent back to Python when the Go engine executes a trade.
+// MarketTicker must be read at order placement, never from a possession message,
+// so a late market swap cannot relabel a trade already in flight. The dashboard
+// parses it to show the team backed rather than "YES".
 type TradePayload struct {
 	Action       string  `json:"action"`
 	Direction    string  `json:"direction"`
@@ -254,8 +237,7 @@ func (c *InferenceClient) ReportTrade(gameID string, payload TradePayload) {
 	if err != nil {
 		return
 	}
-	
-	// Create a new context with a short timeout so we don't block
+
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
@@ -264,7 +246,7 @@ func (c *InferenceClient) ReportTrade(gameID string, payload TradePayload) {
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
-	
+
 	resp, err := c.slowClient.Do(req)
 	if err == nil {
 		resp.Body.Close()

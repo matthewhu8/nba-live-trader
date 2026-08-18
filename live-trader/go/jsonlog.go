@@ -1,14 +1,9 @@
-// JSONLogger writes one JSON object per line to live-trader.jsonl in the
-// run directory. Goroutine-safe: every Emit acquires a mutex so concurrent
-// game engines from the Coordinator do not interleave bytes within a record.
+// JSONLogger writes one JSON object per line to live-trader.jsonl. Every Emit takes
+// a mutex, so concurrent game engines cannot interleave bytes inside a record.
 //
-// Best-effort semantics: write errors are warned (rate-limited to one per
-// minute) and silently dropped. The trading loop never fails because of a
-// logging error. Calling Emit on a nil receiver is a deliberate no-op so
-// callers don't have to nil-check every emit site.
-//
-// Phase 1 emits only run_start / run_end. Phase 2+ adds the rich event set
-// (possession, entry, hold, exit, market_swap, etc.).
+// Writes are best-effort: errors warn at most once a minute and are then dropped,
+// and Emit on a nil receiver is a no-op, so no call site has to nil-check. A
+// logging failure never breaks the trading loop.
 package main
 
 import (
@@ -28,9 +23,8 @@ type JSONLogger struct {
 	lastWarn time.Time
 }
 
-// NewJSONLogger opens (or creates+appends) live-trader.jsonl in the run dir.
-// On open failure, returns nil + error — caller should warn and proceed with
-// a nil logger (Emit on nil is a safe no-op).
+// NewJSONLogger opens live-trader.jsonl in the run dir, creating or appending. On
+// failure the caller should warn and carry on with a nil logger.
 func NewJSONLogger(run *Run) (*JSONLogger, error) {
 	if run == nil {
 		return nil, fmt.Errorf("nil run")
@@ -43,12 +37,9 @@ func NewJSONLogger(run *Run) (*JSONLogger, error) {
 	return &JSONLogger{file: f, runID: run.ID}, nil
 }
 
-// Emit writes a single record. event is the discriminator (e.g. "run_start",
-// "possession"); gameID may be empty for run-level events; fields carries the
-// event-specific payload.
-//
-// Envelope fields (schema_version, ts, run_id, event, game_id) are added
-// automatically and override any same-named keys in fields.
+// Emit writes one record. gameID may be empty for run-level events. The envelope
+// fields (schema_version, ts, run_id, event, game_id) are added here and override
+// any same-named key in fields.
 func (l *JSONLogger) Emit(event, gameID string, fields map[string]interface{}) {
 	if l == nil {
 		return
@@ -63,7 +54,7 @@ func (l *JSONLogger) Emit(event, gameID string, fields map[string]interface{}) {
 	for k, v := range fields {
 		record[k] = v
 	}
-	// Envelope last so it wins over any caller-supplied collision.
+	// Envelope goes last so it wins any collision with a caller-supplied key.
 	record["schema_version"] = 1
 	record["ts"] = time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
 	record["run_id"] = l.runID
@@ -83,8 +74,7 @@ func (l *JSONLogger) Emit(event, gameID string, fields map[string]interface{}) {
 	}
 }
 
-// Close flushes and closes the underlying file. Safe to call on nil and
-// idempotent.
+// Close flushes and closes the file. Idempotent and safe to call on nil.
 func (l *JSONLogger) Close() {
 	if l == nil {
 		return

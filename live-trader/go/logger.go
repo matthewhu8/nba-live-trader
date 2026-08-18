@@ -1,13 +1,6 @@
-// Human-readable console logger for the paper trading system.
-//
-// Every meaningful event produces one self-contained line to stdout so anyone
-// watching the terminal can follow exactly what the system is doing. Trade
-// events (Entry, Hold, Exit) are also written to a per-game log file under
-// logs/paper_trades/ for post-game review.
-//
-// EmitPossession replaces the old zerolog JSON line with a plain formatted
-// text line. The zerolog global (zlog) is kept only for debug/warn/error
-// messages that don't need human-readable formatting.
+// Human-readable console logger. Every meaningful event prints one self-contained
+// line to stdout so anyone watching the terminal can follow what the system is
+// doing. Trade events also go to a per-game file under logs/paper_trades/.
 package main
 
 import (
@@ -20,8 +13,8 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// zlog is for structured debug/warn/error messages only — not for the
-// human-readable trade lines, which go through writeLine / fmt.Fprintln.
+// zlog carries structured debug and error messages. Human-readable trade lines go
+// through writeLine instead.
 var zlog = zerolog.New(os.Stderr).With().Timestamp().Logger()
 
 // GameSummary holds end-of-game stats passed to EmitGameSummary.
@@ -36,12 +29,10 @@ type GameSummary struct {
 	WinRate         float64 // 0.0–1.0
 }
 
-// Logger writes human-readable event lines to stdout and, for trade events,
-// to a per-game file under logs/paper_trades/.
 type Logger struct {
 	paperMode      bool
 	redisStream    string
-	trajAggregator string // chosen Head B aggregator — keeps console output in lockstep with the trading decision
+	trajAggregator string // matches the agent's, so console output tracks the decision
 	logFile        *os.File
 }
 
@@ -52,18 +43,14 @@ func NewLogger(paperMode bool, redisStream, trajAggregator string) *Logger {
 	return &Logger{paperMode: paperMode, redisStream: redisStream, trajAggregator: trajAggregator}
 }
 
-// OpenTradeLog creates (or appends to) logs/paper_trades/{gameID}_{date}.log.
-// Call once at game start. On failure, logs a warning and continues — the
-// process never crashes because of a missing log directory.
-//
-// runID may be empty; if set, a session banner line is written to mark this
-// session boundary. Banners make it possible to tell apart multiple runs that
-// share a single date-anchored .log file (the issue we saw last night where
-// one file contained 4 GAME SUMMARY blocks glued together).
+// OpenTradeLog opens logs/paper_trades/{gameID}_{date}.log, creating or appending.
+// Call it once at game start; a missing log directory warns rather than crashing.
+// A non-empty runID writes a banner so runs sharing one date-anchored file stay
+// distinguishable.
 func (l *Logger) OpenTradeLog(gameID, runID string) {
 	dir := "logs/paper_trades"
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		zlog.Warn().Str("dir", dir).Err(err).Msg("could not create paper_trades directory — file logging disabled")
+		zlog.Warn().Str("dir", dir).Err(err).Msg("could not create paper_trades directory, file logging disabled")
 		return
 	}
 
@@ -72,7 +59,7 @@ func (l *Logger) OpenTradeLog(gameID, runID string) {
 
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
-		zlog.Warn().Str("path", path).Err(err).Msg("could not open trade log — file logging disabled")
+		zlog.Warn().Str("path", path).Err(err).Msg("could not open trade log, file logging disabled")
 		return
 	}
 
@@ -87,8 +74,7 @@ func (l *Logger) OpenTradeLog(gameID, runID string) {
 	}
 }
 
-// writeLine writes msg to stdout and, if a log file is open, to the file too.
-// All trade events (Entry, Hold, Exit) go through here.
+// writeLine writes msg to stdout and, when one is open, to the trade log file.
 func (l *Logger) writeLine(msg string) {
 	fmt.Fprintln(os.Stdout, msg)
 	if l.logFile != nil {
@@ -96,18 +82,15 @@ func (l *Logger) writeLine(msg string) {
 	}
 }
 
-// ts returns the current UTC timestamp in the standard log format.
+// ts returns the current UTC timestamp in the log format.
 func ts() string {
 	return time.Now().UTC().Format("2006-01-02T15:04:05Z")
 }
 
-// EmitPossession prints one line per possession showing model output and the
-// action the system intends to take. Not written to the trade log file —
-// stdout only, because every possession would bloat the file.
+// EmitPossession prints one line per possession with the model output and the
+// intended action. Stdout only; writing every possession would bloat the trade log.
 //
-// Example:
-//
-//	2026-04-29T20:15:30Z  Q2 07:32  WAIT     run=0.12  traj=-0.03  bid=47¢  ask=49¢  game=0042500121  pipeline=87ms
+//	2026-04-29T20:15:30Z  Q2 07:32  WAIT  run=0.12  traj=-0.03  bid=47¢  ask=49¢  game=0042500121  pipeline=87ms
 func (l *Logger) EmitPossession(
 	gameID string,
 	event NBAEvent,
@@ -121,9 +104,8 @@ func (l *Logger) EmitPossession(
 		trajSign = "+"
 	}
 
-	// Parser-skip events (mid-possession fouls, offensive rebounds, etc.) have
-	// no model output and no dashboard broadcast — suppress from terminal to
-	// avoid false impression of a WAIT with zero model signal.
+	// Skipped events carry no model output, so printing them would look like a
+	// WAIT on a zero signal.
 	if resp.Action == "SKIP" {
 		return
 	}
@@ -154,8 +136,6 @@ func (l *Logger) EmitPossession(
 
 // EmitEntry prints and files a BUY entry event.
 //
-// Example:
-//
 //	2026-04-29T20:15:45Z  ★ BUY_YES  run=0.23  traj=+0.09  bid=52¢  3×  game=0042500121
 func (l *Logger) EmitEntry(gameID string, pos *PaperPosition, resp *PossessionResponse) {
 	trajUsed := aggregateTraj(resp.Trajectory, l.trajAggregator)
@@ -178,15 +158,11 @@ func (l *Logger) EmitEntry(gameID string, pos *PaperPosition, resp *PossessionRe
 	l.writeLine(line)
 }
 
-// EmitHold prints a HOLD update for an open position. Called every possession
-// while a position is live.
+// EmitHold prints a HOLD update once per possession while a position is live.
 //
-// The displayed "bid" is the price of the side we own (yes_bid for YES positions,
-// no_bid ≈ 100 - yes_ask for NO positions) — mirrors the direction-aware logic
-// in Router.CheckExit so the operator sees the price actually moving for/against
-// the position, not the raw yes_bid which inverts sign for NO holds.
-//
-// Example:
+// The printed bid is the price of the side we own, mirroring Router.CheckExit, so
+// the operator sees the price moving for or against the position. The raw yes_bid
+// would invert for NO holds.
 //
 //	2026-04-29T20:15:52Z  HOLD  bid=54¢  +2¢  unrealized=+$1.17  poss=3  hazard5=0.31  game=0042500121
 func (l *Logger) EmitHold(gameID string, pos *PaperPosition, resp *PossessionResponse, possHeld int) {
@@ -224,12 +200,10 @@ func (l *Logger) EmitHold(gameID string, pos *PaperPosition, resp *PossessionRes
 	l.writeLine(line)
 }
 
-// EmitExit prints and files a position close event.
-// reason is the raw string from CheckExit: "TAKE_PROFIT", "STOP_LOSS", "TIME_STOP".
+// EmitExit prints and files a position close. reason is the raw string from
+// CheckExit, e.g. "TAKE_PROFIT" or "STOP_LOSS".
 //
-// Example:
-//
-//	2026-04-29T20:16:10Z  TP_EXIT    entry=52¢  exit=60¢  P&L=+$5.90  poss=3  game=0042500121
+//	2026-04-29T20:16:10Z  TP_EXIT  entry=52¢  exit=60¢  P&L=+$5.90  poss=3  game=0042500121
 func (l *Logger) EmitExit(gameID, reason string, pos *PaperPosition, exitPrice int, netPnL float64, possHeld int) {
 	pnlSign := ""
 	if netPnL >= 0 {
@@ -250,11 +224,7 @@ func (l *Logger) EmitExit(gameID, reason string, pos *PaperPosition, exitPrice i
 	l.writeLine(line)
 }
 
-// EmitGarbageTime prints a one-time notice when garbage time is detected.
-// game.go is responsible for calling this only once per detection event —
-// not on every subsequent possession in garbage time.
-//
-// Example:
+// EmitGarbageTime prints a notice when garbage time is detected.
 //
 //	2026-04-29T20:44:00Z  GARBAGE_TIME  score_diff=24  game=0042500121
 func (l *Logger) EmitGarbageTime(gameID string, resp *PossessionResponse) {
@@ -267,9 +237,7 @@ func (l *Logger) EmitGarbageTime(gameID string, resp *PossessionResponse) {
 		ts(), scoreDiff, gameID)
 }
 
-// EmitMarketSwap prints a notice when the engine switches to a new Kalshi market.
-//
-// Example:
+// EmitMarketSwap prints a notice when the engine switches Kalshi markets.
 //
 //	2026-04-29T20:15:30Z  [MARKET SWAP] KXNBASPREAD-26MAY06MINSAS -> KXNBASPREAD-26MAY06SASMIN (@ 55¢)
 func (l *Logger) EmitMarketSwap(gameID, oldTicker, newTicker string, bid int) {
@@ -277,10 +245,8 @@ func (l *Logger) EmitMarketSwap(gameID, oldTicker, newTicker string, bid int) {
 		ts(), oldTicker, newTicker, bid, gameID)
 }
 
-// EmitStale prints a warning when the Kalshi market feed has gone quiet.
-// The market snapshot has been zeroed out for this possession.
-//
-// Example:
+// EmitStale warns that the Kalshi feed has gone quiet and the market snapshot for
+// this possession was zeroed out.
 //
 //	2026-04-29T20:15:00Z  KALSHI_STALE  last_tick=35s ago  game=0042500121  market_features=zeroed
 func (l *Logger) EmitStale(gameID string, secsSince int) {
@@ -289,8 +255,6 @@ func (l *Logger) EmitStale(gameID string, secsSince int) {
 }
 
 // EmitGameSummary prints a boxed end-of-game summary and closes the log file.
-//
-// Example:
 //
 //	──────────────────────────────────────────────────────
 //	GAME SUMMARY  0042500121
@@ -333,11 +297,11 @@ func (l *Logger) EmitGameSummary(s GameSummary) {
 	}
 }
 
-// pushToStream is a no-op stub. Redis integration is deferred.
+// pushToStream is a stub. Redis integration is deferred.
 func (l *Logger) pushToStream(_ context.Context, _ string, _ *PossessionResponse) {}
 
-// formatClock converts the NBA CDN clock string "PT06M23.00S" to "06:23".
-// Falls back to a truncated raw string if parsing fails — never panics.
+// formatClock converts the CDN clock string "PT06M23.00S" to "06:23", falling back
+// to a truncated raw string when parsing fails.
 func formatClock(raw string) string {
 	var minutes int
 	var secondsFloat float64

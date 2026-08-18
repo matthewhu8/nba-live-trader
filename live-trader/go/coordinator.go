@@ -11,12 +11,14 @@ import (
 	"time"
 )
 
+// Coordinator polls the NBA scoreboard and runs one GameEngine per live game.
+// Every engine it spawns shares the same Run, ledger, kill switch and log writer.
 type Coordinator struct {
 	cfg        Config
 	ledger     *Ledger
 	killSwitch *KillSwitch
-	run        *Run        // shared across all engines spawned by this coordinator
-	jsonLog    *JSONLogger // shared writer; goroutine-safe
+	run        *Run
+	jsonLog    *JSONLogger // goroutine-safe
 	engines    map[string]context.CancelFunc
 	mu         sync.Mutex
 }
@@ -32,13 +34,13 @@ func NewCoordinator(cfg Config, ledger *Ledger, ks *KillSwitch, run *Run, jsonLo
 	}
 }
 
-// Run blocks until ctx is cancelled. Polls for active games and manages engine lifecycle.
+// Run blocks until ctx is cancelled, polling for active games and managing the
+// lifecycle of one engine per game.
 func (c *Coordinator) Run(ctx context.Context) error {
 	log.Println("[COORDINATOR] Started NBA scoreboard poller (30s interval)")
-	
-	// Initial poll
+
 	c.pollScoreboard(ctx)
-	
+
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
@@ -111,7 +113,7 @@ func (c *Coordinator) pollScoreboard(ctx context.Context) {
 	for _, g := range data.Scoreboard.Games {
 		_, exists := c.engines[g.GameID]
 
-		// Final game - shutdown engine if it exists
+		// Status 3 is final: shut the engine down.
 		if g.GameStatus == 3 {
 			if exists {
 				log.Printf("[COORDINATOR] Game %s reached FINAL. Terminating engine.", g.GameID)
@@ -121,12 +123,11 @@ func (c *Coordinator) pollScoreboard(ctx context.Context) {
 			continue
 		}
 
-		// Check if we should start it
+		// Status 2 is live. Status 1 is pre-game, which we start within 5 minutes of tip.
 		shouldStart := false
 		if g.GameStatus == 2 {
 			shouldStart = true
 		} else if g.GameStatus == 1 {
-			// Pre-game. Check if within 5 minutes of start time.
 			t, err := time.Parse(time.RFC3339, g.GameTimeUTC)
 			if err == nil {
 				timeUntilTip := t.Sub(now)
@@ -138,17 +139,19 @@ func (c *Coordinator) pollScoreboard(ctx context.Context) {
 
 		if shouldStart && !exists {
 			log.Printf("[COORDINATOR] Game %s (%s @ %s) is Live/Approaching! Spawning engine.", g.GameID, g.AwayTeam.TeamTricode, g.HomeTeam.TeamTricode)
-			
+
 			eventTicker := buildKalshiEventTicker(g.GameTimeUTC, g.AwayTeam.TeamTricode, g.HomeTeam.TeamTricode)
-			
+
 			engineCtx, cancel := context.WithCancel(ctx)
 			c.engines[g.GameID] = cancel
-			
+
 			go c.spawnEngine(engineCtx, g.GameID, eventTicker)
 		}
 	}
 }
 
+// buildKalshiEventTicker derives the Kalshi event ticker from tip-off time and
+// tricodes, e.g. KXNBASPREAD-26MAY06MINSAS. Kalshi dates these in Eastern time.
 func buildKalshiEventTicker(gameTimeUTC, away, home string) string {
 	loc, _ := time.LoadLocation("America/New_York")
 	t, err := time.Parse(time.RFC3339, gameTimeUTC)
@@ -156,7 +159,7 @@ func buildKalshiEventTicker(gameTimeUTC, away, home string) string {
 		t = time.Now()
 	}
 	tEST := t.In(loc)
-	dateStr := strings.ToUpper(tEST.Format("06Jan02")) // e.g. 26MAY06
+	dateStr := strings.ToUpper(tEST.Format("06Jan02"))
 	return fmt.Sprintf("KXNBASPREAD-%s%s%s", dateStr, away, home)
 }
 

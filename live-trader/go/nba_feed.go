@@ -1,11 +1,7 @@
-// NBAFeed polls the NBA Stats CDN for live play-by-play events.
-//
-// Endpoint: cdn.nba.com/static/json/liveData/playbyplay/playbyplay_{gameID}.json
-// Poll interval: 3s (CDN cache TTL during live games — polling faster is pointless)
-// Lag behind real events: ~15-20s (CDN delay, not network)
-//
-// Emits only NEW events (actionNumber > last seen) to avoid reprocessing.
-// Never panics — logs errors and skips the poll cycle on failure.
+// NBAFeed polls the NBA CDN for live play-by-play and emits only events newer than
+// the last one seen. The 3s interval matches the CDN cache TTL, so polling faster
+// buys nothing; events reach us roughly 15-20s after they happen. A failed poll is
+// logged and skipped, never fatal.
 package main
 
 import (
@@ -18,11 +14,10 @@ import (
 	"time"
 )
 
-// NBAEvent is one action from the NBA CDN play-by-play response.
-// Field names match the CDN JSON schema directly.
+// NBAEvent is one action from the CDN play-by-play. Field names match the CDN schema.
 type NBAEvent struct {
 	ActionNumber      int     `json:"actionNumber"`
-	ActionType        string  `json:"actionType"` // "2pt", "3pt", "rebound", "substitution", "foul", "timeout"
+	ActionType        string  `json:"actionType"` // "2pt", "3pt", "rebound", "substitution", …
 	Period            int     `json:"period"`
 	Clock             string  `json:"clock"` // "PT06M23.00S"
 	TeamID            int64   `json:"teamId"`
@@ -39,14 +34,12 @@ type NBAEvent struct {
 	IsBackfill        bool    `json:"-"`
 }
 
-// cdnResponse mirrors the top-level JSON structure from the NBA CDN.
 type cdnResponse struct {
 	Game struct {
 		Actions []NBAEvent `json:"actions"`
 	} `json:"game"`
 }
 
-// NBAFeed polls the CDN for a single game and emits new events.
 type NBAFeed struct {
 	gameID        string
 	lastActionNum int
@@ -95,7 +88,7 @@ func (f *NBAFeed) poll(ctx context.Context, out chan<- NBAEvent) {
 		log.Printf("[nba_feed] build request error game=%s: %v", f.gameID, err)
 		return
 	}
-	// Mimic a browser — CDN blocks obvious bot user-agents
+	// The CDN blocks obvious bot user-agents.
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Referer", "https://www.nba.com/")
@@ -109,7 +102,7 @@ func (f *NBAFeed) poll(ctx context.Context, out chan<- NBAEvent) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusTooManyRequests {
-		log.Printf("[nba_feed] RATE LIMITED (429) game=%s — backing off", f.gameID)
+		log.Printf("[nba_feed] RATE LIMITED (429) game=%s, backing off", f.gameID)
 		time.Sleep(10 * time.Second)
 		return
 	}
@@ -141,7 +134,7 @@ func (f *NBAFeed) poll(ctx context.Context, out chan<- NBAEvent) {
 		if event.ActionNumber <= f.lastActionNum {
 			continue
 		}
-		// Non-blocking send — drop if consumer is behind (shouldn't happen at 1 event/45s)
+		// Non-blocking send: drop if the consumer is behind.
 		select {
 		case out <- event:
 			newCount++
@@ -158,6 +151,8 @@ func (f *NBAFeed) poll(ctx context.Context, out chan<- NBAEvent) {
 	}
 }
 
+// emitStartupBackfill replays everything that happened before the process started,
+// flagged so downstream rebuilds its state without trading on the replay.
 func (f *NBAFeed) emitStartupBackfill(out chan<- NBAEvent, events []NBAEvent) {
 	replayed := 0
 	for _, event := range events {

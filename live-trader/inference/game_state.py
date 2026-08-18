@@ -1,18 +1,12 @@
 """
-GameState — per-game streaming state accumulator.
+GameState holds all per-game streaming state: rolling windows, run state, foul
+counts, lineup history and the possession state machine.
 
-All rolling windows, run state, foul counts, lineup history, and possession
-state machine variables live here.
-
-Two categories of state:
-  1. Possession SM state — mutated by PossessionBuilder.parse() as events arrive.
-     Tracks which team has the ball, pending missed shots, free throw sequences.
-  2. Feature state — updated by state.advance() AFTER features are extracted.
-     This preserves the shift(1) invariant: features for possession N reflect
-     state strictly before possession N.
-
-Prediction history (prediction_history) stores the last 20 full
-(features, mmoe_output, action) records for dashboard + Thompson Sampling reward.
+The state splits in two. PossessionBuilder.parse() mutates the possession machine
+as events arrive, tracking who has the ball, pending missed shots and free throw
+sequences. advance() updates the feature state only after features are extracted,
+which preserves the shift(1) invariant from training: features for possession N
+reflect state strictly before possession N.
 """
 
 import re
@@ -23,7 +17,7 @@ from typing import Any
 
 
 def _parse_clock(clock_str: str) -> float:
-    """Parse NBA CDN clock format 'PT06M23.00S' → seconds remaining."""
+    """Parse the CDN clock format 'PT06M23.00S' into seconds remaining."""
     m = re.match(r"PT(\d+)M([\d.]+)S", clock_str or "")
     if not m:
         return 0.0
@@ -32,7 +26,7 @@ def _parse_clock(clock_str: str) -> float:
 
 @dataclass
 class ScoredPossession:
-    """Compact record of a scoring possession — used for xPPP rolling window."""
+    """One scoring possession, kept for the rolling xPPP window."""
     team:         str
     points:       int
     shot_value:   int
@@ -44,10 +38,7 @@ class ScoredPossession:
 
 @dataclass
 class PredictionRecord:
-    """
-    Full record of one possession's model output.
-    maxlen=20 gives enough lookback for a future attention-based upgrade.
-    """
+    """One possession's model output, cached for the dashboard and future reward."""
     possession_id: int
     wall_clock_ts: datetime
     features:      dict[str, float]
@@ -65,30 +56,28 @@ class GameState:
     market_ticker: str = "Spread"
 
     # ── Game identity (loaded at start) ──────────────────────────────────────
-    home_team_id: int = 0   # NBA teamId integer — used to map CDN events to home/away
+    home_team_id: int = 0   # CDN teamId, used to map events to home or away
     away_team_id: int = 0
 
-    # ── Possession SM state (mutated by PossessionBuilder) ────────────────────
-    # These track real-time basketball possession boundaries.
-
-    possessing_team:  str = ""   # "home" | "away" — current ball holder
-    missed_shot_team: str = ""   # set after missed shot; cleared on rebound
-    missed_shot_dist: float = 0.0   # shot distance of the pending missed attempt
-    missed_shot_area: str = ""      # shot area of the pending missed attempt
-    missed_shot_val:  int = 0       # shot value (2 or 3) of the pending missed attempt
-    pending_home_score: int = 0  # last known score (updated with each scoring event)
+    # ── Possession state machine (mutated by PossessionBuilder) ───────────────
+    possessing_team:  str = ""      # "home" | "away", current ball holder
+    missed_shot_team: str = ""      # set on a missed shot, cleared on the rebound
+    missed_shot_dist: float = 0.0   # distance of the pending missed attempt
+    missed_shot_area: str = ""      # area of the pending missed attempt
+    missed_shot_val:  int = 0       # value (2 or 3) of the pending missed attempt
+    pending_home_score: int = 0     # last known score
     pending_away_score: int = 0
 
     # Free throw sequence accumulator
     ft_in_seq:    bool  = False
-    ft_total:     int   = 0     # total FTs in current sequence (e.g. 2)
-    ft_made:      int   = 0     # FTs made so far
+    ft_total:     int   = 0     # free throws in the current sequence
+    ft_made:      int   = 0     # made so far
     ft_player_id: int   = 0
     ft_clock_secs: float = 0.0
     ft_period:    int   = 1
     ft_team:      str   = ""    # "home" | "away"
 
-    # Per-possession event flags (read by PossessionBuilder, reset after each possession)
+    # Per-possession flags, reset after each possession row is built.
     poss_had_foul:           bool = False
     poss_had_shooting_foul:  bool = False
     poss_had_personal_foul:  bool = False
@@ -98,16 +87,13 @@ class GameState:
     recent_possessions:   deque = field(default_factory=lambda: deque(maxlen=20))
     home_scored_poss:     deque = field(default_factory=lambda: deque(maxlen=5))
     away_scored_poss:     deque = field(default_factory=lambda: deque(maxlen=5))
-    # Shot quality trend: xPPP mean of the window *before* the current 5-poss window.
-    # Updated when a new scored possession evicts the oldest from the deque.
+    # xPPP mean of the window before the current one, for the shot quality trend.
     home_prev_xppp: float = 0.0
     away_prev_xppp: float = 0.0
     possession_durations: deque = field(default_factory=lambda: deque(maxlen=10))
-    # Running accumulator for the EXPANDING within-game pace mean. The deque above
-    # only holds the last 10, but `pace_game_to_date` is the mean over every valid
-    # possession so far, matching momentum_features.py's expanding().mean(). Live
-    # previously substituted the pregame constant here, which made the column a
-    # different quantity in each path.
+    # Accumulator for the expanding within-game pace mean. The deque above holds only
+    # the last 10, but pace_game_to_date is the mean over every valid possession so
+    # far, matching expanding().mean() in momentum_features.py.
     pace_duration_sum:   float = 0.0
     pace_duration_count: int   = 0
 
@@ -121,7 +107,7 @@ class GameState:
     run_3pt_count:  int = 0
     run_paint_pts:  int = 0
 
-    # ── Foul tracking (full game — never truncated) ───────────────────────────
+    # ── Foul tracking, full game ─────────────────────────────────────────────
     player_fouls:    dict[int, int] = field(default_factory=dict)
     home_team_fouls: dict[int, int] = field(default_factory=lambda: {1: 0, 2: 0, 3: 0, 4: 0, 5: 0})
     away_team_fouls: dict[int, int] = field(default_factory=lambda: {1: 0, 2: 0, 3: 0, 4: 0, 5: 0})
@@ -140,7 +126,7 @@ class GameState:
     home_sub_count:   int = 0
     away_sub_count:   int = 0
 
-    # ── Pre-loaded at game start (static for entire game) ─────────────────────
+    # ── Loaded at game start, static for the whole game ───────────────────────
     lineup_ratings:      dict[str, float] = field(default_factory=dict)
     lineup_sample_sizes: dict[str, float] = field(default_factory=dict)
     player_apm:      dict[int, float] = field(default_factory=dict)
@@ -148,7 +134,7 @@ class GameState:
     pregame:         dict[str, float] = field(default_factory=dict)
     home_b2b:        bool  = False
     away_b2b:        bool  = False
-    pace_baseline:   float = 14.0   # season avg seconds/possession
+    pace_baseline:   float = 14.0   # season average seconds per possession
 
     # ── Internal ─────────────────────────────────────────────────────────────
     last_possession_clock_secs: float = 720.0
@@ -158,10 +144,7 @@ class GameState:
     # ── Public API ───────────────────────────────────────────────────────────
 
     def update_from_event(self, raw_event: dict) -> None:
-        """
-        Handle side-effect events that don't complete a possession.
-        Called by main.py when PossessionBuilder.parse() returns None.
-        """
+        """Handle events that don't complete a possession: subs, fouls, timeouts."""
         action_type = raw_event.get("actionType", "")
         new_period  = raw_event.get("period", self.current_period)
 
@@ -172,30 +155,23 @@ class GameState:
         elif action_type == "timeout":
             self._handle_timeout(raw_event)
 
-        # Period change: any event with a new period triggers a reset
         if new_period != self.current_period:
             self._handle_period_change(new_period)
 
     def advance(self, possession: Any) -> None:
-        """
-        Update all rolling feature state AFTER features are extracted.
-        Preserves the shift(1) invariant from training.
-        """
+        """Update rolling feature state after features are extracted, preserving shift(1)."""
         self._update_run_state(possession)
         self._update_points_buffers(possession)
         self._update_pace(possession)
         self.recent_possessions.append(possession)
         self.possession_count += 1
 
-        # Reset "just changed" flags: next possession starts fresh
         self.prev_home_lineup = list(self.home_lineup)
         self.prev_away_lineup = list(self.away_lineup)
 
-        # Reset per-possession sub counters. Training data semantics: count of
-        # substitutions IN this possession (typically 0–3), not a game-cumulative
-        # counter. The 2026-05-12 live-vs-offline diff revealed that letting
-        # these accumulate produced +73σ outlier feature values, collapsing
-        # Head A's gating network and pinning run_prob near zero.
+        # Sub counts are per-possession in training, not game-cumulative. Letting
+        # them accumulate produces extreme outlier values that collapse Head A's
+        # gating network.
         self.home_sub_count = 0
         self.away_sub_count = 0
 
@@ -226,7 +202,7 @@ class GameState:
         team_side = self._team_side(team_id)
         lineup = self.home_lineup if team_side == "home" else self.away_lineup
 
-        # Save prev lineup before modifying (for home_lineup_just_changed feature)
+        # Snapshot the lineup before editing it, for the just_changed features.
         if team_side == "home":
             self.prev_home_lineup = list(self.home_lineup)
             self.home_sub_count  += 1
@@ -234,19 +210,17 @@ class GameState:
             self.prev_away_lineup = list(self.away_lineup)
             self.away_sub_count  += 1
 
-        # CDN sends two events per substitution: subType "out" then "in"
+        # The CDN sends two events per substitution: subType "out", then "in".
         if sub_type == "out":
             if player_id not in lineup:
-                # Player wasn't tracked — they must be a starter who never
-                # appeared in a prior sub event. Add them so the lineup
-                # reflects who was actually on court before this sub.
+                # An untracked player leaving must be a starter we never saw sub in.
                 lineup.append(player_id)
             lineup.remove(player_id)
         elif sub_type == "in":
             if player_id not in lineup:
                 lineup.append(player_id)
         else:
-            # Fallback: single-event substitution (personId = player out)
+            # Single-event substitution, where personId is the player leaving.
             if player_id in lineup:
                 lineup.remove(player_id)
 
@@ -268,8 +242,8 @@ class GameState:
             self.away_team_fouls[period] = self.away_team_fouls.get(period, 0) + 1
 
         self.poss_had_foul = True
-        # CDN sends sub_type="personal" for all non-technical fouls; shooting
-        # fouls are only distinguishable via the description field ("S.FOUL").
+        # The CDN marks every non-technical foul "personal", so shooting fouls are
+        # only visible in the description.
         desc = (event.get("description") or "").upper()
         if "shooting" in sub_type or "S.FOUL" in desc:
             self.poss_had_shooting_foul = True
@@ -295,15 +269,12 @@ class GameState:
 
     def _handle_period_change(self, new_period: int) -> None:
         self.current_period = new_period
-        # Reset quarter foul counts for new period (OT periods get their own entry)
+        # Each period, overtime included, gets its own foul count.
         self.home_team_fouls[new_period] = 0
         self.away_team_fouls[new_period] = 0
 
     def _update_run_state(self, possession: Any) -> None:
-        """
-        Mirror the sequential run state machine from momentum_features.py.
-        Only scoring possessions change run state — stops/turnovers are ignored.
-        """
+        """Mirror momentum_features.py: only scoring possessions change run state."""
         pts = possession.points
         if pts <= 0:
             return
@@ -339,7 +310,7 @@ class GameState:
             xppp          = possession.xppp,
         )
         if possession.team_scored == "home":
-            # Capture current window mean before it rolls over
+            # Capture the window mean before the append rolls it over.
             if len(self.home_scored_poss) == self.home_scored_poss.maxlen:
                 self.home_prev_xppp = sum(p.xppp for p in self.home_scored_poss) / len(self.home_scored_poss)
             self.home_scored_poss.append(sp)
@@ -349,10 +320,7 @@ class GameState:
             self.away_scored_poss.append(sp)
 
     def _update_pace(self, possession: Any) -> None:
-        """
-        Compute seconds elapsed since previous possession (same quarter only).
-        Matches the pace computation in momentum_features.py.
-        """
+        """Seconds since the previous possession in the same quarter, as in momentum_features.py."""
         if possession.period == self.last_possession_period:
             gap = self.last_possession_clock_secs - possession.game_clock_secs
             if 0 < gap < 60:

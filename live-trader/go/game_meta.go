@@ -8,8 +8,8 @@ import (
 	"time"
 )
 
-// fetchTeamIDs fetches home and away team integer IDs from the NBA CDN boxscore.
-// Retries up to 3× with 2s delay on failure.
+// fetchTeamIDs reads the home and away team IDs from the CDN boxscore, retrying
+// three times.
 func fetchTeamIDs(ctx context.Context, gameID string) (homeID, awayID int64, err error) {
 	url := fmt.Sprintf("https://cdn.nba.com/static/json/liveData/boxscore/boxscore_%s.json", gameID)
 	client := &http.Client{Timeout: 10 * time.Second}
@@ -30,8 +30,7 @@ func fetchTeamIDs(ctx context.Context, gameID string) (homeID, awayID int64, err
 	return
 }
 
-// doFetchTeamIDs performs a single fetch attempt.
-// JSON path: .game.homeTeam.teamId and .game.awayTeam.teamId
+// doFetchTeamIDs performs one attempt, reading .game.{homeTeam,awayTeam}.teamId.
 func doFetchTeamIDs(ctx context.Context, client *http.Client, url string) (homeID, awayID int64, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {

@@ -28,24 +28,24 @@ func TestCheck(t *testing.T) {
 		wantKillSet bool
 	}{
 		{
-			name:      "kill_switch_already_set",
-			setup:     func(_ *Ledger, ks *KillSwitch) { ks.Set() },
-			action:    "BUY_YES", gameID: "g1", yesBid: 50, contracts: 10,
+			name:   "kill_switch_already_set",
+			setup:  func(_ *Ledger, ks *KillSwitch) { ks.Set() },
+			action: "BUY_YES", gameID: "g1", yesBid: 50, contracts: 10,
 			wantOK: false,
 		},
 		{
-			name:      "wait_action_always_approved",
-			action:    "WAIT", gameID: "g1", yesBid: 50, contracts: 0,
+			name:   "wait_action_always_approved",
+			action: "WAIT", gameID: "g1", yesBid: 50, contracts: 0,
 			wantOK: true,
 		},
 		{
-			name:      "exit_action_always_approved",
-			action:    "EXIT", gameID: "g1", yesBid: 50, contracts: 0,
+			name:   "exit_action_always_approved",
+			action: "EXIT", gameID: "g1", yesBid: 50, contracts: 0,
 			wantOK: true,
 		},
 		{
-			name:      "order_size_cap_exceeded",
-			action:    "BUY_YES", gameID: "g1", yesBid: 50, contracts: 101,
+			name:   "order_size_cap_exceeded",
+			action: "BUY_YES", gameID: "g1", yesBid: 50, contracts: 101,
 			wantOK: false,
 		},
 		{
@@ -54,7 +54,7 @@ func TestCheck(t *testing.T) {
 				// Put daily P&L just past the limit so Check() sees the breach.
 				l.dailyPnL = -(defaultRiskCfg().MaxDailyLossCents + 1)
 			},
-			action:      "BUY_YES", gameID: "g1", yesBid: 50, contracts: 10,
+			action: "BUY_YES", gameID: "g1", yesBid: 50, contracts: 10,
 			wantOK:      false,
 			wantKillSet: true,
 		},
@@ -66,7 +66,7 @@ func TestCheck(t *testing.T) {
 				l.perGameExposure["g1"] = 1950
 				l.totalExposure = 1950
 			},
-			action:    "BUY_YES", gameID: "g1", yesBid: 50, contracts: 10,
+			action: "BUY_YES", gameID: "g1", yesBid: 50, contracts: 10,
 			wantOK: false,
 		},
 		{
@@ -76,12 +76,12 @@ func TestCheck(t *testing.T) {
 				l.totalExposure = 4800
 				l.perGameExposure["g2"] = 4800
 			},
-			action:    "BUY_YES", gameID: "g1", yesBid: 50, contracts: 10,
+			action: "BUY_YES", gameID: "g1", yesBid: 50, contracts: 10,
 			wantOK: false,
 		},
 		{
-			name:      "happy_path_nothing_at_limits",
-			action:    "BUY_YES", gameID: "g1", yesBid: 50, contracts: 10,
+			name:   "happy_path_nothing_at_limits",
+			action: "BUY_YES", gameID: "g1", yesBid: 50, contracts: 10,
 			wantOK: true,
 		},
 	}
@@ -118,8 +118,8 @@ func TestRecordFill(t *testing.T) {
 
 	t.Run("two_games_tracked_independently", func(t *testing.T) {
 		l, _ := newTestLedger(defaultRiskCfg())
-		l.RecordFill("g1", 10, 50)  // 500 cents
-		l.RecordFill("g2", 20, 40)  // 800 cents
+		l.RecordFill("g1", 10, 50) // 500 cents
+		l.RecordFill("g2", 20, 40) // 800 cents
 
 		if l.totalExposure != 1300 {
 			t.Errorf("totalExposure=%d, want 1300", l.totalExposure)
@@ -136,7 +136,7 @@ func TestRecordFill(t *testing.T) {
 func TestRecordExit(t *testing.T) {
 	t.Run("decrements_exposure_and_updates_pnl", func(t *testing.T) {
 		l, _ := newTestLedger(defaultRiskCfg())
-		l.RecordFill("g1", 100, 50)   // buy 100 @ 50¢ → exposure=5000
+		l.RecordFill("g1", 100, 50)     // buy 100 @ 50¢ → exposure=5000
 		l.RecordExit("g1", 100, 50, 52) // exit @ 52¢ → pnl=+200
 
 		if l.totalExposure != 0 {

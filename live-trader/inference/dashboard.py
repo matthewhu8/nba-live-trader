@@ -1,10 +1,10 @@
 """
-Live dashboard + SSE stream + CSV export for the paper trading system.
+Live dashboard, SSE stream and CSV export.
 
 Endpoints:
-    GET  /dashboard                → HTML dashboard page
-    GET  /game/{game_id}/stream    → Server-Sent Events stream of predictions
-    GET  /game/{game_id}/export    → CSV download of all possession predictions
+    GET  /dashboard              the dashboard page
+    GET  /game/{game_id}/stream  server-sent stream of predictions
+    GET  /game/{game_id}/export  CSV of all possession predictions
 """
 
 import csv
@@ -28,14 +28,11 @@ class TradeUpdate(BaseModel):
     size: int
     pnl: float = 0.0
     reason: str = ""
-    # market_ticker is the Kalshi market subscribed at order time. Carried so
-    # the dashboard can render the team actually backed ("BUY SAS") instead of
-    # generic "BUY YES", and so a scanner swap arriving between order and
-    # broadcast can't relabel an already-placed trade. Empty when Go didn't
-    # send it (no event ticker / older Go binary).
+    # The market subscribed at order time, so the dashboard can name the team backed
+    # rather than showing "BUY YES". Empty when Go had no event ticker.
     market_ticker: str = ""
 
-# SSE subscribers: game_id → list of asyncio.Queue
+# SSE subscribers, keyed by game_id.
 _subscribers: dict[str, list[asyncio.Queue]] = {}
 
 
@@ -99,13 +96,10 @@ async def game_export(game_id: str):
             "yes_ask": record.yes_ask,
             "action": record.action,
         }
-        # Add trajectory columns
         for i, v in enumerate(record.trajectory):
             row[f"traj_{i}"] = v
-        # Add hazard columns
         for i, v in enumerate(record.hazard):
             row[f"hazard_{i}"] = v
-        # Add all features
         row.update(record.features)
 
         if writer is None:
@@ -145,7 +139,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>NBA Paper Trader — Live</title>
+<title>NBA Paper Trader</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
 *{margin:0;padding:0;box-sizing:border-box}
@@ -378,7 +372,7 @@ function go(){
   const id=document.getElementById('gid').value.trim();
   if(!id)return;
 
-  // Reset team labels — they'll auto-populate from the first market_ticker
+  // Reset team labels; they repopulate from the first market_ticker.
   // SSE message via teamsFromMarketTicker. No more hardcoded game-ID maps.
   homeTeam = 'HOME'; awayTeam = 'AWAY';
   yesTeam = ''; noTeam = '';
@@ -394,7 +388,7 @@ function go(){
   openPos = null; entryPossId = 0; currentPossId = 0;
   document.getElementById('posPanel').style.display = 'none';
   es=new EventSource('/game/'+id+'/stream');
-  es.onopen=()=>{document.getElementById('dot').className='dot on';document.getElementById('glab').textContent='Live — '+id};
+  es.onopen=()=>{document.getElementById('dot').className='dot on';document.getElementById('glab').textContent='Live: '+id};
   es.onmessage=(e)=>upd(JSON.parse(e.data));
   es.onerror=()=>{document.getElementById('dot').className='dot'};
 }
@@ -525,7 +519,7 @@ function upd(d){
     rtE.innerHTML='<span style="color:'+clr+'">'+who+' on a '+rpts+'-pt run ('+rl+' poss)</span>';
   } else { rtE.textContent='No active run'; }
 
-  // Price direction (Head B) — uses YES team, not home team. The home team
+  // Price direction (Head B) uses the YES team, not the home team. The home team
   // isn't necessarily the YES side (e.g., SAS @ MIN where the active market
   // is SAS+5, YES=SAS=away team). Falls back to "YES side" if we haven't
   // parsed a ticker yet.
@@ -535,7 +529,7 @@ function upd(d){
     const yLabel = yesTeam || 'YES side';
     if(Math.abs(last)<0.01){
       pA.textContent='→'; pA.style.color='#9ca3af';
-      pL.textContent='Flat — no expected move'; pL.style.color='#9ca3af';
+      pL.textContent='Flat, no expected move'; pL.style.color='#9ca3af';
     } else if(last>0){
       pA.textContent='↑'; pA.style.color='#22c55e';
       pL.textContent=`${yLabel} price expected to RISE`; pL.style.color='#22c55e';
@@ -546,7 +540,7 @@ function upd(d){
     pD.textContent='30s: '+(mid>0?'+':'')+mid.toFixed(3)+' · 2min: '+(last>0?'+':'')+last.toFixed(3);
   }
 
-  // Momentum (Head C) — lower hazard = stronger momentum
+  // Momentum (Head C): lower hazard means stronger momentum.
   const mm=document.getElementById('momM'), ml=document.getElementById('momL');
   mm.innerHTML='';
   let avgHaz=0;

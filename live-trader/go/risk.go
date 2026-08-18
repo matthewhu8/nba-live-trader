@@ -1,12 +1,6 @@
-// RiskLedger is shared across all GameEngines via pointer.
-// Every order must pass Check() before reaching the OrderRouter.
-// All operations are mutex-protected — safe for concurrent game goroutines.
-//
-// Hard limits (loaded from config/trading.yaml):
-//   max_total_exposure_cents    — max open exposure across all games combined
-//   max_per_game_exposure_cents — max open exposure for a single game
-//   max_daily_loss_cents        — stop trading for the day if exceeded
-//   max_contracts_per_order     — single order size cap
+// Ledger is shared by pointer across every GameEngine, so its limits are global
+// rather than per-game. All operations are mutex-protected. Every order must pass
+// Check before it reaches the Router.
 package main
 
 import (
@@ -25,9 +19,9 @@ type RiskConfig struct {
 type Ledger struct {
 	mu              sync.Mutex
 	cfg             RiskConfig
-	totalExposure   int            // cents, current open across all games
-	perGameExposure map[string]int // game_id → open exposure in cents
-	dailyPnL        int            // cents, negative = loss
+	totalExposure   int            // cents open across all games
+	perGameExposure map[string]int // game_id to open exposure in cents
+	dailyPnL        int            // cents; negative is a loss
 	killSwitch      *KillSwitch
 }
 
@@ -39,10 +33,9 @@ func NewLedger(cfg RiskConfig, ks *KillSwitch) *Ledger {
 	}
 }
 
-// Check returns (approved, reason). Reason is non-empty only when rejected.
-// Must be called synchronously before every order.
-// contracts is the intended order size; yesBid is used as a conservative
-// price estimate for both YES and NO orders (NO entry price ≤ yesBid).
+// Check returns (approved, reason) and must be called synchronously before every
+// order. yesBid is a conservative price estimate for both sides, since a NO entry
+// costs at most the yes bid.
 func (l *Ledger) Check(action, gameID string, yesBid, contracts int) (bool, string) {
 	if l.killSwitch.IsSet() {
 		return false, "kill switch active"
@@ -55,19 +48,16 @@ func (l *Ledger) Check(action, gameID string, yesBid, contracts int) (bool, stri
 		return true, ""
 	}
 
-	// Single-order size cap.
 	if contracts > l.cfg.MaxContractsPerOrder {
 		return false, fmt.Sprintf("order size %d exceeds max %d contracts", contracts, l.cfg.MaxContractsPerOrder)
 	}
 
-	// Daily loss halt — trip kill switch so all engines stop immediately.
+	// Trip the kill switch on a daily loss breach so every engine stops at once.
 	if l.dailyPnL < -l.cfg.MaxDailyLossCents {
 		l.killSwitch.Set()
-		return false, fmt.Sprintf("daily loss limit: pnl=%dc limit=%dc — kill switch activated", l.dailyPnL, l.cfg.MaxDailyLossCents)
+		return false, fmt.Sprintf("daily loss limit: pnl=%dc limit=%dc, kill switch activated", l.dailyPnL, l.cfg.MaxDailyLossCents)
 	}
 
-	// Exposure estimate: contracts × entry price in cents.
-	// yesBid is a conservative upper bound (NO orders cost 100 - ask ≤ bid).
 	newExposure := contracts * yesBid
 
 	if l.perGameExposure[gameID]+newExposure > l.cfg.MaxPerGameExposureCents {
@@ -83,7 +73,7 @@ func (l *Ledger) Check(action, gameID string, yesBid, contracts int) (bool, stri
 	return true, ""
 }
 
-// RecordFill updates open exposure after a confirmed paper fill.
+// RecordFill updates open exposure after a confirmed fill.
 func (l *Ledger) RecordFill(gameID string, contracts, entryPrice int) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -92,8 +82,8 @@ func (l *Ledger) RecordFill(gameID string, contracts, entryPrice int) {
 	l.perGameExposure[gameID] += exposure
 }
 
-// RecordExit reduces open exposure and updates daily P&L on position close.
-// Trips the kill switch if the daily loss limit is breached post-exit.
+// RecordExit reduces open exposure and updates daily P&L when a position closes,
+// tripping the kill switch if that puts us past the daily loss limit.
 func (l *Ledger) RecordExit(gameID string, contracts, entryPrice, exitPrice int) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -106,7 +96,7 @@ func (l *Ledger) RecordExit(gameID string, contracts, entryPrice, exitPrice int)
 	if l.perGameExposure[gameID] < 0 {
 		l.perGameExposure[gameID] = 0
 	}
-	// Gross P&L in cents (fee deduction is logged separately by OrderRouter).
+	// Gross of fees. The Router accounts for those separately.
 	l.dailyPnL += (exitPrice - entryPrice) * contracts
 	if l.dailyPnL < -l.cfg.MaxDailyLossCents {
 		l.killSwitch.Set()
@@ -119,13 +109,12 @@ func (l *Ledger) Summary() string {
 	return fmt.Sprintf("exposure=%dc dailyPnL=%dc", l.totalExposure, l.dailyPnL)
 }
 
-// KillSwitch is an atomic bool shared by every goroutine.
-// When set, all GameEngines exit within one loop iteration and no new orders are placed.
-// Triggered by: daily loss breach, manual signal, or config flag at startup.
+// KillSwitch is an atomic bool shared by every goroutine. Once set, each GameEngine
+// exits within one loop iteration and no further orders are placed.
 type KillSwitch struct {
 	val atomic.Bool
 }
 
-func NewKillSwitch() *KillSwitch { return &KillSwitch{} }
-func (ks *KillSwitch) Set()      { ks.val.Store(true) }
+func NewKillSwitch() *KillSwitch   { return &KillSwitch{} }
+func (ks *KillSwitch) Set()        { ks.val.Store(true) }
 func (ks *KillSwitch) IsSet() bool { return ks.val.Load() }
